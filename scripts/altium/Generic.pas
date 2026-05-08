@@ -429,7 +429,7 @@ Begin
             Inc(TotalMatched);
             Dec(MaxIter);
         End;
-        SchServer.ProcessControl.PostProcess(SchDoc, '');
+        SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
         Exit;
     End;
 
@@ -479,7 +479,7 @@ Begin
     SchDoc.SchIterator_Destroy(Iterator);
 
     If Mode = 'modify' Then
-        SchServer.ProcessControl.PostProcess(SchDoc, '');
+        SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
 End;
 
 {..............................................................................}
@@ -879,7 +879,7 @@ Begin
         SchServer.ProcessControl.PreProcess(SchDoc, '');
         SchDoc.RegisterSchObjectInContainer(NewObj);
         SchRegisterObject(SchDoc, NewObj);
-        SchServer.ProcessControl.PostProcess(SchDoc, '');
+        SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
         SchDoc.GraphicallyInvalidate;
     End;
 
@@ -1380,7 +1380,7 @@ Begin
                 SchDoc.SchIterator_Destroy(SchIter);
             End;
         Finally
-            SchServer.ProcessControl.PostProcess(SchDoc, '');
+            SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
         End;
         Try SchDoc.GraphicallyInvalidate; Except End;
 
@@ -1469,7 +1469,7 @@ Begin
                 SchDoc.SchIterator_Destroy(SchIter);
             End;
         Finally
-            SchServer.ProcessControl.PostProcess(SchDoc, '');
+            SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
         End;
         Try SchDoc.GraphicallyInvalidate; Except End;
         Result := BuildSuccessResponse(RequestId,
@@ -1936,7 +1936,7 @@ Begin
     SchServer.ProcessControl.PreProcess(SchDoc, '');
     SchDoc.RegisterSchObjectInContainer(Wire);
     SchRegisterObject(SchDoc, Wire);
-    SchServer.ProcessControl.PostProcess(SchDoc, '');
+    SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
     SchDoc.GraphicallyInvalidate;
 
     Result := BuildSuccessResponse(RequestId,
@@ -1982,7 +1982,7 @@ Begin
     SchServer.ProcessControl.PreProcess(SchDoc, '');
     SchDoc.RegisterSchObjectInContainer(Bus);
     SchRegisterObject(SchDoc, Bus);
-    SchServer.ProcessControl.PostProcess(SchDoc, '');
+    SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
     SchDoc.GraphicallyInvalidate;
 
     Result := BuildSuccessResponse(RequestId,
@@ -2040,7 +2040,7 @@ Begin
     SchServer.ProcessControl.PreProcess(SchDoc, '');
     SchDoc.RegisterSchObjectInContainer(Rect);
     SchRegisterObject(SchDoc, Rect);
-    SchServer.ProcessControl.PostProcess(SchDoc, '');
+    SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
     SchDoc.GraphicallyInvalidate;
 
     Result := BuildSuccessResponse(RequestId,
@@ -2091,7 +2091,7 @@ Begin
     SchServer.ProcessControl.PreProcess(SchDoc, '');
     SchDoc.RegisterSchObjectInContainer(Line);
     SchRegisterObject(SchDoc, Line);
-    SchServer.ProcessControl.PostProcess(SchDoc, '');
+    SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
     SchDoc.GraphicallyInvalidate;
 
     Result := BuildSuccessResponse(RequestId,
@@ -2141,7 +2141,7 @@ Begin
     SchServer.ProcessControl.PreProcess(SchDoc, '');
     SchDoc.RegisterSchObjectInContainer(Note);
     SchRegisterObject(SchDoc, Note);
-    SchServer.ProcessControl.PostProcess(SchDoc, '');
+    SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
     SchDoc.GraphicallyInvalidate;
 
     Result := BuildSuccessResponse(RequestId,
@@ -2204,7 +2204,7 @@ Begin
     SchServer.ProcessControl.PreProcess(SchDoc, '');
     SchDoc.RegisterSchObjectInContainer(Sym);
     SchRegisterObject(SchDoc, Sym);
-    SchServer.ProcessControl.PostProcess(SchDoc, '');
+    SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
     SchDoc.GraphicallyInvalidate;
 
     Result := BuildSuccessResponse(RequestId,
@@ -2305,7 +2305,7 @@ Begin
     SchServer.ProcessControl.PreProcess(SchDoc, '');
     Sym.AddSchObject(Entry);
     SchRegisterObject(Sym, Entry);
-    SchServer.ProcessControl.PostProcess(SchDoc, '');
+    SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
     SchDoc.GraphicallyInvalidate;
 
     Result := BuildSuccessResponse(RequestId,
@@ -2352,7 +2352,7 @@ Begin
     SchServer.ProcessControl.PreProcess(SchDoc, '');
     SchDoc.RegisterSchObjectInContainer(Entry);
     SchRegisterObject(SchDoc, Entry);
-    SchServer.ProcessControl.PostProcess(SchDoc, '');
+    SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
     SchDoc.GraphicallyInvalidate;
 
     Result := BuildSuccessResponse(RequestId,
@@ -2399,7 +2399,7 @@ Begin
 
         If StyleStr = '' Then
         Begin
-            SchServer.ProcessControl.PostProcess(SchDoc, '');
+            SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
             SchDoc.GraphicallyInvalidate;
             Result := BuildSuccessResponse(RequestId,
                 '{"success":true,"orientation":"' + EscapeJsonString(OrientStr) + '"}');
@@ -2427,13 +2427,13 @@ Begin
         End
         Else
         Begin
-            SchServer.ProcessControl.PostProcess(SchDoc, '');
+            SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
             Result := BuildErrorResponse(RequestId, 'INVALID_STYLE',
                 'Unknown sheet style: ' + StyleStr);
             Exit;
         End;
     Finally
-        SchServer.ProcessControl.PostProcess(SchDoc, '');
+        SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
     End;
     SchDoc.GraphicallyInvalidate;
 
@@ -2449,19 +2449,94 @@ End;
 {         footprint (optional override)                                        }
 {..............................................................................}
 
+{ Validate lib_path + lib_reference resolve via CreateLibCompInfoReader     }
+{ BEFORE calling PlaceSchComponent. PlaceSchComponent pops a modal Error    }
+{ dialog when its lookup fails — Altium shows the popup at the COM layer    }
+{ before our Try/Except can swallow it, which freezes the polling loop.    }
+{ Pre-validating off-disk avoids that path entirely.                         }
+{ Returns ''  if found, otherwise a comma-separated sample of names that    }
+{ ARE in the lib so the caller can see what's available.                    }
+Function ResolveLibRef(LibPath, LibRef : String; Var Available : String) : Boolean;
+Var
+    Reader : ILibCompInfoReader;
+    Info : IComponentInfo;
+    Count, I, Shown : Integer;
+Begin
+    Result := False;
+    Available := '';
+    If LibPath = '' Then Exit;
+    Try
+        Reader := SchServer.CreateLibCompInfoReader(LibPath);
+    Except
+        Reader := Nil;
+    End;
+    If Reader = Nil Then Exit;
+    Try Reader.ReadAllComponentInfo; Except End;
+
+    Try Count := Reader.NumComponentInfos; Except Count := 0; End;
+    Shown := 0;
+    For I := 0 To Count - 1 Do
+    Begin
+        Info := Reader.ComponentInfos[I];
+        If Info = Nil Then Continue;
+        If Info.CompName = LibRef Then
+        Begin
+            Result := True;
+            Exit;
+        End;
+        If Shown < 5 Then
+        Begin
+            If Available <> '' Then Available := Available + '; ';
+            Available := Available + Info.CompName;
+            Inc(Shown);
+        End;
+    End;
+End;
+
+{ Find the placed ISch_Component on SchDoc that matches the given lib_ref.   }
+{ Used after PlaceSchComponent because the SDK signature returns only an     }
+{ integer TSchObjectHandle via a Var parameter, not the component object.    }
+{ Returns the most recently placed component matching the lib_ref so a      }
+{ caller can position / rename / customise it.                                }
+Function FindPlacedComponentByLibRef(SchDoc : ISch_Document; LibRef : String) : ISch_Component;
+Var
+    Iter : ISch_Iterator;
+    Obj : ISch_GraphicalObject;
+    Best : ISch_Component;
+Begin
+    Best := Nil;
+    Iter := SchDoc.SchIterator_Create;
+    Try
+        Iter.AddFilter_ObjectSet(MkSet(eSchComponent));
+        Obj := Iter.FirstSchObject;
+        While Obj <> Nil Do
+        Begin
+            If Obj.LibReference = LibRef Then Best := Obj;  { keep last match }
+            Obj := Iter.NextSchObject;
+        End;
+    Finally
+        SchDoc.SchIterator_Destroy(Iter);
+    End;
+    Result := Best;
+End;
+
 Function Gen_PlaceSchComponentFromLibrary(Params : String; RequestId : String) : String;
 Var
-    LibPath, LibRef, DesigStr, FootprintStr : String;
+    LibPath, LibRef, DesigStr, FootprintStr, AvailHint, SheetPath : String;
     X, Y, Rotation : Integer;
     SchDoc : ISch_Document;
     Comp : ISch_Component;
     CompLoc : TLocation;
     RotCount, I : Integer;
+    SchObjectHandle : Integer;
+    PlaceOk : Boolean;
+    SrvDoc : IServerDocument;
 Begin
     LibPath := ExtractJsonValue(Params, 'library_path');
     LibRef := ExtractJsonValue(Params, 'lib_reference');
     DesigStr := ExtractJsonValue(Params, 'designator');
     FootprintStr := ExtractJsonValue(Params, 'footprint');
+    SheetPath := ExtractJsonValue(Params, 'sheet_path');
     X := StrToIntDef(ExtractJsonValue(Params, 'x'), 0);
     Y := StrToIntDef(ExtractJsonValue(Params, 'y'), 0);
     Rotation := StrToIntDef(ExtractJsonValue(Params, 'rotation'), 0);
@@ -2472,32 +2547,94 @@ Begin
         Exit;
     End;
 
-    SchDoc := SchServer.GetCurrentSchDocument;
-    If SchDoc = Nil Then
+    { Resolve target sheet. If sheet_path is given, use GetSchDocumentByPath  }
+    { which is focus-independent — Client.ShowDocument is unreliable for     }
+    { switching focus, so the previously-relied-on GetCurrentSchDocument     }
+    { could return a different doc (or a SchLib) than the caller expected.   }
+    SchDoc := Nil;
+    If SheetPath <> '' Then
     Begin
-        Result := BuildErrorResponse(RequestId, 'NO_SCHEMATIC', 'No schematic document is active');
+        Try SchDoc := SchServer.GetSchDocumentByPath(SheetPath); Except End;
+        If SchDoc = Nil Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'SHEET_NOT_LOADED',
+                'No SchDoc loaded at ' + SheetPath + '. Open it first.');
+            Exit;
+        End;
+    End
+    Else
+    Begin
+        SchDoc := SchServer.GetCurrentSchDocument;
+        If SchDoc = Nil Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'NO_SCHEMATIC',
+                'No schematic document is active');
+            Exit;
+        End;
+    End;
+
+    { Reject SchLib (or anything else) — placing on a SchLib creates a new    }
+    { symbol in the lib, not an instance on a sheet. The only valid target   }
+    { for PlaceSchComponent is an eSheet (a schematic .SchDoc).               }
+    If SchDoc.ObjectId <> eSheet Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'WRONG_DOC_KIND',
+            'Target document is not a schematic sheet (ObjectId=' +
+            IntToStr(SchDoc.ObjectId) + '). Pass sheet_path to a .SchDoc.');
         Exit;
     End;
 
-    { PlaceSchComponent loads the library (or uses an already-open one) and       }
-    { registers the new component with the sheet. If lookup fails Comp is Nil.   }
-    SchServer.ProcessControl.PreProcess(SchDoc, '');
-    Try
-        Comp := SchDoc.PlaceSchComponent(LibPath, LibRef);
-    Except
-        Comp := Nil;
+    { Pre-validate when a lib_path was supplied. Skips the dialog-popping path }
+    { in PlaceSchComponent. When LibPath is empty, Altium searches its open   }
+    { libs / integrated libs as before.                                        }
+    If LibPath <> '' Then
+    Begin
+        If Not ResolveLibRef(LibPath, LibRef, AvailHint) Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'PLACE_FAILED',
+                'lib_reference "' + LibRef + '" not found in ' + LibPath +
+                '. Sample of available names: ' + AvailHint);
+            Exit;
+        End;
     End;
+
+    { PlaceSchComponent is a PROCEDURE with three args:                         }
+    {   Procedure PlaceSchComponent(ALibPath, ALibRef : WideString;             }
+    {                               Var SchObject : TSchObjectHandle);          }
+    { Calling it as a function (Comp := SchDoc.PlaceSchComponent(...)) is a     }
+    { signature mismatch — Altium pops an empty modal Error dialog at the COM  }
+    { layer that freezes the polling loop. The 3-arg call returns the new      }
+    { component's handle in SchObjectHandle; we then walk the doc to grab the  }
+    { actual ISch_Component (the SDK has no GetByHandle helper exposed).       }
+    SchServer.ProcessControl.PreProcess(SchDoc, '');
+    SchObjectHandle := 0;
+    PlaceOk := True;
+    Try
+        SchDoc.PlaceSchComponent(LibPath, LibRef, SchObjectHandle);
+    Except
+        PlaceOk := False;
+    End;
+
+    Comp := Nil;
+    If PlaceOk Then
+        Comp := FindPlacedComponentByLibRef(SchDoc, LibRef);
 
     If Comp = Nil Then
     Begin
-        SchServer.ProcessControl.PostProcess(SchDoc, '');
+        SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
         Result := BuildErrorResponse(RequestId, 'PLACE_FAILED',
-            'PlaceSchComponent returned nil — check library_path and lib_reference');
+            'PlaceSchComponent did not register a component for ' + LibRef +
+            ' from ' + LibPath);
         Exit;
     End;
 
-    { Position the newly placed component. }
-    CompLoc := Point(MilsToCoord(X), MilsToCoord(Y));
+    { Position the newly placed component. Use the documented TLocation       }
+    { read-modify-write pattern: Point(...) returns a 16-bit-clipped TPoint   }
+    { in DelphiScript, which silently truncates large coords like             }
+    { MilsToCoord(3500)=35,000,000 → ~350 → bottom-left corner.               }
+    CompLoc := Comp.Location;
+    CompLoc.X := MilsToCoord(X);
+    CompLoc.Y := MilsToCoord(Y);
     Try Comp.Location := CompLoc; Except End;
 
     { Apply 90-degree rotations. }
@@ -2516,9 +2653,34 @@ Begin
     If FootprintStr <> '' Then
         Try Comp.CurrentFootprintModelName := FootprintStr; Except End;
 
+    { Pin the designator + comment text fields next to the component body.   }
+    { Many SchLib symbols have these fields anchored at large absolute      }
+    { offsets (e.g. -4000 mils X) from the symbol origin, which on a       }
+    { placed instance lands them off in the corner of the sheet.            }
+    Try
+        CompLoc := Comp.Designator.Location;
+        CompLoc.X := MilsToCoord(X);
+        CompLoc.Y := MilsToCoord(Y) + MilsToCoord(50);
+        Comp.Designator.Location := CompLoc;
+    Except End;
+    Try
+        CompLoc := Comp.Comment.Location;
+        CompLoc.X := MilsToCoord(X);
+        CompLoc.Y := MilsToCoord(Y) - MilsToCoord(50);
+        Comp.Comment.Location := CompLoc;
+    Except End;
+
     SchRegisterObject(SchDoc, Comp);
-    SchServer.ProcessControl.PostProcess(SchDoc, '');
+    SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
     SchDoc.GraphicallyInvalidate;
+
+    { Belt: explicitly flag the IServerDocument dirty so save_all flushes  }
+    { it. ProcessControl.PostProcess sometimes doesn't propagate the      }
+    { Modified flag through to the IServerDocument layer.                  }
+    Try
+        SrvDoc := Client.GetDocumentByPath(SchDoc.DocumentName);
+        If SrvDoc <> Nil Then SrvDoc.SetModified(True);
+    Except End;
 
     Result := BuildSuccessResponse(RequestId,
         '{"placed":true,'
@@ -2590,7 +2752,7 @@ Begin
     SchServer.ProcessControl.PreProcess(SchDoc, '');
     SchDoc.RegisterSchObjectInContainer(ParamSet);
     SchRegisterObject(SchDoc, ParamSet);
-    SchServer.ProcessControl.PostProcess(SchDoc, '');
+    SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
     SchDoc.GraphicallyInvalidate;
 
     Result := BuildSuccessResponse(RequestId,
@@ -2717,7 +2879,7 @@ Begin
     SchServer.ProcessControl.PreProcess(SchDoc, '');
     SchDoc.RegisterSchObjectInContainer(Mask);
     SchRegisterObject(SchDoc, Mask);
-    SchServer.ProcessControl.PostProcess(SchDoc, '');
+    SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
     SchDoc.GraphicallyInvalidate;
 
     Result := BuildSuccessResponse(RequestId,
@@ -2733,12 +2895,15 @@ End;
 
 Function Gen_PlaceNetLabel(Params : String; RequestId : String) : String;
 Var
-    Text : String;
+    Text, SheetPath : String;
     X, Y, Orientation : Integer;
     SchDoc : ISch_Document;
     NetLabel : ISch_NetLabel;
+    Loc : TLocation;
+    SrvDoc : IServerDocument;
 Begin
     Text := ExtractJsonValue(Params, 'text');
+    SheetPath := ExtractJsonValue(Params, 'sheet_path');
     X := StrToIntDef(ExtractJsonValue(Params, 'x'), 0);
     Y := StrToIntDef(ExtractJsonValue(Params, 'y'), 0);
     Orientation := StrToIntDef(ExtractJsonValue(Params, 'orientation'), 0);
@@ -2749,11 +2914,26 @@ Begin
         Exit;
     End;
 
-    SchDoc := SchServer.GetCurrentSchDocument;
-    If SchDoc = Nil Then
+    SchDoc := Nil;
+    If SheetPath <> '' Then
     Begin
-        Result := BuildErrorResponse(RequestId, 'NO_SCHEMATIC', 'No schematic document is active');
-        Exit;
+        Try SchDoc := SchServer.GetSchDocumentByPath(SheetPath); Except End;
+        If SchDoc = Nil Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'SHEET_NOT_LOADED',
+                'No SchDoc loaded at ' + SheetPath);
+            Exit;
+        End;
+    End
+    Else
+    Begin
+        SchDoc := SchServer.GetCurrentSchDocument;
+        If SchDoc = Nil Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'NO_SCHEMATIC',
+                'No schematic document is active');
+            Exit;
+        End;
     End;
 
     NetLabel := SchServer.SchObjectFactory(eNetLabel, eCreate_Default);
@@ -2763,7 +2943,10 @@ Begin
         Exit;
     End;
 
-    NetLabel.Location := Point(MilsToCoord(X), MilsToCoord(Y));
+    Loc := NetLabel.Location;
+    Loc.X := MilsToCoord(X);
+    Loc.Y := MilsToCoord(Y);
+    NetLabel.Location := Loc;
     NetLabel.Text := Text;
     NetLabel.Orientation := Orientation;
     NetLabel.Color := 0;
@@ -2771,12 +2954,144 @@ Begin
     SchServer.ProcessControl.PreProcess(SchDoc, '');
     SchDoc.RegisterSchObjectInContainer(NetLabel);
     SchRegisterObject(SchDoc, NetLabel);
-    SchServer.ProcessControl.PostProcess(SchDoc, '');
+    SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
     SchDoc.GraphicallyInvalidate;
+
+    Try
+        SrvDoc := Client.GetDocumentByPath(SchDoc.DocumentName);
+        If SrvDoc <> Nil Then SrvDoc.SetModified(True);
+    Except End;
 
     Result := BuildSuccessResponse(RequestId,
         '{"success":true,"text":"' + EscapeJsonString(Text) +
         '","x":' + IntToStr(X) + ',"y":' + IntToStr(Y) + '}');
+End;
+
+{..............................................................................}
+{ Get pin world coordinates for a placed component on the active SchDoc.     }
+{ Params: designator                                                          }
+{ Returns array of {pin_number, pin_name, x_mils, y_mils, orientation}.      }
+{                                                                             }
+{ Used by the design executor to look up pin positions after place_sch_     }
+{ component_from_library so it can drop net labels at the right spot.        }
+{ ISch_Pin.Location on a placed component instance returns world coords     }
+{ already (Altium has applied component placement + orientation).           }
+{..............................................................................}
+
+Function Gen_GetSchComponentPins(Params : String; RequestId : String) : String;
+Var
+    Designator, SheetPath : String;
+    SchDoc : ISch_Document;
+    Iter, PinIter : ISch_Iterator;
+    Comp : ISch_Component;
+    Pin : ISch_Pin;
+    Found : Boolean;
+    Data, PinList : String;
+    First : Boolean;
+    PinNum, PinName : String;
+    PinX, PinY : Integer;
+    CompX, CompY : Integer;
+    CompLoc : TLocation;
+Begin
+    Designator := ExtractJsonValue(Params, 'designator');
+    SheetPath := ExtractJsonValue(Params, 'sheet_path');
+
+    If Designator = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAMS',
+            'designator is required');
+        Exit;
+    End;
+
+    SchDoc := Nil;
+    If SheetPath <> '' Then
+    Begin
+        Try SchDoc := SchServer.GetSchDocumentByPath(SheetPath); Except End;
+        If SchDoc = Nil Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'SHEET_NOT_LOADED',
+                'No SchDoc loaded at ' + SheetPath);
+            Exit;
+        End;
+    End
+    Else
+    Begin
+        SchDoc := SchServer.GetCurrentSchDocument;
+        If SchDoc = Nil Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'NO_SCHEMATIC',
+                'No schematic document is active');
+            Exit;
+        End;
+    End;
+
+    Found := False;
+    PinList := '';
+    First := True;
+
+    Iter := SchDoc.SchIterator_Create;
+    Try
+        Iter.AddFilter_ObjectSet(MkSet(eSchComponent));
+        Comp := Iter.FirstSchObject;
+        While (Comp <> Nil) And (Not Found) Do
+        Begin
+            If Comp.Designator.Text = Designator Then
+            Begin
+                Found := True;
+
+                { Pin.Location on a placed component returns the pin in       }
+                { component-LOCAL coords. Convert to world by adding the      }
+                { component's own Location. (Rotation/mirror not handled —    }
+                { Slice B keeps placement axis-aligned.)                       }
+                CompLoc := Comp.Location;
+                CompX := CoordToMils(CompLoc.X);
+                CompY := CoordToMils(CompLoc.Y);
+
+                PinIter := Comp.SchIterator_Create;
+                Try
+                    PinIter.AddFilter_ObjectSet(MkSet(ePin));
+                    Pin := PinIter.FirstSchObject;
+                    While Pin <> Nil Do
+                    Begin
+                        PinNum := '';
+                        PinName := '';
+                        PinX := 0;
+                        PinY := 0;
+                        Try PinNum := Pin.Designator; Except End;
+                        Try PinName := Pin.Name; Except End;
+                        Try PinX := CompX + CoordToMils(Pin.Location.X); Except End;
+                        Try PinY := CompY + CoordToMils(Pin.Location.Y); Except End;
+
+                        If Not First Then PinList := PinList + ',';
+                        First := False;
+                        PinList := PinList +
+                            '{"pin_number":"' + EscapeJsonString(PinNum) +
+                            '","pin_name":"' + EscapeJsonString(PinName) +
+                            '","x_mils":' + IntToStr(PinX) +
+                            ',"y_mils":' + IntToStr(PinY) + '}';
+
+                        Pin := PinIter.NextSchObject;
+                    End;
+                Finally
+                    Comp.SchIterator_Destroy(PinIter);
+                End;
+            End;
+            Comp := Iter.NextSchObject;
+        End;
+    Finally
+        SchDoc.SchIterator_Destroy(Iter);
+    End;
+
+    If Not Found Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NOT_FOUND',
+            'Placed component not found: ' + Designator);
+        Exit;
+    End;
+
+    Data := '{"designator":"' + EscapeJsonString(Designator) +
+        '","pins":[' + PinList + ']}';
+    Result := BuildSuccessResponse(RequestId, Data);
 End;
 
 {..............................................................................}
@@ -2835,7 +3150,7 @@ Begin
     SchServer.ProcessControl.PreProcess(SchDoc, '');
     SchDoc.RegisterSchObjectInContainer(SchPort);
     SchRegisterObject(SchDoc, SchPort);
-    SchServer.ProcessControl.PostProcess(SchDoc, '');
+    SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
     SchDoc.GraphicallyInvalidate;
 
     Result := BuildSuccessResponse(RequestId,
@@ -2850,15 +3165,19 @@ End;
 
 Function Gen_PlacePowerPort(Params : String; RequestId : String) : String;
 Var
-    Text, StyleStr : String;
-    X, Y : Integer;
+    Text, StyleStr, SheetPath : String;
+    X, Y, OrientationVal : Integer;
     SchDoc : ISch_Document;
     PowerObj : ISch_PowerObject;
+    Loc : TLocation;
+    SrvDoc : IServerDocument;
 Begin
     Text := ExtractJsonValue(Params, 'text');
+    SheetPath := ExtractJsonValue(Params, 'sheet_path');
     X := StrToIntDef(ExtractJsonValue(Params, 'x'), 0);
     Y := StrToIntDef(ExtractJsonValue(Params, 'y'), 0);
     StyleStr := ExtractJsonValue(Params, 'style');
+    OrientationVal := StrToIntDef(ExtractJsonValue(Params, 'orientation'), -1);
 
     If Text = '' Then
     Begin
@@ -2866,11 +3185,26 @@ Begin
         Exit;
     End;
 
-    SchDoc := SchServer.GetCurrentSchDocument;
-    If SchDoc = Nil Then
+    SchDoc := Nil;
+    If SheetPath <> '' Then
     Begin
-        Result := BuildErrorResponse(RequestId, 'NO_SCHEMATIC', 'No schematic document is active');
-        Exit;
+        Try SchDoc := SchServer.GetSchDocumentByPath(SheetPath); Except End;
+        If SchDoc = Nil Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'SHEET_NOT_LOADED',
+                'No SchDoc loaded at ' + SheetPath);
+            Exit;
+        End;
+    End
+    Else
+    Begin
+        SchDoc := SchServer.GetCurrentSchDocument;
+        If SchDoc = Nil Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'NO_SCHEMATIC',
+                'No schematic document is active');
+            Exit;
+        End;
     End;
 
     PowerObj := SchServer.SchObjectFactory(ePowerObject, eCreate_Default);
@@ -2880,7 +3214,10 @@ Begin
         Exit;
     End;
 
-    PowerObj.Location := Point(MilsToCoord(X), MilsToCoord(Y));
+    Loc := PowerObj.Location;
+    Loc.X := MilsToCoord(X);
+    Loc.Y := MilsToCoord(Y);
+    PowerObj.Location := Loc;
     PowerObj.Text := Text;
     PowerObj.ShowNetName := True;
 
@@ -2893,11 +3230,29 @@ Begin
     Else If StyleStr = 'gnd_earth' Then PowerObj.Style := ePowerGndEarth
     Else PowerObj.Style := ePowerCircle;
 
+    { Default orientation: VCC-style points UP, GND-style points DOWN.   }
+    { Override via the 'orientation' param (0=right, 1=up, 2=left, 3=down). }
+    If OrientationVal < 0 Then
+    Begin
+        If (StyleStr = 'gnd_power') Or (StyleStr = 'gnd_signal') Or
+           (StyleStr = 'gnd_earth') Or (StyleStr = 'bar') Or
+           (StyleStr = 'wave') Then
+            OrientationVal := 3
+        Else
+            OrientationVal := 1;
+    End;
+    Try PowerObj.Orientation := OrientationVal; Except End;
+
     SchServer.ProcessControl.PreProcess(SchDoc, '');
     SchDoc.RegisterSchObjectInContainer(PowerObj);
     SchRegisterObject(SchDoc, PowerObj);
-    SchServer.ProcessControl.PostProcess(SchDoc, '');
+    SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
     SchDoc.GraphicallyInvalidate;
+
+    Try
+        SrvDoc := Client.GetDocumentByPath(SchDoc.DocumentName);
+        If SrvDoc <> Nil Then SrvDoc.SetModified(True);
+    Except End;
 
     Result := BuildSuccessResponse(RequestId,
         '{"success":true,"text":"' + EscapeJsonString(Text) +
@@ -3015,7 +3370,7 @@ Begin
         Obj := Iterator.NextSchObject;
     End;
     SchDoc.SchIterator_Destroy(Iterator);
-    SchServer.ProcessControl.PostProcess(SchDoc, '');
+    SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
 
     // Copy selected to clipboard
     If MatchCount > 0 Then
@@ -3178,7 +3533,7 @@ Begin
     SchServer.ProcessControl.PreProcess(SchDoc, '');
     SchDoc.RegisterSchObjectInContainer(NoERC);
     SchRegisterObject(SchDoc, NoERC);
-    SchServer.ProcessControl.PostProcess(SchDoc, '');
+    SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
     SchDoc.GraphicallyInvalidate;
 
     Result := BuildSuccessResponse(RequestId,
@@ -3218,7 +3573,7 @@ Begin
     SchServer.ProcessControl.PreProcess(SchDoc, '');
     SchDoc.RegisterSchObjectInContainer(Junction);
     SchRegisterObject(SchDoc, Junction);
-    SchServer.ProcessControl.PostProcess(SchDoc, '');
+    SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
     SchDoc.GraphicallyInvalidate;
 
     Result := BuildSuccessResponse(RequestId,
@@ -3368,7 +3723,7 @@ Begin
     If VisibleGrid > 0 Then
         SchDoc.VisibleGridSize := MilsToCoord(VisibleGrid);
 
-    SchServer.ProcessControl.PostProcess(SchDoc, '');
+    SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
     SchDoc.GraphicallyInvalidate;
 
     Result := BuildSuccessResponse(RequestId,
@@ -3484,7 +3839,7 @@ Begin
     SchServer.ProcessControl.PreProcess(SchDoc, '');
     SchDoc.RegisterSchObjectInContainer(Img);
     SchRegisterObject(SchDoc, Img);
-    SchServer.ProcessControl.PostProcess(SchDoc, '');
+    SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
     SchDoc.GraphicallyInvalidate;
 
     Result := BuildSuccessResponse(RequestId,
@@ -3547,7 +3902,7 @@ Begin
                 Comp.LibReference := NewLibRef;
                 If NewLibrary <> '' Then
                     Comp.SourceLibraryName := NewLibrary;
-                SchServer.ProcessControl.PostProcess(SchDoc, '');
+                SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
                 Found := True;
                 Break;
             End;
@@ -3684,7 +4039,7 @@ Begin
 
     SchDoc.RegisterSchObjectInContainer(Harness);
     SchRegisterObject(SchDoc, Harness);
-    SchServer.ProcessControl.PostProcess(SchDoc, '');
+    SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
     SchDoc.GraphicallyInvalidate;
 
     Result := BuildSuccessResponse(RequestId,
@@ -3736,7 +4091,7 @@ Begin
 
     SchDoc.RegisterSchObjectInContainer(Conn);
     SchRegisterObject(SchDoc, Conn);
-    SchServer.ProcessControl.PostProcess(SchDoc, '');
+    SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
     SchDoc.GraphicallyInvalidate;
 
     Result := BuildSuccessResponse(RequestId,
@@ -3856,7 +4211,7 @@ Begin
 
     SchDoc.RegisterSchObjectInContainer(Probe);
     SchRegisterObject(SchDoc, Probe);
-    SchServer.ProcessControl.PostProcess(SchDoc, '');
+    SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
     SchDoc.GraphicallyInvalidate;
 
     Result := BuildSuccessResponse(RequestId,
@@ -4621,7 +4976,7 @@ Begin
             Inc(Placed);
         End;
     Finally
-        SchServer.ProcessControl.PostProcess(SchDoc, '');
+        SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
         SchDoc.GraphicallyInvalidate;
     End;
 
@@ -4640,11 +4995,13 @@ Function Gen_PlaceSchComponentsFromLibrary(Params : String; RequestId : String) 
 Var
     PlaceStr, Op, Remaining : String;
     OpCount, Placed, Failed, Rotation, RotCount, J : Integer;
-    LibPath, LibRef, Desig, Footprint : String;
+    LibPath, LibRef, Desig, Footprint, AvailHint : String;
     X, Y : Integer;
     SchDoc : ISch_Document;
     Comp : ISch_Component;
     CompLoc : TLocation;
+    SchObjectHandle : Integer;
+    PlaceOk : Boolean;
 Begin
     PlaceStr := ExtractJsonValue(Params, 'placements');
     If PlaceStr = '' Then
@@ -4686,10 +5043,26 @@ Begin
                 Continue;
             End;
 
-            Comp := Nil;
+            { Pre-validate to dodge PlaceSchComponent's modal-error popup. }
+            If LibPath <> '' Then
+                If Not ResolveLibRef(LibPath, LibRef, AvailHint) Then
+                Begin
+                    Inc(Failed);
+                    Continue;
+                End;
+
+            { 3-arg procedure call — function-form mismatches the SDK and    }
+            { triggers Altium's empty Error modal that freezes the script.   }
+            SchObjectHandle := 0;
+            PlaceOk := True;
             Try
-                Comp := SchDoc.PlaceSchComponent(LibPath, LibRef);
-            Except End;
+                SchDoc.PlaceSchComponent(LibPath, LibRef, SchObjectHandle);
+            Except
+                PlaceOk := False;
+            End;
+            Comp := Nil;
+            If PlaceOk Then
+                Comp := FindPlacedComponentByLibRef(SchDoc, LibRef);
 
             If Comp = Nil Then
             Begin
@@ -4716,7 +5089,7 @@ Begin
             Inc(Placed);
         End;
     Finally
-        SchServer.ProcessControl.PostProcess(SchDoc, '');
+        SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
         SchDoc.GraphicallyInvalidate;
     End;
 
@@ -5137,6 +5510,7 @@ Begin
         'place_bus_entry':   Result := Gen_PlaceBusEntry(Params, RequestId);
         'set_sheet_size':    Result := Gen_SetSheetSize(Params, RequestId);
         'place_sch_component_from_library': Result := Gen_PlaceSchComponentFromLibrary(Params, RequestId);
+        'get_sch_component_pins': Result := Gen_GetSchComponentPins(Params, RequestId);
         'place_net_label':  Result := Gen_PlaceNetLabel(Params, RequestId);
         'place_port':       Result := Gen_PlacePort(Params, RequestId);
         'place_power_port': Result := Gen_PlacePowerPort(Params, RequestId);

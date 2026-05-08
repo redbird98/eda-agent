@@ -391,9 +391,11 @@ Begin
         Except Saved := False; End;
     End;
 
-    { Add to the focused project via WorkspaceManager:AddDocumentToProject.
-      The process reads DocumentPath from parameters and attaches the file
-      to whatever project is currently focused. }
+    { Add to the focused project via IProject.DM_AddSourceDocument.            }
+    { The earlier RunProcess('WorkspaceManager:AddDocumentToProject') path     }
+    { silently no-ops in some workspace states — DM_AddSourceDocument is the  }
+    { documented project-side API and is what working examples in the         }
+    { reference/altium-delphiscripts-brett repo use.                          }
     Added := False;
     If AddToProject Then
     Begin
@@ -404,9 +406,7 @@ Begin
             If Project <> Nil Then
             Begin
                 Try
-                    ResetParameters;
-                    AddStringParameter('DocumentPath', FilePath);
-                    RunProcess('WorkspaceManager:AddDocumentToProject');
+                    Project.DM_AddSourceDocument(FilePath);
                     Added := True;
                 Except Added := False; End;
             End;

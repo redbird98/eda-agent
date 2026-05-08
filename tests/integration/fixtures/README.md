@@ -9,7 +9,7 @@ tests under `tests/integration/` run against.
 EDAAgentTest.PrjPcb            # project file
 EDAAgentTest.SchDoc            # one schematic sheet with a few known parts
 EDAAgentTest.PcbDoc            # one PCB doc with a known component placement
-SELibrary_INTEGRATION.SchLib   # tiny library so the test parts are local
+IntegrationLib.SchLib          # tiny library so the test parts are local
 ```
 
 The fixture project should be small enough that compiles take <2 s and

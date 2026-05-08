@@ -13,7 +13,7 @@ Const
     // returns — mismatch means Altium is running a stale compiled script
     // (DelphiScript caches compiled units until the script project is
     // reopened or Altium is restarted).
-    SCRIPT_VERSION = '2026.05.04.1';
+    SCRIPT_VERSION = '2026.05.05.13';
 
     // Wire protocol version. Bumped whenever the request/response JSON shape
     // changes incompatibly. Python and Pascal must agree; mismatch returns
@@ -295,8 +295,15 @@ Begin
     If Doc = Nil Then Exit;
     Try
         ServerDoc := Client.GetDocumentByPath(Doc.DM_FullPath);
-        If (ServerDoc <> Nil) And ServerDoc.Modified Then
+        { Unconditional flush — Modified flag does not always propagate from   }
+        { ProcessControl.PostProcess to the IServerDocument layer in newer    }
+        { Altium builds, so checking it can leave docs unsaved. DoFileSave    }
+        { on a clean doc is a fast no-op.                                     }
+        If ServerDoc <> Nil Then
+        Begin
+            Try ServerDoc.SetModified(True); Except End;
             Try ServerDoc.DoFileSave(''); Except End;
+        End;
     Except End;
 End;
 

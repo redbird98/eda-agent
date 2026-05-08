@@ -1123,7 +1123,7 @@ Begin
                 Finally
                     SchDoc.SchIterator_Destroy(Iterator);
                 End;
-                SchServer.ProcessControl.PostProcess(SchDoc, '');
+                SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
                 SchDoc.GraphicallyInvalidate;
                 SaveDocByPath(FilePath);
                 Continue;
@@ -1257,7 +1257,7 @@ Begin
             SchDoc := SchServer.GetSchDocumentByPath(TouchedDocs[I]);
             If SchDoc <> Nil Then
             Begin
-                SchServer.ProcessControl.PostProcess(SchDoc, '');
+                SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
                 SchDoc.GraphicallyInvalidate;
             End;
             SaveDocByPath(TouchedDocs[I]);
@@ -2448,7 +2448,7 @@ Begin
             SchRegisterObject(SchDoc, Parameter);
         End;
     Finally
-        SchServer.ProcessControl.PostProcess(SchDoc, '');
+        SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
     End;
 
     { Persist directly to disk via the IServerDocument API. SaveDocByPath
@@ -2873,7 +2873,7 @@ Begin
     End;
     SchDoc.SchIterator_Destroy(Iterator);
 
-    SchServer.ProcessControl.PostProcess(SchDoc, '');
+    SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
     SchDoc.GraphicallyInvalidate;
 
     Result := BuildSuccessResponse(RequestId,

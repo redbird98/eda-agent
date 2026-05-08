@@ -120,7 +120,7 @@ Begin
 
         SchServer.ProcessControl.PreProcess(SchLib, '');
         SchLib.AddSchComponent(Component);
-        SchServer.ProcessControl.PostProcess(SchLib, '');
+        SchServer.ProcessControl.PostProcess(SchLib, 'Edit');
 
         // Broadcast as a new component (source=nil, dest=c_BroadCast). This
         // is the pattern in Altium's createcomp_in_lib.pas — different from
@@ -204,7 +204,7 @@ Begin
         SetOwnerPart(Pin, Component);
         Component.AddSchObject(Pin);
         SchRegisterObject(Component, Pin);
-        SchServer.ProcessControl.PostProcess(SchLib, '');
+        SchServer.ProcessControl.PostProcess(SchLib, 'Edit');
 
         MarkLibDirty(SchLib);
         Result := BuildSuccessResponse(RequestId, '{"success":true,"designator":"' + EscapeJsonString(Designator) + '"}');
@@ -252,7 +252,7 @@ Begin
         SetOwnerPart(Rect, Component);
         Component.AddSchObject(Rect);
         SchRegisterObject(Component, Rect);
-        SchServer.ProcessControl.PostProcess(SchLib, '');
+        SchServer.ProcessControl.PostProcess(SchLib, 'Edit');
 
         MarkLibDirty(SchLib);
         Result := BuildSuccessResponse(RequestId, '{"success":true}');
@@ -303,7 +303,7 @@ Begin
         SetOwnerPart(Line, Component);
         Component.AddSchObject(Line);
         SchRegisterObject(Component, Line);
-        SchServer.ProcessControl.PostProcess(SchLib, '');
+        SchServer.ProcessControl.PostProcess(SchLib, 'Edit');
 
         MarkLibDirty(SchLib);
         Result := BuildSuccessResponse(RequestId, '{"success":true}');
@@ -933,7 +933,7 @@ Begin
         End;
     Finally
         // End modification block - commit changes
-        SchServer.ProcessControl.PostProcess(SchLib, '');
+        SchServer.ProcessControl.PostProcess(SchLib, 'Edit');
     End;
 
     MarkLibDirty(SchLib);
@@ -1054,7 +1054,7 @@ Begin
         End;
     Finally
         // End modification block - commit changes
-        SchServer.ProcessControl.PostProcess(SchLib, '');
+        SchServer.ProcessControl.PostProcess(SchLib, 'Edit');
     End;
 
     SchLib.GraphicallyInvalidate;
@@ -1206,7 +1206,7 @@ Begin
         SetOwnerPart(Arc, Component);
         Component.AddSchObject(Arc);
         SchRegisterObject(Component, Arc);
-        SchServer.ProcessControl.PostProcess(SchLib, '');
+        SchServer.ProcessControl.PostProcess(SchLib, 'Edit');
 
         MarkLibDirty(SchLib);
         Result := BuildSuccessResponse(RequestId, '{"success":true}');
@@ -1306,7 +1306,7 @@ Begin
         SetOwnerPart(Polygon, Component);
         Component.AddSchObject(Polygon);
         SchRegisterObject(Component, Polygon);
-        SchServer.ProcessControl.PostProcess(SchLib, '');
+        SchServer.ProcessControl.PostProcess(SchLib, 'Edit');
 
         MarkLibDirty(SchLib);
         Result := BuildSuccessResponse(RequestId,
@@ -1354,7 +1354,7 @@ Begin
     SchBeginModify(Component);
     Component.ComponentDescription := Description;
     SchEndModify(Component);
-    SchServer.ProcessControl.PostProcess(SchLib, '');
+    SchServer.ProcessControl.PostProcess(SchLib, 'Edit');
 
     MarkLibDirty(SchLib);
     Result := BuildSuccessResponse(RequestId,
@@ -1492,7 +1492,7 @@ Begin
 
     SchServer.ProcessControl.PreProcess(SchLib, '');
     SchLib.AddSchComponent(NewComp);
-    SchServer.ProcessControl.PostProcess(SchLib, '');
+    SchServer.ProcessControl.PostProcess(SchLib, 'Edit');
 
     SchLib.CurrentSchComponent := NewComp;
 
@@ -1602,7 +1602,7 @@ Begin
             Inc(Added);
         End;
     Finally
-        SchServer.ProcessControl.PostProcess(SchLib, '');
+        SchServer.ProcessControl.PostProcess(SchLib, 'Edit');
     End;
 
     MarkLibDirty(SchLib);
