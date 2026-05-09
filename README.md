@@ -28,7 +28,7 @@ This is **not** a batch tool that opens a project, runs a script, and exits. It'
 
 ## Features
 
-- **195+ tools** across application, project, library, schematic/general, and PCB categories
+- **200+ tools** across application, project, library, schematic/general, PCB, and design-agent categories
 - **Generic primitives** (`query_objects`, `modify_objects`, `create_object`, `delete_objects`, `run_process`) that work on almost any schematic or PCB object type via late-binding — avoids per-type handler proliferation
 - **Bulk batch primitives** — `batch_modify`, `batch_create`, `batch_delete`, `pcb_place_tracks`, `pcb_move_components`, `place_wires`, `place_sch_components_from_library`, `lib_add_pins`, `get_connectivity_many`, `sch_attach_spice_primitives`. Collapse N LLM turns + N IPC round-trips into one. Typical wall-time savings: 10–100× on multi-item edits
 - **Design review snapshot** — `design_review_snapshot` bundles 8–12 review reads (project info, components, nets, rules, diff, messages, stats, unrouted, BOM) into a single call. One LLM turn instead of a dozen
@@ -43,6 +43,8 @@ This is **not** a batch tool that opens a project, runs a script, and exits. It'
 - **Live dashboard** — a floating Altium-side window shows status, request count, per-command performance stats, and a command log. Detach button exits the loop cleanly; `Hide pings` / `Only >100ms` checkboxes filter noise
 - **Activity logs** — every command is appended to `workspace/activity.log` (CSV with timestamps, durations, command name, response size). The bridge also writes `bridge_trace.log` for IPC-level diagnostics
 - **Bulk-tool nudge** — when a singular tool is hit 2–3 times in 10 s, the response carries a `_hint_bulk` field pointing at the batch variant. Clients that missed the bulk tool in the docstring learn about it at runtime
+- **Design agent surface** — five MCP tools (`design_get_discipline`, `design_snapshot_inventory`, `design_validate_plan`, `design_execute_plan`, `design_validate`) that let an MCP-client LLM produce a structured `DesignPlan` JSON, instantiate it on a fresh sheet (parts + net labels + power ports), and validate ERC + connectivity. Discipline is net-label-driven, datasheet-first, NDA-isolated by construction
+- **Health and doctor preflight** — `eda-agent health` (offline checks: workspace dir, pointer file, bundled scripts) and `eda-agent doctor` (full preflight talking to Altium: process running, script polling responsive, version match, save_all canary, optional `--library` lib-path checks). `--json` for machine-readable output
 - **pip-installable** — no admin, no installer, no touching Altium's config
 
 ## Requirements
@@ -359,8 +361,8 @@ Queries and modifications on the active PCB document.
 | Tool | Purpose |
 |---|---|
 | `pcb_get_nets` / `pcb_get_net_classes` / `pcb_create_net_class` | Net / net class management |
-| `pcb_get_design_rules` / `pcb_create_design_rule` / `pcb_delete_design_rule` / `pcb_get_diff_pair_rules` / `pcb_get_room_rules` | Design rules |
-| `pcb_get_rule_properties` / `pcb_set_rule_properties` | Read and write the actual values a design rule enforces (clearance gap, min/max/preferred trace width, hole sizes, impedance targets, parallel-segment limits) — not just metadata |
+| `pcb_get_design_rules` / `pcb_create_design_rule` / `pcb_delete_design_rule` / `pcb_get_diff_pair_rules` / `pcb_get_room_rules` | Design rules. `pcb_create_design_rule` dispatches to typed `IPCB_*Constraint` subtypes for clearance / width / via-size with the proper per-layer setters |
+| `pcb_get_rule_properties` / `pcb_set_rule_properties` | Read rule metadata + the `descriptor` string (which carries every constraint value in human-readable form, e.g. `Width Constraint (Min=0.102mm) (Max=5.08mm) (Preferred=0.127mm)`); set metadata-only (Enabled / Priority / Scope1 / Scope2 / Comment). Constraint values must be set via `pcb_create_design_rule` or the Altium UI — they live on per-kind subtypes that DelphiScript cannot dispatch to safely from a base `IPCB_Rule` reference |
 | `pcb_run_drc` | Run design rule check, return violations |
 | `pcb_get_components` / `pcb_move_component` / `pcb_move_components` / `pcb_flip_component` / `pcb_align_components` / `pcb_snap_to_grid` | Component placement (bulk `pcb_move_components` for N components in one round-trip) |
 | `pcb_get_component_pads` / `pcb_get_pad_properties` | Pad inspection |
@@ -378,6 +380,18 @@ Queries and modifications on the active PCB document.
 | `pcb_get_selected_objects` | Current selection |
 | `pcb_export_coordinates` | Pick-and-place export |
 | `pcb_delete_object` | Delete a specific object |
+
+### Design agent (5 tools)
+
+A high-level surface for autonomous schematic creation. The MCP client's LLM is the planner; these tools provide the discipline, the inventory, and the executor.
+
+| Tool | Purpose |
+|---|---|
+| `design_get_discipline` | Returns the design discipline doc (net-label-driven wiring, datasheet-first part choice, NDA isolation, ...) plus the `DesignPlan` JSON schema the executor enforces. Always call this first when starting a design task |
+| `design_snapshot_inventory` | Open a list of `.SchLib` paths and report what components they contain (lib_ref, designator prefix, pin count, description, footprint). The planner uses this to bias its part choices toward existing-lib parts |
+| `design_validate_plan` | Schema + cross-check on a candidate `DesignPlan` JSON. No Altium round-trip — cheap pre-flight |
+| `design_execute_plan` | Open or create the project, create SchDoc(s) for each plan sheet, place every existing-lib part on a grid, drop net labels at every plan-defined pin endpoint, drop power ports for `is_power` / `is_ground` nets, save. Halts on any `needs_creation` part with a structured error so the planner can resolve before instantiating |
+| `design_validate` | ERC + `get_unconnected_pins` + compile messages bundled into a structured `ValidationReport(passed, errors[], warnings[], notes[])` so the planner can read failures and revise the plan |
 
 ## Architecture
 
@@ -415,6 +429,8 @@ All intelligence lives in Python. The DelphiScript side is a pass-through layer 
 | `eda-agent serve` | Explicit form of the above |
 | `eda-agent scripts-path` | Print path to bundled DelphiScript sources |
 | `eda-agent install-scripts [--dest PATH] [--force]` | Copy scripts to a directory of your choice |
+| `eda-agent health` | Fast offline preconditions: workspace dir + writable, pointer file + matches config, bundled scripts findable, bridge constructable. Exit 0 = clean, 1 = critical fail |
+| `eda-agent doctor [--library PATH]... [--json]` | Full preflight talking to Altium: all `health` checks plus process running, script polling responsive, script-version matches bundled, `save_all` canary round-trip, optional `--library` lib reachability checks (no hardcoded paths — repeat the flag for each lib you want tested) |
 
 ## Configuration
 
@@ -448,7 +464,10 @@ python build.py
 eda-agent/
 ├── src/eda_agent/          Python package
 │   ├── bridge/             Altium communication layer
-│   ├── tools/              MCP tool implementations
+│   ├── schemas/            Pydantic IPC envelope + per-command schemas
+│   ├── tools/              MCP tool implementations (incl. design.py)
+│   ├── design/             Design agent: plan / inventory / discipline / executor / validator
+│   ├── diag/               Health and doctor checks
 │   ├── cli.py              CLI subcommands
 │   └── server.py           MCP server entry point
 ├── scripts/altium/         DelphiScript sources (dev source of truth)
