@@ -102,7 +102,7 @@ class AltiumConfig(BaseModel):
         """Export Pydantic schemas as JSON Schema files in the workspace.
 
         Importing eda_agent.schemas.commands populates the command registry
-        as a side effect — register_command calls run at module import time.
+        as a side effect, register_command calls run at module import time.
         Failures are non-fatal: Pascal falls back to envelope-only validation
         if the schema files are missing.
         """
@@ -118,7 +118,7 @@ class AltiumConfig(BaseModel):
         """Write ``mcp_config.json`` so the Pascal side reads the same values.
 
         Idempotent: if the file already matches what we'd write, no-ops.
-        Failures are non-fatal — Pascal falls back to InitDefaultConfig.
+        Failures are non-fatal; Pascal falls back to InitDefaultConfig.
         """
         try:
             payload = self.runtime.model_dump()

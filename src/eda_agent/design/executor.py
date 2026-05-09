@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 George Saliba
-"""Executor — instantiate a DesignPlan in Altium.
+"""Executor, instantiate a DesignPlan in Altium.
 
 Slice B.1 scope: parts placement. Opens or creates the project, creates
 SchDoc(s) for each plan.sheet, places every existing-lib part at a
 grid-computed position, saves. Returns a structured result.
 
-Wiring (net labels at pin coordinates) is Slice B.2 — needs a new Pascal
+Wiring (net labels at pin coordinates) is Slice B.2, needs a new Pascal
 helper to look up pin world coords on a placed component instance.
 
 The executor is mechanical: it consumes a validated plan, calls existing
@@ -102,7 +102,7 @@ def execute_plan(plan: DesignPlan, project_path: str, *, bridge: Optional[Any] =
             inject a fake to avoid Altium round-trips.
 
     Returns:
-        ExecutorResult — ok=True iff all existing-lib parts placed and
+        ExecutorResult, ok=True iff all existing-lib parts placed and
         no needs_creation parts were present.
     """
     result = ExecutorResult(project_path=project_path)
@@ -114,7 +114,7 @@ def execute_plan(plan: DesignPlan, project_path: str, *, bridge: Optional[Any] =
         result.notes.extend(cross)
         return result
 
-    # Halt early on needs_creation parts — escalate to caller, do not place
+    # Halt early on needs_creation parts, escalate to caller, do not place
     # partials that would mislead a reviewer about completeness.
     needs_creation = [p.refdes for p in plan.parts if p.status == PartStatus.NEEDS_CREATION]
     if needs_creation:
@@ -128,7 +128,7 @@ def execute_plan(plan: DesignPlan, project_path: str, *, bridge: Optional[Any] =
         return result
 
     if bridge is None:
-        from eda_agent.bridge import get_bridge  # late import — needs Altium
+        from eda_agent.bridge import get_bridge  # late import, needs Altium
         bridge = get_bridge()
 
     project = Path(project_path).expanduser().resolve()
@@ -163,7 +163,7 @@ def execute_plan(plan: DesignPlan, project_path: str, *, bridge: Optional[Any] =
 
     for sheet_name, sheet_path in sheets_to_create:
         if sheet_path.exists():
-            # Sheet on disk — make sure it is loaded into the editor so
+            # Sheet on disk, make sure it is loaded into the editor so
             # set_active_document can target it. project.open does not
             # always pull child sheets into the editor.
             try:
@@ -227,7 +227,7 @@ def execute_plan(plan: DesignPlan, project_path: str, *, bridge: Optional[Any] =
 
         for part in parts:
             placement = placement_by_refdes.get(part.refdes)
-            if placement is None:  # defensive — compute_layout covers every part
+            if placement is None:  # defensive, compute_layout covers every part
                 result.failures.append(
                     PartFailure(
                         refdes=part.refdes,
@@ -264,7 +264,7 @@ def execute_plan(plan: DesignPlan, project_path: str, *, bridge: Optional[Any] =
                     )
                 )
 
-    # Wiring stage — drop a net label at every plan-defined pin endpoint.
+    # Wiring stage, drop a net label at every plan-defined pin endpoint.
     # Power and ground nets get power ports instead of plain labels.
     placed_refdes = {p.refdes for p in result.placed}
     if placed_refdes:
@@ -308,8 +308,8 @@ def _place_net_labels(
 ) -> None:
     """For each plan net, drop a net label or power port at every endpoint pin.
 
-    Reads pin world coordinates via ``generic.get_sch_component_pins`` —
-    new helper in Pascal that iterates ePin children of a placed
+    Reads pin world coordinates via ``generic.get_sch_component_pins``,
+    a helper in Pascal that iterates ePin children of a placed
     eSchComponent on the active sheet. Pin lookups are cached per sheet
     activation to avoid redundant IPC round-trips.
     """
@@ -352,7 +352,7 @@ def _place_net_labels(
                     )
                     continue
                 if refdes_to_sheet.get(pin_ref.refdes) != sheet_name:
-                    # Cross-sheet net — Slice B.2 keeps it simple and only
+                    # Cross-sheet net, Slice B.2 keeps it simple and only
                     # places a label on the home sheet of each pin. The pin
                     # gets its label when we visit its sheet in another loop
                     # iteration.

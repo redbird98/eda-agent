@@ -11,9 +11,9 @@ design diff, library search result, simulation readiness, design
 review) calls ``tag_response(response, parts)`` before returning.
 The caller gets two extra fields:
 
-  - ``_datasheet_guidance``  — rules + action_required text + structured
+  - ``_datasheet_guidance`` , rules + action_required text + structured
                                per-part search hints
-  - ``_datasheet_parts``     — the unique (manufacturer, part_number,
+  - ``_datasheet_parts``    , the unique (manufacturer, part_number,
                                designators) list the LLM should fetch
                                datasheets for
 
@@ -40,15 +40,15 @@ DATASHEET_RULES: list[str] = [
     "conversation, you MUST search for it with WebSearch "
     "('<manufacturer> <part_number> datasheet filetype:pdf') and "
     "fetch it with WebFetch. Do not skip this step. Do not answer "
-    "'I'll assume ...' about an electrical spec — find the sheet.",
+    "'I'll assume ...' about an electrical spec, find the sheet.",
     "When citing a claim derived from a datasheet, include the page "
     "or section you relied on. If you cannot cite it, you have not "
-    "actually verified — say so and go read the datasheet.",
+    "actually verified, say so and go read the datasheet.",
     "Never fabricate, guess, or LLM-generate datasheet-derived "
     "values (pin functions, Vmax, Vmin, absolute maximums, sim "
     "models). If a datasheet is genuinely unavailable after a real "
-    "search (proprietary, obsolete), flag that to the user and stop "
-    "— do not substitute a plausible guess.",
+    "search (proprietary, obsolete), flag that to the user and stop. "
+    "Do not substitute a plausible guess.",
 ]
 
 
@@ -107,7 +107,7 @@ def extract_unique_parts(
                 )
                 _push(mfr, part, desig)
 
-    # Components are a fallback source — BOM manufacturer part numbers
+    # Components are a fallback source, BOM manufacturer part numbers
     # are authoritative when present. Only walk the component list when
     # BOM produced nothing, to avoid merging the same parts under
     # inconsistent names (e.g. "STM32F411RE" in the BOM vs a shortened
@@ -207,7 +207,7 @@ def tag_response(
       - For responses that already carry a curated part list (e.g.,
         readiness), pass ``explicit_parts`` directly.
 
-    No-ops gracefully if ``response`` isn't a dict — the caller's
+    No-ops gracefully if ``response`` isn't a dict, the caller's
     result is returned unchanged so this is safe to wrap every
     send_command_async return.
     """

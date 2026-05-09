@@ -73,7 +73,7 @@ def _check_pointer_file() -> Check:
             name="workspace pointer matches config",
             status=Status.FAIL,
             message=(
-                f"pointer={pointer_path!r} but config={cfg_path_norm!r} — "
+                f"pointer={pointer_path!r} but config={cfg_path_norm!r}, "
                 "Python and Pascal will write to different directories"
             ),
             fix="Re-run `eda-agent install-scripts` to refresh the pointer.",
@@ -123,7 +123,7 @@ def _check_bridge_constructable() -> Check:
 
 
 def run_health_checks() -> list[Check]:
-    """Order matters — earlier failures often explain later ones."""
+    """Order matters, earlier failures often explain later ones."""
     return [
         _check_workspace_dir(),
         _check_pointer_file(),

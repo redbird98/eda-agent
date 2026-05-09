@@ -10,7 +10,7 @@
 Const
     // Bump SCRIPT_VERSION whenever the .pas sources change. Python reads the
     // same string from the on-disk Main.pas and compares it to what ping
-    // returns — mismatch means Altium is running a stale compiled script
+    // returns, mismatch means Altium is running a stale compiled script
     // (DelphiScript caches compiled units until the script project is
     // reopened or Altium is restarted).
     SCRIPT_VERSION = '2026.05.09.2';
@@ -39,7 +39,7 @@ Var
     WorkspaceDir : String;
     Running : Boolean;
 
-    { Polling tunables — defaults below, overridden by mcp_config.json at      }
+    { Polling tunables, defaults below, overridden by mcp_config.json at      }
     { startup via LoadMCPConfig. Single source of truth: the config file.     }
     PollIntervalActiveMs : Integer;
     PollIntervalIdleMs   : Integer;
@@ -54,7 +54,7 @@ Var
     LastCompileTick : Cardinal;
     LastCompiledProject : IProject;
 
-    { Silent cast-failure counter — incremented every time a defensive       }
+    { Silent cast-failure counter, incremented every time a defensive       }
     { Try/Except in an iteration helper swallows an interface cast that      }
     { ObjectId-checking should have ruled out. Surfaced via application.ping }
     { as cast_errors so a non-zero value at session end isn't invisible.     }
@@ -62,8 +62,8 @@ Var
 
     { Tracks the most recently created/selected library component so the    }
     { Lib_Add* primitive helpers can target it directly. SchLib's           }
-    { CurrentSchComponent setter is a no-op in DelphiScript — assigning to  }
-    { it does not move the editor's selection — so primitives that read     }
+    { CurrentSchComponent setter is a no-op in DelphiScript, assigning to  }
+    { it does not move the editor's selection, so primitives that read     }
     { CurrentSchComponent end up attaching to whatever the editor was       }
     { showing before (typically Component_1, the default empty placeholder).}
     { Storing the reference here gives us a working "current target" the    }
@@ -94,7 +94,7 @@ End;
 { appear in Altium object names, filters, or property strings, so it's         }
 { unambiguous even when a single operation's property list contains '|'.       }
 {                                                                               }
-{ Defined in Main.pas so Library.pas and Generic.pas can both use them —       }
+{ Defined in Main.pas so Library.pas and Generic.pas can both use them,       }
 { the Altium project compiles files in DesignN order (Main → ... → Library →  }
 { ... → Generic) and a callee must come earlier than its caller.               }
 {..............................................................................}
@@ -163,7 +163,7 @@ End;
 { Probe whether any logical document in the project has been modified by    }
 { an out-of-band edit (typically: user clicked in Altium's UI between MCP   }
 { calls). If so the cached DM_Compile is stale even if it's within the     }
-{ TTL window — force a fresh recompile so subsequent queries see the       }
+{ TTL window, force a fresh recompile so subsequent queries see the       }
 { new netlist / component set.                                             }
 Function ProjectHasDirtyDocs(Project : IProject) : Boolean;
 Var
@@ -284,7 +284,7 @@ Begin
     End;
 End;
 
-{ Save every modified IServerDocument the workspace knows about — both     }
+{ Save every modified IServerDocument the workspace knows about, both     }
 { project-attached docs and free-floating docs (libraries opened           }
 { standalone, scratch docs). Free docs live inside the synthetic           }
 { DM_FreeDocumentsProject which we iterate like any normal project.        }
@@ -295,7 +295,7 @@ Begin
     If Doc = Nil Then Exit;
     Try
         ServerDoc := Client.GetDocumentByPath(Doc.DM_FullPath);
-        { Unconditional flush — Modified flag does not always propagate from   }
+        { Unconditional flush, Modified flag does not always propagate from   }
         { ProcessControl.PostProcess to the IServerDocument layer in newer    }
         { Altium builds, so checking it can leave docs unsaved. DoFileSave    }
         { on a clean doc is a fast no-op.                                     }
@@ -453,7 +453,7 @@ End;
 { Append a line to workspace/activity.log for performance profiling. The     }
 { polling loop uses this to record per-command timings, and handlers can     }
 { add their own sub-stage timings for bottleneck analysis. Silently           }
-{ swallows IO errors — logging must not break a command.                      }
+{ swallows IO errors, logging must not break a command.                      }
 Procedure AppendLog(Line : String);
 Var
     F : TextFile;
@@ -525,7 +525,7 @@ Var
 Begin
     // Char-by-char JSON unescape with full \uXXXX support. The naive
     // StringReplace cascade (\t -> tab, \n -> LF, ..., \\ -> \) is broken
-    // for sequences like \\nlc — handles escapes left-to-right so \\
+    // for sequences like \\nlc, handles escapes left-to-right so \\
     // collapses to \ before evaluating the following char.
     Result := '';
     I := 1;
@@ -546,7 +546,7 @@ Begin
             Else If NextCh = 'f' Then Begin Result := Result + #12; Inc(I, 2); End
             Else If NextCh = 'u' Then
             Begin
-                // \uXXXX — 4 hex digits. Codepoints <= 255 are emitted as a
+                // \uXXXX, 4 hex digits. Codepoints <= 255 are emitted as a
                 // single ANSI byte (Pascal native). Higher codepoints can't
                 // be represented in single-byte ANSI; replaced with '?' so
                 // downstream string handling doesn't see truncated bytes.
@@ -568,7 +568,7 @@ Begin
                     End
                     Else
                     Begin
-                        // Bad hex — keep literal
+                        // Bad hex, keep literal
                         Result := Result + Ch + NextCh;
                         Inc(I, 2);
                     End;
@@ -581,7 +581,7 @@ Begin
             End
             Else
             Begin
-                // Unknown escape — keep both chars literally
+                // Unknown escape, keep both chars literally
                 Result := Result + Ch + NextCh;
                 Inc(I, 2);
             End;
@@ -721,9 +721,9 @@ End;
 {..............................................................................}
 { Per-request IPC helpers.                                                      }
 {                                                                               }
-{ Request files: request_<id>.json — Python writes them, Pascal scans the      }
+{ Request files: request_<id>.json, Python writes them, Pascal scans the      }
 { workspace each polling cycle and processes the first one it finds.           }
-{ Response files: response_<id>.json — Pascal writes them, Python polls for    }
+{ Response files: response_<id>.json, Pascal writes them, Python polls for    }
 { the specific path matching its own request ID.                               }
 {                                                                               }
 { Per-request files eliminate the stale-response race that the old single-     }
@@ -732,7 +732,7 @@ End;
 { poll only their own filename and never see another's payload.                }
 {                                                                               }
 { The request ID embedded in the filename is restricted to UUID-shape chars    }
-{ (alphanumeric, hyphen, underscore) by IsValidRequestId — anything else is    }
+{ (alphanumeric, hyphen, underscore) by IsValidRequestId, anything else is    }
 { rejected so a malformed ID can't escape the workspace dir via path tricks.   }
 {..............................................................................}
 
@@ -771,7 +771,7 @@ End;
 { Altium DelphiScript helper; SysUtils FindFirst is not exposed to scripts)  }
 { and processes the first one it finds.                                      }
 {                                                                              }
-{ Per-request files on both sides — request_<id>.json + response_<id>.json — }
+{ Per-request files on both sides, request_<id>.json + response_<id>.json, }
 { eliminate any cross-caller race: each caller publishes to its own filename }
 { and polls only its own response file.                                      }
 Function ScanForRequestFile(Var FilePath : String; Var RequestId : String) : Boolean;
@@ -882,7 +882,7 @@ End;
 
 {..............................................................................}
 { Wire-envelope validation. Verifies that an incoming request matches the     }
-{ contract Python emits — non-empty id with valid filename chars, non-empty   }
+{ contract Python emits, non-empty id with valid filename chars, non-empty   }
 { command, and a present (possibly empty) params object. Returns '' on        }
 { success, or a short reason string for the dispatcher to surface as          }
 { MALFORMED_REQUEST. Per-command param validation is the handler's job;       }

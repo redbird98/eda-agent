@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 George Saliba
-"""Design-agent MCP tools — surfaces the design discipline + primitives.
+"""Design-agent MCP tools, surfaces the design discipline + primitives.
 
 Claude Code is the planner. It calls ``design.get_discipline`` to read
 the rules, ``design.snapshot_inventory`` to learn what parts exist in
@@ -8,7 +8,7 @@ the user's libraries, then constructs a DesignPlan JSON, validates it
 with ``design.validate_plan``, and hands it to ``design.execute_plan``
 to instantiate the schematic.
 
-This module deliberately makes no Anthropic API calls — the AI is the
+This module deliberately makes no Anthropic API calls, the AI is the
 client (Claude Code), this is just the tool layer it drives.
 """
 
@@ -56,7 +56,7 @@ def register_design_tools(mcp) -> None:
 
         NDA scope: only pass paths to the user's own neutral standard
         libraries. Do NOT pass project-local library paths from another
-        client engagement — design knowledge cannot cross NDA boundaries.
+        client engagement, design knowledge cannot cross NDA boundaries.
 
         Args:
             library_paths: Absolute paths to .SchLib files to scan.
@@ -125,7 +125,7 @@ def register_design_tools(mcp) -> None:
         Slice B.1 scope: opens or creates the project at project_path,
         creates a SchDoc per plan.sheet, places every existing-lib part
         at a grid-computed position, saves. Wiring (net labels at pin
-        coordinates) is NOT in this slice — see design.execute_plan_wires
+        coordinates) is NOT in this slice, see design.execute_plan_wires
         when Slice B.2 lands.
 
         The call halts early if the plan contains any needs_creation
@@ -153,7 +153,7 @@ def register_design_tools(mcp) -> None:
         Runs run_erc, project.get_messages, and get_unconnected_pins,
         then bundles the output into a structured ValidationReport that
         the planner can read and respond to. Schematic-only in this
-        slice — PCB validation is a separate later slice.
+        slice, PCB validation is a separate later slice.
 
         Args:
             project_path: Optional absolute path to a .PrjPcb. If omitted,

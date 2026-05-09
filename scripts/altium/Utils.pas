@@ -124,7 +124,7 @@ Begin
     // input is treated as Latin-1 / CP1252 (Pascal's native single-byte
     // encoding); the escape produces valid JSON consumable as UTF-8 by any
     // reader. This is the single mechanism that lets us drop the Latin-1
-    // read kludge on the Python side — output is always pure ASCII.
+    // read kludge on the Python side, output is always pure ASCII.
     For I := 1 To Length(Tmp) Do
     Begin
         Ch := Copy(Tmp, I, 1);

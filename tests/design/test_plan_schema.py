@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 George Saliba
-"""Schema tests for DesignPlan — round-trip, validation, cross-check."""
+"""Schema tests for DesignPlan, round-trip, validation, cross-check."""
 
 from __future__ import annotations
 

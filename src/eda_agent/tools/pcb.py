@@ -30,7 +30,7 @@ def register_pcb_tools(mcp):
     async def pcb_get_net_classes() -> dict[str, Any]:
         """Get all net classes from the active PCB.
 
-        Only returns class metadata — IPCB_ObjectClass.MemberCount and
+        Only returns class metadata, IPCB_ObjectClass.MemberCount and
         MemberName[] are not exposed in Altium's DelphiScript host, so
         per-member enumeration has to be done by iterating eNetObject and
         grouping by each net's parent class.
@@ -120,7 +120,7 @@ def register_pcb_tools(mcp):
     ) -> dict[str, Any]:
         """Move and/or rotate ONE PCB component by its designator.
 
-        IMPORTANT — if you need to reposition more than one component,
+        IMPORTANT, if you need to reposition more than one component,
         use `pcb_move_components` (batch) instead. Looping this tool is
         the single biggest wall-time cost: each call is a full LLM
         round-trip, but the batch version does N moves in one turn.
@@ -168,10 +168,10 @@ def register_pcb_tools(mcp):
 
         Args:
             moves: List of move dicts. Each dict supports:
-                designator (required)  — target component
-                x        (optional)    — new X in mils
-                y        (optional)    — new Y in mils
-                rotation (optional)    — new rotation in degrees
+                designator (required) , target component
+                x        (optional)   , new X in mils
+                y        (optional)   , new Y in mils
+                rotation (optional)   , new rotation in degrees
 
             Example:
                 [
@@ -263,7 +263,7 @@ def register_pcb_tools(mcp):
         Calls IPCB_LayerStack.InsertLayer with the requested TLayer enum.
         Valid names include MidLayer1..MidLayer30 (signal layers) and
         InternalPlane1..InternalPlane16 (power / ground planes). Top / Bottom
-        are always present — they cannot be added.
+        are always present, they cannot be added.
 
         Args:
             layer: Layer name, e.g. "MidLayer1", "InternalPlane1"
@@ -604,7 +604,7 @@ def register_pcb_tools(mcp):
 
         IMPORTANT: If you are about to place more than one segment
         (multi-segment manhattan routes, a whole net, a batch of
-        traces), use `pcb_place_tracks` instead — it takes a list of
+        traces), use `pcb_place_tracks` instead, it takes a list of
         segments and runs them in a single IPC round-trip, which is
         dramatically faster than calling this tool repeatedly.
 
@@ -805,7 +805,7 @@ def register_pcb_tools(mcp):
     ) -> dict[str, Any]:
         """Start INTERACTIVE polygon pour placement on the active PCB.
 
-        This is an interactive command — it launches Altium's polygon
+        This is an interactive command, it launches Altium's polygon
         placement mode. The user must then draw the polygon boundary
         interactively in Altium Designer (clicks define vertices, right-click
         or Escape completes). It does NOT create a polygon programmatically
@@ -850,7 +850,7 @@ def register_pcb_tools(mcp):
                 "different_nets" (default) - only between pads/tracks of
                     different nets. This is what you want for Clearance.
                 "any_net" - include same-net objects (flags a track
-                    touching a pad of its own net — almost always a bug).
+                    touching a pad of its own net, almost always a bug).
                 "same_net" - only between same-net objects.
 
         Returns:
@@ -987,7 +987,7 @@ def register_pcb_tools(mcp):
     async def pcb_get_diff_pair_rules() -> dict[str, Any]:
         """Get all differential pair routing rules from PCB design rules.
 
-        Returns design rules of kind eRule_DifferentialPairsRouting — these
+        Returns design rules of kind eRule_DifferentialPairsRouting, these
         are routing rules, NOT IPCB_DifferentialPair pair objects on the board.
 
         Returns:
@@ -1169,7 +1169,7 @@ def register_pcb_tools(mcp):
     async def pcb_get_room_rules() -> dict[str, Any]:
         """Get all room-like rules (confinement constraint design rules).
 
-        Returns design rules of kind eRule_ConfinementConstraint — these are
+        Returns design rules of kind eRule_ConfinementConstraint, these are
         NOT physical IPCB_Room objects on the board. The rule bounding rect
         is reported as x1/y1/x2/y2 in mils.
 
@@ -1241,7 +1241,7 @@ def register_pcb_tools(mcp):
 
     @mcp.tool()
     async def pcb_export_coordinates() -> dict[str, Any]:
-        """Export component placement coordinates — same as pcb_get_components but formatted for pick-and-place.
+        """Export component placement coordinates, same as pcb_get_components but formatted for pick-and-place.
 
         Returns designator, footprint, comment, position (x, y),
         rotation, layer, and side (Top/Bottom) for every component.
@@ -1489,7 +1489,7 @@ def register_pcb_tools(mcp):
 
         Moves each named component so its X (or Y) coordinate lands at
         equally-spaced stops from `start` to `end`. Order follows the
-        designators list — designators="R1,R2,R3" with start=0 end=200
+        designators list, designators="R1,R2,R3" with start=0 end=200
         places R1 at 0, R2 at 100, R3 at 200 on the chosen axis. Y (or X)
         is untouched.
 

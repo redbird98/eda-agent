@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 George Saliba
-"""Validator tests with a fake bridge — no Altium."""
+"""Validator tests with a fake bridge, no Altium."""
 
 from __future__ import annotations
 

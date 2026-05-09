@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 George Saliba
-"""Design discipline — the rules a Claude Code agent follows when designing.
+"""Design discipline, the rules a Claude Code agent follows when designing.
 
 Surfaced via the ``design.get_discipline`` MCP tool. Claude Code reads it
 once at the start of a design session and uses it to bound its choices
@@ -41,11 +41,11 @@ these rules before producing a plan; they bound your choices.
 
    If you cannot find an existing part, mark it needs_creation rather
    than substituting a wrong existing one. The executor escalates
-   needs_creation parts to the user — that is the right behavior.
+   needs_creation parts to the user; that is the right behavior.
 
 3. **Wiring is net-label-driven, not geometric.** For every electrical
    connection, define a Net with all participating pins. The executor
-   drops a net label at each pin — there is no "wire" object in the plan.
+   drops a net label at each pin (there is no "wire" object in the plan).
    Buses are just named nets, one per signal.
 
 4. **Power and ground are explicit Nets** with `is_power=true` or
@@ -66,7 +66,7 @@ these rules before producing a plan; they bound your choices.
 7. **NDA: never reference past designs, project history, or external
    customer work.** Your sources are: the chip's datasheet, the
    manufacturer reference design, and standard textbook topology.
-   Cross-project reads breach NDA — never propose them.
+   Cross-project reads breach NDA; never propose them.
 
 8. **Keep the plan small.** If the spec implies 50+ parts, focus on the
    essential subset and use `open_questions` to surface scope decisions
@@ -97,15 +97,15 @@ these rules before producing a plan; they bound your choices.
    sheet, places every existing-lib part on a grid, drops a net label or
    power port at every plan-defined pin endpoint, and saves.
 6. Read `design.execute_plan`'s return value. If `failures` is non-empty,
-   classify and address before validating — pin-not-found and place-failed
+   classify and address before validating; pin-not-found and place-failed
    issues are usually plan/inventory problems, not Altium errors.
 7. Run `design.validate(project_path=...)` to read ERC + unconnected-pins
    + compile messages as a structured ValidationReport.
 8. If `passed: false`, read the report's errors. The errors are LLM-friendly:
    each one has a category (`erc` / `compile` / `unconnected_pin`), severity,
    target refdes/pin/sheet when known, and the original message text.
-   Revise the plan to address them — extra net labels, missing decoupling,
-   wrong pin numbers, etc. — then loop back to step 4.
+   Revise the plan to address them (extra net labels, missing decoupling,
+   wrong pin numbers, etc.) then loop back to step 4.
 9. Cap the revise loop at 3 rounds editorially. After 3 rounds without a
    pass, escalate to the user with the latest report rather than thrashing.
 
@@ -113,7 +113,7 @@ these rules before producing a plan; they bound your choices.
 
 - The executor is mechanical: it only reads what is in the plan. Anything
   the planner forgets stays missing. Decoupling caps do not appear unless
-  you put them in. Pull-ups, terminations, ESD diodes — same.
+  you put them in. Pull-ups, terminations, ESD diodes too.
 - "needs_creation" parts halt `design.execute_plan` with a clear error.
   Treat that as a signal to either pick an existing part or branch into a
   library authoring sub-task before resuming.

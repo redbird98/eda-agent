@@ -134,7 +134,7 @@ class AltiumBridge:
         Pascal's CleanupOrphanResponses can't enumerate the workspace
         (DelphiScript's FindFirst is broken), so the orphan-response
         sweep lives here. Python has reliable globbing and runs this on
-        every ensure_workspace — typically once per attach + once per
+        every ensure_workspace, typically once per attach + once per
         request. The age filter avoids racing with concurrent in-flight
         callers whose response is being polled right now.
         """
@@ -248,7 +248,7 @@ class AltiumBridge:
             try:
                 self.send_command("application.ping", timeout=5.0)
             except Exception:
-                logger.debug("Keep-alive ping failed — Altium may have stopped")
+                logger.debug("Keep-alive ping failed, Altium may have stopped")
                 break
 
     def _response_path(self, request_id: str) -> Path:
@@ -262,7 +262,7 @@ class AltiumBridge:
 
         Per-request request files (request_<id>.json) plus per-request
         response files (response_<id>.json) eliminate cross-caller races
-        entirely — each caller has private filenames on both sides.
+        entirely; each caller has private filenames on both sides.
         Pascal enumerates request_*.json via FindFiles (the documented
         Altium DelphiScript helper). No lock needed: concurrent publishers
         write to different filenames.
@@ -338,7 +338,7 @@ class AltiumBridge:
             f"POLL_TIMEOUT id={request_id[:8]} elapsed={elapsed:.0f}ms polls={poll_count} parse_errs={parse_errors} first_seen_ms={first_appearance*1000 if first_appearance else -1}",
         )
         raise AltiumTimeoutError(
-            f"No response within {timeout}s — is the Altium script running?"
+            f"No response within {timeout}s, is the Altium script running?"
         )
 
     def _execute_command(self, command: str, params: dict[str, Any], timeout: float) -> Any:
@@ -354,7 +354,7 @@ class AltiumBridge:
         try:
             response = self._poll_response(request.id, timeout)
         finally:
-            # Always sweep our own response file on the way out — _poll_response
+            # Always sweep our own response file on the way out,_poll_response
             # already deletes it on success, but a timeout or a late-arriving
             # response would otherwise be orphaned forever.
             try:

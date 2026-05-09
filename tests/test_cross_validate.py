@@ -1168,7 +1168,7 @@ def _discover_fpc_unit_paths(fpc_exe: str) -> list:
       2. Scoop apps directory when the binary is a scoop shim.
       3. %USERPROFILE% and %ProgramFiles% walks for freepascal/units/.
 
-    Returns every subdirectory containing a .ppu — one -Fu per directory.
+    Returns every subdirectory containing a .ppu, one -Fu per directory.
     """
     roots_to_scan: set = set()
     fpc_dir = Path(fpc_exe).resolve().parent
@@ -1179,7 +1179,7 @@ def _discover_fpc_unit_paths(fpc_exe: str) -> list:
         if candidate.is_dir():
             roots_to_scan.add(candidate)
 
-    # Case 2: scoop shim — actual install is under scoop/apps/freepascal.
+    # Case 2: scoop shim, actual install is under scoop/apps/freepascal.
     scoop_dir = Path.home() / "scoop" / "apps" / "freepascal" / "current"
     if scoop_dir.is_dir():
         scoop_units = scoop_dir / "units"

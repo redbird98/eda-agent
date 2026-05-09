@@ -5,7 +5,7 @@
 Tools declare what state Altium must be in before they can usefully run.
 The checker queries Altium's actual state via existing snapshot tools and
 raises a PreconditionError with concrete guidance if the requirement isn't
-met — replacing unhelpful generic errors like "No PCB document is active"
+met, replacing unhelpful generic errors like "No PCB document is active"
 that didn't tell the caller how to recover.
 """
 
@@ -75,7 +75,7 @@ _state_cache = _StateCache()
 
 
 def invalidate_state_cache() -> None:
-    """Drop the cached snapshot — call after open/close/focus operations."""
+    """Drop the cached snapshot, call after open/close/focus operations."""
     _state_cache.invalidate()
 
 

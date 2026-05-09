@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 George Saliba
-"""Design plan schema — the contract between planner and executor.
+"""Design plan schema, the contract between planner and executor.
 
 A DesignPlan is the structured output of the planner. The executor reads it
 and instantiates each Part on a SchDoc, drops a net label at every PinRef,
@@ -32,7 +32,7 @@ class PartStatus(str, Enum):
 
 
 class PinRef(BaseModel):
-    """One end of a net — a refdes + pin identifier."""
+    """One end of a net, a refdes + pin identifier."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -49,7 +49,7 @@ class Part(BaseModel):
     lib_ref: str = Field(min_length=1, description="Library reference (symbol name)")
     lib_path: Optional[str] = Field(
         default=None,
-        description="Absolute path to the SchLib. Optional — executor falls "
+        description="Absolute path to the SchLib. Optional, executor falls "
         "back to project-installed libs when omitted.",
     )
     value: Optional[str] = Field(
@@ -70,13 +70,13 @@ class Part(BaseModel):
     )
     rationale: Optional[str] = Field(
         default=None,
-        description="One-line why-this-part — for audit logs, not sent to "
+        description="One-line why-this-part, for audit logs, not sent to "
         "Altium. Useful when the planner re-iterates after a validation fail.",
     )
 
 
 class Net(BaseModel):
-    """A logical net — connects 2+ pins via shared net labels."""
+    """A logical net, connects 2+ pins via shared net labels."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -105,7 +105,7 @@ class Net(BaseModel):
 
 
 class Zone(BaseModel):
-    """A rough placement region on a sheet — signal flow guidance."""
+    """A rough placement region on a sheet, signal flow guidance."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -115,7 +115,7 @@ class Zone(BaseModel):
     size_mm: tuple[float, float] = Field(default=(40.0, 40.0))
     role: Optional[str] = Field(
         default=None,
-        description="Free-text role tag — e.g. 'power_in', 'mcu', 'usb_front_end'.",
+        description="Free-text role tag, e.g. 'power_in', 'mcu', 'usb_front_end'.",
     )
 
 
@@ -144,7 +144,7 @@ class DesignRuleDelta(BaseModel):
 
 
 class BomLine(BaseModel):
-    """One BOM line — derived from the parts list, but planner-asserted."""
+    """One BOM line, derived from the parts list, but planner-asserted."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -167,7 +167,7 @@ class DesignPlan(BaseModel):
     spec: str = Field(min_length=1, description="The original natural-language spec")
     summary: str = Field(
         min_length=1,
-        description="One-paragraph explanation of the topology choice — for "
+        description="One-paragraph explanation of the topology choice, for "
         "the human reviewer, not the executor.",
     )
     sheets: list[Sheet] = Field(min_length=1)
@@ -205,7 +205,7 @@ class DesignPlan(BaseModel):
     def cross_check(self) -> list[str]:
         """Cross-validation that doesn't fit a single field validator.
 
-        Returns a list of human-readable problems — empty list means clean.
+        Returns a list of human-readable problems, empty list means clean.
         Called by the planner before returning a plan, and by the executor as
         a safety net.
         """

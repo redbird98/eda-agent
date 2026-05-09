@@ -5,7 +5,7 @@
 Each MCP tool can register a Pydantic model describing its request params
 and (optionally) its response data. The registry exposes those schemas as
 JSON Schema files in the workspace so the Pascal side can validate
-incoming requests against the same shape Python serialises — single source
+incoming requests against the same shape Python serialises, single source
 of truth, no drift.
 """
 
@@ -54,7 +54,7 @@ def register_command(
 ) -> CommandSpec:
     """Register a command with its request/response models.
 
-    Calling twice for the same command name updates the registration —
+    Calling twice for the same command name updates the registration,
     handy during development without server restart.
     """
     spec = CommandSpec(
@@ -124,7 +124,7 @@ def write_schemas_to(workspace_dir: Path) -> Path:
 
 
 def _write_json(path: Path, payload) -> None:
-    """Idempotent JSON write — only rewrite when content actually changes."""
+    """Idempotent JSON write, only rewrite when content actually changes."""
     serialised = json.dumps(payload, indent=2, sort_keys=True)
     if path.exists():
         try:

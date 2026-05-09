@@ -73,7 +73,7 @@ def test_check_ok_property() -> None:
 
 
 def test_health_checks_return_list() -> None:
-    """Smoke test — actual results depend on local install, but the list
+    """Smoke test, actual results depend on local install, but the list
     must be non-empty and every entry must be a Check."""
     from eda_agent.diag.health import run_health_checks
 

@@ -454,7 +454,7 @@ End;
 { ForceRecompileIfRequested - If Params carries force_recompile=true, flush   }
 { dirty docs to disk, invalidate the SmartCompile cache, and run a fresh      }
 { DM_Compile on the given project. Called by the net/connectivity handlers   }
-{ below, so it must be declared BEFORE them — DelphiScript has no forward    }
+{ below, so it must be declared BEFORE them, DelphiScript has no forward    }
 { declarations (no `Forward;` directive), functions must appear in           }
 { caller-dependency order.                                                    }
 {..............................................................................}
@@ -467,7 +467,7 @@ Begin
     Flag := LowerCase(ExtractJsonValue(Params, 'force_recompile'));
     If (Flag = 'true') Or (Flag = '1') Then
     Begin
-        { Flush editor-side edits first — DM_Compile reads from the          }
+        { Flush editor-side edits first, DM_Compile reads from the          }
         { on-disk project structure in some code paths, and users hit this  }
         { tool precisely when the in-editor state has diverged from the     }
         { cached netlist.                                                   }
@@ -848,7 +848,7 @@ Begin
 End;
 
 {..............................................................................}
-{ PCB board info — outline, layer stack, origin                              }
+{ PCB board info, outline, layer stack, origin                              }
 {..............................................................................}
 
 Function Proj_GetBoardInfo(Params : String; RequestId : String) : String;
@@ -914,7 +914,7 @@ Begin
 End;
 
 {..............................................................................}
-{ Annotate schematic designators — programmatic, no dialog                    }
+{ Annotate schematic designators, programmatic, no dialog                    }
 {                                                                              }
 { Strategy:                                                                    }
 { - For each SCH doc in the focused/specified project, iterate components.    }
@@ -963,7 +963,7 @@ Function CompareAnnotationOrder(Order : String;
     BX, BY, BDocIdx : Integer) : Integer;
 Begin
     Result := 0;
-    { Doc index is the primary tie-breaker — keep designators contiguous per sheet }
+    { Doc index is the primary tie-breaker, keep designators contiguous per sheet }
     If ADocIdx < BDocIdx Then Begin Result := -1; Exit; End;
     If ADocIdx > BDocIdx Then Begin Result :=  1; Exit; End;
 
@@ -1018,9 +1018,9 @@ Var
     RenameCount, ResetCount, SkipCount, ProcessedDocs : Integer;
     FilePath : String;
 
-    { Flat parallel arrays — one slot per unlocked, considered component.
+    { Flat parallel arrays, one slot per unlocked, considered component.
       Interfaces go in a TInterfaceList; sort keys go in parallel TStringList
-      (DelphiScript-friendly approach — TStringList.Objects[] with interface
+      (DelphiScript-friendly approach, TStringList.Objects[] with interface
       pointers is unreliable). }
     CompList   : TInterfaceList;
     Prefixes   : TStringList;
@@ -1028,10 +1028,10 @@ Var
     YCoords    : TStringList;  { Y in mils as integer-string }
     DocIndices : TStringList;
 
-    { Set of modified docs — PreProcess/PostProcess/Invalidate are scoped to these only }
+    { Set of modified docs, PreProcess/PostProcess/Invalidate are scoped to these only }
     TouchedDocs : TStringList;
 
-    { Per-prefix counter for final assignment — stored as "Prefix=N" lines }
+    { Per-prefix counter for final assignment, stored as "Prefix=N" lines }
     PrefixCounters : TStringList;
     PrefixIdx, CounterVal : Integer;
     N : Integer;
@@ -1086,7 +1086,7 @@ Begin
 
             FilePath := Doc.DM_FullPath;
 
-            { Don't force-open — RunProcess Client:OpenDocument strips
+            { Don't force-open, RunProcess Client:OpenDocument strips
               project association and creates a free document in the UI.
               Skip sheets that aren't currently loaded. }
             SchDoc := SchServer.GetSchDocumentByPath(FilePath);
@@ -1264,7 +1264,7 @@ Begin
         End;
 
     Finally
-        { TInterfaceList owns its interface references — Free to release them }
+        { TInterfaceList owns its interface references, Free to release them }
         CompList.Free;
         Prefixes.Free;
         XCoords.Free;
@@ -1330,7 +1330,7 @@ End;
 
 {..............................................................................}
 { Export PCB to STEP 3D model                                                 }
-{ Params: output_path (optional — if omitted, Altium may prompt)              }
+{ Params: output_path (optional, if omitted, Altium may prompt)              }
 {..............................................................................}
 
 Function Proj_ExportSTEP(Params : String; RequestId : String) : String;
@@ -1410,8 +1410,8 @@ End;
 
 {..............................................................................}
 { List output containers from an open .OutJob document                        }
-{ The OutJob file is an INI format — parse sections for containers.           }
-{ Params: outjob_path (optional — uses first open OutJob if omitted)          }
+{ The OutJob file is an INI format, parse sections for containers.           }
+{ Params: outjob_path (optional, uses first open OutJob if omitted)          }
 {..............................................................................}
 
 Function Proj_GetOutJobContainers(Params : String; RequestId : String) : String;
@@ -1465,7 +1465,7 @@ Begin
         Exit;
     End;
 
-    { OutJob files are INI format — parse OutputGroup sections }
+    { OutJob files are INI format, parse OutputGroup sections }
     Data := '[';
     First := True;
     IniFile := TIniFile.Create(OutJobPath);
@@ -1694,7 +1694,7 @@ Begin
             If Not FirstComp Then VarInfo := VarInfo + ',';
             FirstComp := False;
 
-            { Translate variation kind to string (If/Else chain — Case on enum crashes DelphiScript) }
+            { Translate variation kind to string (If/Else chain, Case on enum crashes DelphiScript) }
             If CompVar.DM_VariationKind = 0 Then
                 KindStr := 'Fitted'
             Else If CompVar.DM_VariationKind = 1 Then
@@ -2176,7 +2176,7 @@ Begin
     End;
 
     { Pre-scan DesigStr into the Wanted / Found arrays using the cursor }
-    { helper — we need random-access to the full list to track "not     }
+    { helper, we need random-access to the full list to track "not     }
     { found" after the iteration below.                                 }
     WantedCount := 0;
     Remaining := DesigStr;
@@ -2569,7 +2569,7 @@ End;
 { Push schematic changes to PCB (Design > Update PCB Document).               }
 {                                                                              }
 { Altium does not expose a fully documented DelphiScript API for silently      }
-{ executing an ECO — the IEngineeringChangeOrder / IECOManager interfaces     }
+{ executing an ECO, the IEngineeringChangeOrder / IECOManager interfaces     }
 { are not reachable from scripting in any publicly documented way.             }
 {                                                                              }
 { Strategy:                                                                    }
@@ -2577,7 +2577,7 @@ End;
 {      counts are available regardless of what the ECO dialog does.            }
 {   2. Invoke PCB:UpdatePCBFromProject with parameter flags (DisableDialog,   }
 {      Silent, Execute, NoConfirm, AutoApply) that various Altium builds      }
-{      honor — older builds ignore unknown flags but do not error. Modern     }
+{      honor, older builds ignore unknown flags but do not error. Modern     }
 {      builds (AD20+) honor DisableDialog=True by applying changes            }
 {      automatically in many cases.                                           }
 {   3. Re-compile and recompute mappings; report the before/after delta.      }
@@ -2914,7 +2914,7 @@ Begin
         Data := Data + ',"output_path":""';
     End;
 
-    { Hierarchy mode (If/Else chain — Case on enum crashes DelphiScript) }
+    { Hierarchy mode (If/Else chain, Case on enum crashes DelphiScript) }
     Try
         If Project.DM_HierarchyMode = 0 Then
             HierMode := 'Flat'
@@ -2973,7 +2973,7 @@ End;
 { sheets actually resident in SchServer. A sheet is listed as a project member  }
 { via DM_LogicalDocuments even when Altium hasn't loaded its editor state yet.  }
 { This handler walks every project sheet and, for any that aren't loaded, calls }
-{ Client.OpenDocument('SCH', path) — the same API set_document_parameter has    }
+{ Client.OpenDocument('SCH', path), the same API set_document_parameter has    }
 { used without creating free documents. RunProcess('Client:OpenDocument') would }
 { strip project membership and produce free docs; do not substitute it.         }
 {..............................................................................}

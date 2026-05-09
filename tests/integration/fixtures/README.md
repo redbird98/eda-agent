@@ -49,4 +49,4 @@ pytest tests/integration/ -v
 
 Without those preconditions met, the tests skip cleanly. Set
 `EDA_AGENT_INTEGRATION=1` in the environment to make missing preconditions
-hard-fail instead — appropriate for CI on a Windows runner with Altium.
+hard-fail instead, appropriate for CI on a Windows runner with Altium.

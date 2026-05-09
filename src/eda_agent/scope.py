@@ -68,7 +68,7 @@ def to_wire(scope: ScopeInput) -> dict:
             return Scope(type="project", file_path=path).model_dump(exclude_none=True)
         if scope in ("active_doc", "project", "doc"):
             return Scope(type=scope).model_dump(exclude_none=True)
-        # Unknown bare string — surface as-is so Pascal returns a clear
+        # Unknown bare string, surface as-is so Pascal returns a clear
         # INVALID_PARAMETER rather than silently treating it as active_doc.
         return Scope(type="active_doc", file_path=None).model_dump(exclude_none=True)
 

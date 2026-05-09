@@ -8,7 +8,7 @@
 { which part of the component it belongs to. Per Altium's official         }
 { createcomp_in_lib.pas reference, primitives without OwnerPartId /        }
 { OwnerPartDisplayMode are added to the component's collection but the    }
-{ editor can't display them — symbols appear empty.                        }
+{ editor can't display them, symbols appear empty.                        }
 Procedure SetOwnerPart(Obj : ISch_GraphicalObject; Component : ISch_Component);
 Begin
     If Obj = Nil Then Exit;
@@ -105,7 +105,7 @@ Begin
     End;
 
     // Create new component. Per Altium's createcomp_in_lib.pas reference,
-    // CurrentPartID and DisplayMode must be set BEFORE adding primitives —
+    // CurrentPartID and DisplayMode must be set BEFORE adding primitives;
     // primitives carry OwnerPartId/OwnerPartDisplayMode that link them to
     // a specific part of the component. Without this scaffold, primitives
     // are added but the lib editor can't display them (symbol shows empty).
@@ -123,7 +123,7 @@ Begin
         SchServer.ProcessControl.PostProcess(SchLib, 'Edit');
 
         // Broadcast as a new component (source=nil, dest=c_BroadCast). This
-        // is the pattern in Altium's createcomp_in_lib.pas — different from
+        // is the pattern in Altium's createcomp_in_lib.pas, different from
         // the per-primitive SchRegisterObject(Container, Obj) which sends
         // from the container.
         Try
@@ -988,7 +988,7 @@ Begin
             Client.ShowDocument(ServerDoc)
         Else
         Begin
-            // Not yet open — open it
+            // Not yet open, open it
             ResetParameters;
             AddStringParameter('ObjectKind', 'Document');
             AddStringParameter('FileName', LibPath);
@@ -1067,7 +1067,7 @@ Begin
 End;
 
 {..............................................................................}
-{ Diff two SchLib files — reports components only in A, only in B, or both   }
+{ Diff two SchLib files, reports components only in A, only in B, or both   }
 {..............................................................................}
 
 Function Lib_DiffLibraries(Params : String; RequestId : String) : String;
@@ -1576,7 +1576,7 @@ Begin
 
             Pin.Designator := Designator;
             Pin.Name := Name;
-            { Location is a by-value record — read, mutate, write back.         }
+            { Location is a by-value record, read, mutate, write back.         }
             Loc := Pin.Location;
             Loc.X := MilsToCoord(X);
             Loc.Y := MilsToCoord(Y);

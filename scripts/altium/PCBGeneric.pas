@@ -22,7 +22,7 @@ Begin
 End;
 
 {..............................................................................}
-{ PCB Property Getter — late-bound, returns '' on unsupported properties     }
+{ PCB Property Getter, late-bound, returns '' on unsupported properties     }
 {..............................................................................}
 
 Function GetPCBProperty(Obj : IPCB_Primitive; PropName : String) : String;
@@ -91,7 +91,7 @@ Begin
 End;
 
 {..............................................................................}
-{ PCB Filter / JSON / Apply — parallel to schematic versions                 }
+{ PCB Filter / JSON / Apply, parallel to schematic versions                 }
 {..............................................................................}
 
 Function MatchesFilterPCB(Obj : IPCB_Primitive; FilterStr : String) : Boolean;
@@ -164,7 +164,7 @@ Begin
 End;
 
 {..............................................................................}
-{ PCB Board iteration — query/modify/delete on active PCB                    }
+{ PCB Board iteration, query/modify/delete on active PCB                    }
 {..............................................................................}
 
 Function ProcessPCBBoardObjects(Board : IPCB_Board; ObjTypeInt : Integer;

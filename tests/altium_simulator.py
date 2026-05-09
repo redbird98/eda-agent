@@ -30,7 +30,7 @@ _VALID_ID_CHARS = set(string.ascii_letters + string.digits + "-_")
 
 
 def _is_valid_request_id(s: str) -> bool:
-    """Mirrors Pascal IsValidRequestId — alphanumeric/-/_ only, length 1..64."""
+    """Mirrors Pascal IsValidRequestId, alphanumeric/-/_ only, length 1..64."""
     if not s or len(s) > 64:
         return False
     return all(c in _VALID_ID_CHARS for c in s)
@@ -137,7 +137,7 @@ SIM_PROTOCOL_VERSION = 2
 
 
 def _build_success_response(request_id: str, data_json: str) -> str:
-    """Build a success response — mirrors Main.pas BuildSuccessResponse."""
+    """Build a success response, mirrors Main.pas BuildSuccessResponse."""
     if not data_json:
         data_json = "null"
     return (
@@ -155,7 +155,7 @@ def _build_error_response(
     error_msg: str,
     details_json: str = "",
 ) -> str:
-    """Build an error response — mirrors Main.pas BuildErrorResponseDetailed."""
+    """Build an error response, mirrors Main.pas BuildErrorResponseDetailed."""
     error_msg = error_msg.replace("\\", "\\\\")
     error_msg = error_msg.replace('"', '\\"')
     error_msg = error_msg.replace("\r", "\\r")
@@ -353,7 +353,7 @@ class AltiumSimulator:
     # ------------------------------------------------------------------
 
     def _poll_loop(self) -> None:
-        """Main polling loop — scans for any request_<id>.json file."""
+        """Main polling loop, scans for any request_<id>.json file."""
         stop_path = self.workspace_dir / "stop"
 
         while self.running:

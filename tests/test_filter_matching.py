@@ -22,7 +22,7 @@ Corresponding DelphiScript files:
 def parse_pipe_separated_conditions(filter_str: str) -> list[tuple[str, str]]:
     """Parse a pipe-separated filter string into (PropName, Value) tuples.
 
-    Mirror: Generic.pas:157 MatchesFilter — the parsing portion.
+    Mirror: Generic.pas:157 MatchesFilter, the parsing portion.
     Format: "PropName=Value|PropName2=Value2"
 
     This extracts the parsing logic from MatchesFilter so we can test
@@ -75,7 +75,7 @@ def matches_filter(obj_properties: dict[str, str], filter_str: str) -> bool:
 def parse_comma_separated_props(props_str: str) -> list[str]:
     """Parse a comma-separated property list into individual property names.
 
-    Mirror: Generic.pas:201 BuildObjectJson — the parsing portion.
+    Mirror: Generic.pas:201 BuildObjectJson, the parsing portion.
     Format: "Prop1,Prop2,Prop3"
     """
     props = []
@@ -129,7 +129,7 @@ def build_object_json(obj_properties: dict[str, str], props_str: str) -> str:
 def parse_pipe_separated_assignments(set_str: str) -> list[tuple[str, str]]:
     """Parse pipe-separated assignments into (PropName, Value) tuples.
 
-    Mirror: Generic.pas:239 ApplySetProperties — the parsing portion.
+    Mirror: Generic.pas:239 ApplySetProperties, the parsing portion.
     Format: "PropName=Value|PropName2=Value2"
     """
     assignments = []
@@ -157,7 +157,7 @@ def parse_pipe_separated_assignments(set_str: str) -> list[tuple[str, str]]:
 
 
 def split_command(command: str) -> tuple[str, str]:
-    """Mirror: Dispatcher.pas:6 ProcessCommand — command splitting only.
+    """Mirror: Dispatcher.pas:6 ProcessCommand, command splitting only.
 
     Splits "category.action" into (category, action).
     If no dot, action is empty string.
@@ -196,7 +196,7 @@ class TestParsePipeSeparatedConditions:
         assert result == [('A', '1'), ('B', '2'), ('C', '3')]
 
     def test_value_with_equals(self):
-        """Value can contain = signs — only the first = is the separator."""
+        """Value can contain = signs, only the first = is the separator."""
         result = parse_pipe_separated_conditions('Formula=X=Y+Z')
         assert result == [('Formula', 'X=Y+Z')]
 
@@ -247,7 +247,7 @@ class TestMatchesFilter:
         assert matches_filter(props, 'Text=VCC|ObjectId=25') is False
 
     def test_condition_for_missing_property(self):
-        """Property not in dict returns '' — matches only if expected is ''."""
+        """Property not in dict returns '', matches only if expected is ''."""
         props = {'Text': 'VCC'}
         assert matches_filter(props, 'MissingProp=') is True
         assert matches_filter(props, 'MissingProp=something') is False

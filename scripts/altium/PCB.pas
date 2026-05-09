@@ -103,7 +103,7 @@ Begin
     Count := 0;
 
     { MemberCount / MemberName[] are not exposed on IPCB_ObjectClass in         }
-    { DelphiScript — they are compile-time undeclared. Return class metadata   }
+    { DelphiScript, they are compile-time undeclared. Return class metadata   }
     { only; callers that need per-member resolution can iterate nets and       }
     { group them via the parent class on each net.                              }
     Iterator := Board.BoardIterator_Create;
@@ -315,7 +315,7 @@ End;
 { PCB_GetRuleProperties - Read properties of a design rule.                     }
 {                                                                               }
 { Constraint values (Gap, MinWidth, MinHoleSize, impedance, etc.) are NOT       }
-{ properties of the base IPCB_Rule interface — they live on the per-kind        }
+{ properties of the base IPCB_Rule interface, they live on the per-kind        }
 { subtypes (IPCB_ClearanceConstraint, IPCB_MaxMinWidthConstraint, etc.). The    }
 { kind-specific Pascal constants are not declared in every Altium build, so     }
 { accessing them directly compiles in some versions and crashes others with     }
@@ -324,7 +324,7 @@ End;
 { Rule.Descriptor is a stable, documented string property on every IPCB_Rule    }
 { subtype that already contains all constraint values in human-readable form,   }
 { e.g. "Width Constraint (Min=0.18mm) (Max=0.19mm) (Preferred=0.185mm)".        }
-{ Callers that need parsed values can split the descriptor — far safer than    }
+{ Callers that need parsed values can split the descriptor, far safer than    }
 { dispatching on RuleKind to typed subtype access in script.                    }
 {..............................................................................}
 
@@ -368,7 +368,7 @@ End;
 { Params: name + enabled / priority / scope1 / scope2 / comment.                }
 {                                                                               }
 { Constraint setters (gap_mils, min_width_mils, etc.) live on the per-kind     }
-{ subtypes — see the docstring on PCB_GetRuleProperties for why we don't       }
+{ subtypes, see the docstring on PCB_GetRuleProperties for why we don't       }
 { touch them here. To change a constraint value: edit the rule in the Altium   }
 { UI (PCB > Rules and Constraints Editor), or recreate the rule via            }
 { PCB_CreateDesignRule which takes a value parameter and dispatches to the     }
@@ -568,7 +568,7 @@ Begin
 
         // Note: IPCB_Component.Locked is undeclared in DelphiScript despite
         // being documented. Try/Except does not catch compile-time undeclared
-        // identifiers — assigning to Comp.Locked crashes the whole script.
+        // identifiers, assigning to Comp.Locked crashes the whole script.
         // Skipped for now; if a future build exposes it, add it back.
 
         JsonItems := JsonItems + '{"designator":"' + EscapeJsonString(Designator) + '",'
@@ -821,7 +821,7 @@ Begin
     FilterNet := ExtractJsonValue(Params, 'net');
     NetCount := 0;
 
-    // Include tracks AND arcs — routed nets use both. Arc length =
+    // Include tracks AND arcs, routed nets use both. Arc length =
     // radius * sweepAngle(radians). AnglesRange is SweepAngle for
     // IPCB_Arc (StartAngle/EndAngle also available but sweep is the
     // pre-computed arc extent in degrees).
@@ -1348,7 +1348,7 @@ Begin
     Board.LayerIsDisplayed[LayerID] := Visible;
 
     // Refresh the view
-    // Board.ViewManager_FullUpdate;  // removed — expensive on large boards; Altium auto-refreshes on user interaction
+    // Board.ViewManager_FullUpdate;  // removed, expensive on large boards; Altium auto-refreshes on user interaction
 
     Result := BuildSuccessResponse(RequestId,
         '{"layer":"' + EscapeJsonString(LayerStr) + '",'
@@ -1373,7 +1373,7 @@ Begin
     ResetParameters;
     RunProcess('PCB:RepourAllPolygons');
 
-    // Board.ViewManager_FullUpdate;  // removed — expensive on large boards; Altium auto-refreshes on user interaction
+    // Board.ViewManager_FullUpdate;  // removed, expensive on large boards; Altium auto-refreshes on user interaction
 
     Result := BuildSuccessResponse(RequestId,
         '{"repoured":true}');
@@ -1671,7 +1671,7 @@ Begin
         { Broadcast ONCE at the end of the batch instead of once per track.   }
         { A single BoardRegisteration on the board object (null child) is     }
         { enough to kick the connectivity/rules engines to refresh the whole  }
-        { board — much cheaper than N individual broadcasts.                   }
+        { board, much cheaper than N individual broadcasts.                   }
         PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
             PCBM_BoardRegisteration, c_NoEventData);
     Finally
@@ -1967,13 +1967,13 @@ Begin
         AddStringParameter('Net', NetStr);
     RunProcess('PCB:PlacePolygonPlane');
 
-    // Board.ViewManager_FullUpdate;  // removed — expensive on large boards; Altium auto-refreshes on user interaction
+    // Board.ViewManager_FullUpdate;  // removed, expensive on large boards; Altium auto-refreshes on user interaction
 
     Result := BuildSuccessResponse(RequestId,
         '{"interactive_tool_launched":true,'
         + '"layer":"' + EscapeJsonString(LayerStr) + '",'
         + '"net_name":"' + EscapeJsonString(NetStr) + '",'
-        + '"note":"Interactive polygon placement tool launched. Requires user to draw the polygon boundary in Altium Designer — no polygon is created by this call."}');
+        + '"note":"Interactive polygon placement tool launched. Requires user to draw the polygon boundary in Altium Designer, no polygon is created by this call."}');
 End;
 
 {..............................................................................}
@@ -2017,7 +2017,7 @@ Begin
 
     { Map textual net_scope to the enum used by the rule object.                  }
     { Blank / "any_net" keeps prior default behavior. For clearance rules          }
-    { "different_nets" is the normal setting — same-net tracks touching pads      }
+    { "different_nets" is the normal setting, same-net tracks touching pads      }
     { of their own net should NOT count as a clearance violation.                  }
     If NetScopeStr = 'different_nets' Then
         NetScopeVal := eNetScope_DifferentNets
@@ -2028,7 +2028,7 @@ Begin
 
     RuleValue := StrToIntDef(ValueStr, 10);
 
-    { Constraint values are NOT properties of the base IPCB_Rule interface —    }
+    { Constraint values are NOT properties of the base IPCB_Rule interface,    }
     { they live on the per-kind subtypes (IPCB_ClearanceConstraint,            }
     { IPCB_MaxMinWidthConstraint, IPCB_MaxMinHoleSizeConstraint, ...). DelphiScript  }
     { needs the variable typed as the actual subtype to expose constraint      }
@@ -2036,7 +2036,7 @@ Begin
     { fails with "Undeclared identifier" on builds where IPCB_Rule does not    }
     { surface the union of constraint properties (e.g. AD 26.5+).              }
     { Indexed properties also use function-call form: RuleWidth.MinWidth(L)    }
-    { not RuleWidth.MinWidth[L] — bracket form is rejected in DelphiScript.    }
+    { not RuleWidth.MinWidth[L], bracket form is rejected in DelphiScript.    }
     Rule := Nil;
     PCBServer.PreProcess;
     Try
@@ -3019,9 +3019,9 @@ Begin
     Count := 0;
 
     { Filtering only on eConnectionObject hangs because Altium treats it as a  }
-    { request for a fresh ratsnest — it rebuilds connectivity from scratch.    }
+    { request for a fresh ratsnest, it rebuilds connectivity from scratch.    }
     { Using the multi-type filter (same as PCB_GetBoardStatistics) is ~1000x  }
-    { faster — only walks primitives Altium already holds in memory.           }
+    { faster, only walks primitives Altium already holds in memory.           }
     Iterator := Board.BoardIterator_Create;
     Iterator.AddFilter_ObjectSet(MkSet(eTrackObject, eViaObject, ePadObject,
         eComponentObject, eFillObject, eTextObject, ePolyObject, eConnectionObject));
@@ -3736,7 +3736,7 @@ Begin
         Polygon.Layer := GetLayerFromString(LayerStr);
 
         { Assign each corner as a full TPolySegment record, per the
-          verified pattern from Altium scripting reference examples —
+          verified pattern from Altium scripting reference examples;
           field-level writes through Segments[I] aren't supported. }
         Polygon.PointCount := 4;
         Seg.Kind := ePolySegmentLine;
@@ -3753,7 +3753,7 @@ Begin
         End;
 
         { PourOver controls whether the polygon pours over existing
-          same-net primitives (tracks/pads). Default true — matches the
+          same-net primitives (tracks/pads). Default true, matches the
           common "pour GND plane" case. }
         If (PourOverStr = '') Or (LowerCase(PourOverStr) = 'true') Then
             Polygon.PourOver := ePolygonPourOver_Same
@@ -3989,7 +3989,7 @@ Begin
 
         { IPCB_Region uses MainContour + SetOutlineContour (NOT the polygon
           Segments API). Pattern taken from the Altium-Designer-addons
-          scripting-reference CreatePCBObjects.PAS example — the contour
+          scripting-reference CreatePCBObjects.PAS example, the contour
           X[I]/Y[I] arrays are 1-based (not 0-based). }
         Contour := Region.MainContour.Replicate;
         Contour.Count := 4;

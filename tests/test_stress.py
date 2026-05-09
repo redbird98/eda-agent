@@ -231,7 +231,7 @@ class TestEncodingEdgeCases:
         assert result["value"] == cjk
 
     def test_null_byte_causes_timeout(self, e2e_bridge):
-        """Null bytes still crash JSON encoders — bridge times out cleanly."""
+        """Null bytes still crash JSON encoders, bridge times out cleanly."""
         with pytest.raises((AltiumTimeoutError, ValueError)):
             e2e_bridge.send_command("project.set_parameter", {
                 "name": "NullTest",
@@ -264,7 +264,7 @@ class TestEncodingEdgeCases:
 
 class TestForeignResponseIsolation:
     """With per-request files, another caller's response file is invisible
-    to our poll. There is no stale-response handling to test — the file
+    to our poll. There is no stale-response handling to test, the file
     we poll for either appears (matching ID) or doesn't."""
 
     def test_foreign_response_does_not_disturb_us(self, tmp_path):
@@ -297,7 +297,7 @@ class TestRecovery:
     """Bridge must degrade gracefully when the response file is corrupt."""
 
     def test_corrupt_response_times_out(self, tmp_path):
-        """Non-JSON response — bridge retries until timeout."""
+        """Non-JSON response, bridge retries until timeout."""
         workspace = Path(tmp_path)
         bridge = make_bare_bridge(workspace, timeout=1.0)
 
@@ -309,7 +309,7 @@ class TestRecovery:
             bridge._poll_response(request_id, timeout=1.0)
 
     def test_response_array_instead_of_object(self, tmp_path):
-        """Valid JSON array (not object) — bridge does not crash."""
+        """Valid JSON array (not object), bridge does not crash."""
         workspace = Path(tmp_path)
         bridge = make_bare_bridge(workspace, timeout=1.0)
 
@@ -321,7 +321,7 @@ class TestRecovery:
             bridge._poll_response(request_id, timeout=1.0)
 
     def test_response_missing_fields(self, tmp_path):
-        """Correct id but missing success/data/error — defaults applied."""
+        """Correct id but missing success/data/error, defaults applied."""
         workspace = Path(tmp_path)
         bridge = make_bare_bridge(workspace, timeout=2.0)
 
@@ -335,7 +335,7 @@ class TestRecovery:
         assert resp.data is None
 
     def test_empty_response_file_times_out(self, tmp_path):
-        """Empty response file — bridge retries until timeout."""
+        """Empty response file, bridge retries until timeout."""
         workspace = Path(tmp_path)
         bridge = make_bare_bridge(workspace, timeout=1.0)
 
@@ -379,14 +379,14 @@ class TestConcurrency:
 
         def delayed_write():
             time.sleep(0.05)
-            # Partial — but written to a tmp suffix that the bridge ignores.
+            # Partial, but written to a tmp suffix that the bridge ignores.
             tmp = final_path.with_suffix(".json.tmp")
             tmp.write_text(
                 '{"protocol_version":2,"id":"' + request_id + '","succ',
                 encoding="utf-8",
             )
             time.sleep(0.05)
-            # Final atomic write — visible to the bridge as one complete file.
+            # Final atomic write, visible to the bridge as one complete file.
             tmp.write_text(
                 json.dumps({
                     "protocol_version": 2,
@@ -408,7 +408,7 @@ class TestConcurrency:
         assert resp.data == "recovered"
 
     def test_corrupt_request_file_cleaned_up(self, tmp_path):
-        """Partial/garbage per-request file — simulator cleans up and continues."""
+        """Partial/garbage per-request file, simulator cleans up and continues."""
         sim = AltiumSimulator(str(tmp_path))
         sim.start()
         try:

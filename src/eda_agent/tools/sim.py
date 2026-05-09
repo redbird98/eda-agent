@@ -7,17 +7,17 @@ The simulation flow is three steps:
 1. ``sch_get_simulation_readiness()`` audits every component on the
    active schematic and returns three buckets:
 
-     - ``ready``           — has SpicePrefix; nothing to do.
-     - ``needs_primitive`` — R/L/C/V/I where just setting the prefix +
+     - ``ready``          , has SpicePrefix; nothing to do.
+     - ``needs_primitive``, R/L/C/V/I where just setting the prefix +
                              value makes it simulatable (no model file).
-     - ``needs_file``      — an IC or active part that requires a
+     - ``needs_file``     , an IC or active part that requires a
                              vendor SPICE model (.mdl / .ckt / .lib).
 
    The response also carries ``_spice_guidance`` with the hard rule:
    **vendor datasheets + vendor-published SPICE models only**. LLM-
    generated SPICE models are not trustworthy and must not be used.
 
-2. ``sch_attach_spice_primitive()`` — for ``needs_primitive`` entries.
+2. ``sch_attach_spice_primitive()``, for ``needs_primitive`` entries.
    One call per component; no file needed.
 
 3. For ``needs_file`` entries: fetch the vendor model, save it locally,
@@ -38,7 +38,7 @@ SPICE_MODEL_RULES = [
     "SPICE models for ICs and active parts must come from the "
     "manufacturer's own product page or a trusted aggregator "
     "(SnapEDA, Ultra Librarian, Digi-Key model archive). Do NOT "
-    "generate a .mdl or .ckt file from datasheet reasoning — the "
+    "generate a .mdl or .ckt file from datasheet reasoning, the "
     "parameters that matter for convergence and small-signal "
     "behavior are not in any datasheet summary.",
     "Prefer the manufacturer page first. Most vendors host the model "
@@ -48,12 +48,12 @@ SPICE_MODEL_RULES = [
     "filetype:mdl OR filetype:cir'.",
     "A model file usually contains a .SUBCKT <name> declaration. The "
     "<name> is what goes into sch_attach_spice_model's model_name "
-    "parameter — not the file name.",
+    "parameter, not the file name.",
     "If a vendor SPICE model cannot be located after a real search, "
     "tell the user. Do not fabricate a substitute; running the sim "
     "with a made-up model gives confidently-wrong results.",
     "For passives (R, L, C) and ideal sources (V, I), no file is "
-    "needed — sch_attach_spice_primitive sets SpicePrefix + Value "
+    "needed, sch_attach_spice_primitive sets SpicePrefix + Value "
     "directly.",
 ]
 
@@ -97,7 +97,7 @@ def _guidance_block(
             "WebSearch using the suggested query below), save it to "
             "a local file, then call sch_attach_spice_model with the "
             ".SUBCKT name from inside the file. Do NOT fabricate a "
-            "SPICE model from datasheet reasoning — if the vendor "
+            "SPICE model from datasheet reasoning, if the vendor "
             "doesn't publish one, flag it to the user and stop."
         ),
         "search_hints": [
@@ -124,18 +124,18 @@ def register_sim_tools(mcp):
         Use this as step 1 of any simulation workflow. The response
         classifies each component into one of three buckets:
 
-          - ``ready``           — SpicePrefix already set; nothing to do.
-          - ``needs_primitive`` — a passive (R/L/C) or source (V/I/D/Q)
+          - ``ready``          , SpicePrefix already set; nothing to do.
+          - ``needs_primitive``, a passive (R/L/C) or source (V/I/D/Q)
                                   that just needs SpicePrefix + Value.
                                   Call sch_attach_spice_primitive for
                                   each entry.
-          - ``needs_file``      — an IC or active part that requires a
+          - ``needs_file``     , an IC or active part that requires a
                                   manufacturer-supplied .mdl / .ckt /
                                   .lib file. Call sch_attach_spice_model
                                   after fetching the file from the
                                   vendor.
 
-        CRITICAL — vendor SPICE models only:
+        CRITICAL, vendor SPICE models only:
         Never fabricate a SPICE model from datasheet reasoning. The
         parameters that matter for convergence, bias point, and
         small-signal behavior are not in any datasheet summary; a
@@ -177,7 +177,7 @@ def register_sim_tools(mcp):
         """Attach a built-in SPICE primitive to a component.
 
         For R/L/C/V/I/D/Q parts, Altium's simulator maps these to
-        built-in primitives — no model file is needed, just the prefix
+        built-in primitives, no model file is needed, just the prefix
         letter and a value string.
 
         Args:
@@ -186,12 +186,12 @@ def register_sim_tools(mcp):
                 R (resistor), L (inductor), C (capacitor),
                 V (voltage source), I (current source),
                 D (diode), Q (BJT), M (MOSFET), X (subcircuit).
-            value: SPICE value string — e.g. "10k" for a resistor,
+            value: SPICE value string, e.g. "10k" for a resistor,
                 "100n" for a cap, "DC 5" or "SIN(0 1 1k)" for a source,
                 a model name for a diode/BJT.
             spice_model: Optional explicit model name. For semi parts
                 (D, Q, M) this is the model name from a .mdl file.
-            sim_kind: Optional SimulationKind tag — "General",
+            sim_kind: Optional SimulationKind tag, "General",
                 "Subcircuit", "Model".
 
         Returns:
@@ -228,7 +228,7 @@ def register_sim_tools(mcp):
         Use this after fetching a vendor SPICE model file from the
         manufacturer and saving it locally. The model_name parameter
         must be the exact ``.SUBCKT <name>`` declaration from inside
-        the file — not the file name.
+        the file, not the file name.
 
         Args:
             designator: Component reference (e.g. "U1").
@@ -260,7 +260,7 @@ def register_sim_tools(mcp):
 
         Runs whatever analysis is configured in the project's active
         simulation profile (Simulation Dashboard in Altium). This tool
-        just kicks the run — profile setup (analysis type, parameters,
+        just kicks the run, profile setup (analysis type, parameters,
         probe selection) must already be done in the UI, because
         Altium's profile editor isn't exposed via DelphiScript.
 
@@ -274,7 +274,7 @@ def register_sim_tools(mcp):
 
         Args:
             analysis: Free-form label echoed back in the response.
-                Does not drive Altium — the active profile does.
+                Does not drive Altium, the active profile does.
 
         Returns:
             Dict with success, analysis, note.

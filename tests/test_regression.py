@@ -7,7 +7,7 @@ regress: IPC mechanics, JSON escape correctness, return-type contracts,
 and DelphiScript invariants that are expensive or impossible to verify
 any other way.
 
-Tests that merely grepped source files for substrings have been removed —
+Tests that merely grepped source files for substrings have been removed;
 a passing substring-match proves nothing about runtime behaviour and is
 trivially defeated by a comment.
 
@@ -60,7 +60,7 @@ def _event_loop():
 
 class TestPerRequestFileIsolation:
     """With per-request response files, a foreign caller's response file
-    is invisible to our poll — there is no "stale ID" race to handle."""
+    is invisible to our poll, there is no "stale ID" race to handle."""
 
     def test_foreign_response_does_not_disturb_poll(self, tmp_path):
         from eda_agent.config import AltiumConfig, MCPRuntimeConfig
@@ -95,7 +95,7 @@ class TestPerRequestFileIsolation:
             bridge._poll_response("correctid", timeout=0.3)
 
         assert foreign_path.exists(), (
-            "Foreign caller's response file must be left alone — per-request "
+            "Foreign caller's response file must be left alone, per-request "
             "files mean we never touch responses we don't own."
         )
 
@@ -145,7 +145,7 @@ class TestBatchFileLatin1Encoding:
 class TestNoPerObjectPreProcess:
     """In DelphiScript, the second argument to PreProcess / PostProcess
     must be a string, not an object. Passing an object silently fails at
-    runtime — no simulator can reproduce that, so we lock the source
+    runtime, no simulator can reproduce that, so we lock the source
     pattern down instead.
     """
 
@@ -241,12 +241,12 @@ class TestEmptyRequestCleanup:
 
 
 # =========================================================================
-# BuildObjectJson — no trailing comma
+# BuildObjectJson, no trailing comma
 # =========================================================================
 
 class TestNoTrailingComma:
     """BuildObjectJson must not emit a trailing comma before the closing
-    brace when the property list is empty — otherwise Python's JSON
+    brace when the property list is empty, otherwise Python's JSON
     parser would reject every query response."""
 
     def test_query_returns_valid_json(self, altium_sim, e2e_bridge):
@@ -385,7 +385,7 @@ class TestResetBridgeExported:
 
 class TestE2E_QueryModifyRoundTrip:
     """query_objects followed by modify_objects followed by another query
-    must observe the change — the full IPC + generic-primitive stack."""
+    must observe the change, the full IPC + generic-primitive stack."""
 
     def test_query_and_modify_roundtrip(self, altium_sim, e2e_bridge):
         result = e2e_bridge.send_command(
@@ -455,7 +455,7 @@ class TestE2E_SpecialCharsRoundTrip:
 
 class TestE2E_SetParameterRoundTrip:
     """project.set_parameter followed by project.get_parameters must
-    reflect the new value — covers the write + read path end-to-end."""
+    reflect the new value, covers the write + read path end-to-end."""
 
     def test_set_and_get_parameter(self, altium_sim, e2e_bridge):
         result = e2e_bridge.send_command(
@@ -492,13 +492,13 @@ class TestInstallScriptsIncludesDfm:
 
         assert pas_files, ".pas files should be copied"
         assert dfm_files, (
-            ".dfm files MUST be copied — without them DFM-backed forms fail "
+            ".dfm files MUST be copied, without them DFM-backed forms fail "
             "to compile at Altium startup (issue #2)"
         )
 
         statusform_dfm = tmp_path / "StatusForm.dfm"
         assert statusform_dfm.exists(), (
-            "StatusForm.dfm specifically must be copied — it is referenced "
+            "StatusForm.dfm specifically must be copied, it is referenced "
             "by the Altium_API.PrjScr and required for the dashboard"
         )
 
@@ -568,6 +568,6 @@ class TestConcurrentCallsBothComplete:
         """Per-request files eliminate the cross-caller race; the bridge no
         longer carries an _ipc_lock attribute."""
         assert not hasattr(e2e_bridge, "_ipc_lock"), (
-            "AltiumBridge should not expose _ipc_lock — per-request files "
+            "AltiumBridge should not expose _ipc_lock, per-request files "
             "make the lock unnecessary."
         )

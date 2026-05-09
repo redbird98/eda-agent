@@ -35,7 +35,7 @@ REVIEW_SECTIONS: dict[str, tuple[str, dict[str, Any], float]] = {
     "diff":          ("project.get_design_differences", {}, 30.0),
     "messages":      ("project.get_messages",        {},  10.0),
     "board_stats":   ("pcb.get_board_statistics",    {},  10.0),
-    # Slow / optional — only run on explicit request.
+    # Slow / optional, only run on explicit request.
     "bom":           ("project.get_bom",             {},  60.0),
     "drc":           ("pcb.run_drc",                 {},  90.0),
     "erc":           ("generic.run_erc",             {},  90.0),
@@ -58,12 +58,12 @@ DEFAULT_SECTIONS = [
 def _extract_unique_parts(
     components: Any, bom: Any
 ) -> list[dict[str, str]]:
-    """Thin wrapper around the shared extractor — kept for test compat."""
+    """Thin wrapper around the shared extractor, kept for test compat."""
     return extract_unique_parts(components=components, bom=bom)
 
 
 def _guidance_block(unique_parts: list[dict[str, str]]) -> dict[str, Any]:
-    """Thin wrapper around the shared guidance builder — kept for test compat."""
+    """Thin wrapper around the shared guidance builder, kept for test compat."""
     return build_guidance_block(unique_parts, context="design_review")
 
 
@@ -85,7 +85,7 @@ def register_review_tools(mcp):
         unrouted, BOM) is one round-trip instead of one LLM turn per
         section. That's the single biggest time cost on a full review.
 
-        CRITICAL — datasheet discipline (enforced via _review_guidance):
+        CRITICAL, datasheet discipline (enforced via _review_guidance):
         Before drawing ANY conclusion about a component's pin
         function, voltage rating, or electrical spec, fetch the
         actual manufacturer datasheet and verify. The schematic
@@ -136,7 +136,7 @@ def register_review_tools(mcp):
                     "project.force_recompile", {}, timeout=120.0
                 )
             except Exception:
-                # Non-fatal — individual sections still run; they'll
+                # Non-fatal, individual sections still run; they'll
                 # just use whatever compile state is current.
                 pass
 

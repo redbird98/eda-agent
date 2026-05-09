@@ -96,7 +96,7 @@ class TestBridgeIntegration:
 
         result = e2e_bridge.send_command("application.ping", timeout=5.0)
         assert result == "pong"
-        # The unrelated file is left alone — we never touch responses we don't own.
+        # The unrelated file is left alone, we never touch responses we don't own.
         assert foreign.exists()
 
     def test_unknown_command_category_raises(self, e2e_bridge):

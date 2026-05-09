@@ -94,7 +94,7 @@ begin
 end;
 
 { ========================================================================= }
-{ Functions under test — copied from DelphiScript source                     }
+{ Functions under test, copied from DelphiScript source                     }
 { ========================================================================= }
 
 { --- From Utils.pas --- }

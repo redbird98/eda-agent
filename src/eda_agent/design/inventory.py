@@ -1,18 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 George Saliba
-"""Library inventory snapshot — what the planner sees as 'available parts'.
+"""Library inventory snapshot, what the planner sees as 'available parts'.
 
 The planner reads this to bias its part choices toward libs the user
 already has. NDA scope: the snapshot only includes paths the caller
 explicitly hands in (the user's own neutral standard libraries). It does
-not crawl the current project's local libs — those may be client-specific
+not crawl the current project's local libs, those may be client-specific
 and re-using their content across engagements would breach NDA.
 
 Two modes:
 
-* ``snapshot_live(...)`` — opens each SchLib in Altium and queries the
+* ``snapshot_live(...)``, opens each SchLib in Altium and queries the
   bridge. Use during a real session.
-* ``LibraryInventory.from_json_file(...)`` — loads a previously saved
+* ``LibraryInventory.from_json_file(...)``, loads a previously saved
   snapshot. Lets the planner iterate offline without an Altium round-trip.
 """
 
@@ -42,7 +42,7 @@ class ComponentSummary(BaseModel):
 
 
 class LibrarySummary(BaseModel):
-    """One library row — path + components."""
+    """One library row, path + components."""
 
     model_config = ConfigDict(extra="ignore")
 
@@ -82,7 +82,7 @@ class LibraryInventory(BaseModel):
 def _component_summary_from_raw(row: dict) -> ComponentSummary:
     """Map a raw library.get_components row into a ComponentSummary.
 
-    The bridge response shape is permissive — different Altium builds /
+    The bridge response shape is permissive, different Altium builds /
     component types use different field names. We try the common ones.
     """
 
@@ -120,9 +120,9 @@ def snapshot_live(library_paths: list[Path]) -> LibraryInventory:
 
     The caller controls scope by handing in an explicit path list. We never
     crawl. Project-local libs stay out of the snapshot unless the caller
-    asks for them by hand — which is the right boundary for NDA isolation.
+    asks for them by hand, which is the right boundary for NDA isolation.
     """
-    from eda_agent.bridge import get_bridge  # late import — bridge needs Altium running
+    from eda_agent.bridge import get_bridge  # late import, bridge needs Altium running
 
     bridge = get_bridge()
     libs: list[LibrarySummary] = []

@@ -177,7 +177,7 @@ class TestDesignReviewSnapshotOrchestration:
 
         assert "project_info" in result
         assert "components" in result
-        # unrouted failed — must NOT be in result but MUST be in failed list.
+        # unrouted failed, must NOT be in result but MUST be in failed list.
         assert "unrouted" not in result
         assert any(
             f["section"] == "unrouted" for f in result["_sections_failed"]

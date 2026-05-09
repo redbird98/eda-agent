@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 George Saliba
-"""Smoke tests for design MCP tools — they register and dispatch correctly."""
+"""Smoke tests for design MCP tools, they register and dispatch correctly."""
 
 from __future__ import annotations
 
@@ -38,7 +38,7 @@ def _valid_plan_json() -> str:
 
 
 class _CapturingMCP:
-    """Minimal stand-in for FastMCP — records registered tools."""
+    """Minimal stand-in for FastMCP, records registered tools."""
 
     def __init__(self) -> None:
         self.tools: dict[str, callable] = {}
@@ -124,7 +124,7 @@ def test_execute_plan_rejects_invalid_json() -> None:
     assert any("invalid JSON" in n for n in result["notes"])
 
 
-# design.validate dispatches to the real bridge — covered by test_validator.py
+# design.validate dispatches to the real bridge, covered by test_validator.py
 # unit tests with a fake bridge. We do not exercise the MCP wrapper here
 # because it would need either a fake bridge injection point or a running
 # Altium instance.

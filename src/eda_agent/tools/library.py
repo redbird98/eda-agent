@@ -57,7 +57,7 @@ def register_library_tools(mcp):
     ) -> dict[str, Any]:
         """Add a pin to the current symbol.
 
-        IMPORTANT — if you need to add more than one pin, use
+        IMPORTANT, if you need to add more than one pin, use
         `lib_add_pins` (batch) instead. Creating a new symbol with 20+
         pins via this singular tool is the biggest wall-time sink in
         library workflows: each pin is a full LLM turn. The batch
@@ -111,15 +111,15 @@ def register_library_tools(mcp):
             pins: List of pin dicts, each with:
                 - designator (str, required)
                 - name       (str, required)
-                - x, y       (int, mils) — pin endpoint
+                - x, y       (int, mils), pin endpoint
                 - length     (int, mils, default 200)
-                - rotation   (int, default 0) — 0/90/180/270
-                - electrical_type (str, default "passive") — one of
+                - rotation   (int, default 0), 0/90/180/270
+                - electrical_type (str, default "passive"), one of
                   input/output/bidirectional/passive/open_collector/
                   open_emitter/power/hiz/io
                 - hidden     (bool, default False)
 
-        Example — a 4-pin dual op-amp stage:
+        Example, a 4-pin dual op-amp stage:
             lib_add_pins(pins=[
                 {"designator": "1", "name": "OUT1",  "x": 0,   "y": 0,
                  "rotation": 180, "electrical_type": "output"},
@@ -379,7 +379,7 @@ def register_library_tools(mcp):
         before calling this.
 
         Args:
-            component_name: Name of the schematic component (currently ignored —
+            component_name: Name of the schematic component (currently ignored,
                 see note above)
             footprint_name: Name of the footprint to link
             footprint_library: Library containing the footprint (optional if same library)
@@ -411,18 +411,18 @@ def register_library_tools(mcp):
     ) -> dict[str, Any]:
         """Link a 3D model to a footprint.
 
-        NOTE: offset and rotation parameters are currently ignored by Altium —
+        NOTE: offset and rotation parameters are currently ignored by Altium;
         set them manually in the library after linking.
 
         Args:
             component_name: Name of the footprint
             model_path: Path to the 3D model file (.step, .stp)
-            offset_x: X offset in mils (ignored — see note)
-            offset_y: Y offset in mils (ignored — see note)
-            offset_z: Z offset in mils (ignored — see note)
-            rotation_x: X rotation in degrees (ignored — see note)
-            rotation_y: Y rotation in degrees (ignored — see note)
-            rotation_z: Z rotation in degrees (ignored — see note)
+            offset_x: X offset in mils (ignored, see note)
+            offset_y: Y offset in mils (ignored, see note)
+            offset_z: Z offset in mils (ignored, see note)
+            rotation_x: X rotation in degrees (ignored, see note)
+            rotation_y: Y rotation in degrees (ignored, see note)
+            rotation_z: Z rotation in degrees (ignored, see note)
 
         Returns:
             Dictionary confirming link
@@ -511,7 +511,7 @@ def register_library_tools(mcp):
 
         Args:
             component_name: Name of the component
-            library_path: Path to the library (currently ignored — see note)
+            library_path: Path to the library (currently ignored, see note)
 
         Returns:
             Dictionary with full component details including pins and parameters

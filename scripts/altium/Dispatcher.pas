@@ -84,7 +84,7 @@ Begin
     EnvelopeError := ValidateRequestEnvelope(RequestId, Command);
     If EnvelopeError <> '' Then
     Begin
-        // Without a valid id we can't write a per-request response file —
+        // Without a valid id we can't write a per-request response file;
         // fall back to writing response.json so Python can still pick it up.
         If IsValidRequestId(RequestId) Then
             WriteResponseFile(RequestId,
@@ -126,7 +126,7 @@ Begin
 
     If ResponseContent = '' Then
     Begin
-        // Handler returned nothing — degenerate but recoverable. Synthesise
+        // Handler returned nothing, degenerate but recoverable. Synthesise
         // an INTERNAL_ERROR rather than leaving the caller polling forever.
         ResponseContent := BuildErrorResponse(RequestId, 'INTERNAL_ERROR',
             'Handler returned empty response for: ' + Command);
@@ -157,7 +157,7 @@ Begin
 End;
 
 {..............................................................................}
-{ Start MCP server — adaptive polling loop.                                  }
+{ Start MCP server, adaptive polling loop.                                  }
 {                                                                            }
 { Uses ADAPTIVE POLLING to avoid blocking Altium:                             }
 {   - Active (just processed a request): polls fast (PollIntervalActiveMs)   }
@@ -292,7 +292,7 @@ Begin
             End;
         End;
     Except
-        // Altium shutting down or fatal error — exit gracefully
+        // Altium shutting down or fatal error, exit gracefully
     End;
 
     Running := False;

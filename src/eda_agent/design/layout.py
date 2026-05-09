@@ -4,7 +4,7 @@
 
 Converts a DesignPlan's parts + zones into Altium mil coordinates. The
 goal is "components are visible and don't overlap"; aesthetic placement
-is not a goal of the autonomous flow — manual cleanup happens after.
+is not a goal of the autonomous flow, manual cleanup happens after.
 """
 
 from __future__ import annotations
@@ -82,7 +82,7 @@ def compute_layout(plan: DesignPlan) -> list[PlacedPart]:
             row = idx // DEFAULT_COLS_PER_ROW
             x = origin_x + col * GRID_PITCH_X_MILS
             # Y grows downward in Altium-on-screen but coordinates grow
-            # upward — subtract row * pitch so successive rows step down.
+            # upward, subtract row * pitch so successive rows step down.
             y = origin_y - row * GRID_PITCH_Y_MILS
             placed.append(
                 PlacedPart(

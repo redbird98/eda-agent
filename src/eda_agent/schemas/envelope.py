@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 George Saliba
-"""IPC envelope schema — must agree with Pascal Main.pas BuildSuccessResponse
+"""IPC envelope schema, must agree with Pascal Main.pas BuildSuccessResponse
 and BuildErrorResponseDetailed."""
 
 from typing import Any, Optional
@@ -21,7 +21,7 @@ class IPCRequest(BaseModel):
 
 
 class IPCError(BaseModel):
-    """Structured error payload — matches BuildErrorResponseDetailed."""
+    """Structured error payload, matches BuildErrorResponseDetailed."""
 
     code: str
     message: str

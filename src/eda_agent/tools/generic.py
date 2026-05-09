@@ -3,7 +3,7 @@
 """Generic primitive tools for Altium Designer MCP Server.
 
 These primitives provide a thin, generic interface to Altium objects.
-All intelligence lives in the Python/MCP side — the DelphiScript is just
+All intelligence lives in the Python/MCP side, the DelphiScript is just
 a pass-through layer for object iteration, property access, and process execution.
 """
 
@@ -40,14 +40,14 @@ def register_generic_tools(mcp):
                 "Text,Location.X,Location.Y" for net labels
                 "Designator.Text,Comment.Text,LibReference" for components
             scope: Document scope:
-                "active_doc" — current sheet only (default)
-                "project" — all SCH sheets in focused project
-                "doc:C:\\path\\to\\Sheet.SchDoc" — specific sheet by path (no focus change)
-                "project:C:\\path\\to\\Project.PrjPcb" — specific project by path
+                "active_doc", current sheet only (default)
+                "project", all SCH sheets in focused project
+                "doc:C:\\path\\to\\Sheet.SchDoc", specific sheet by path (no focus change)
+                "project:C:\\path\\to\\Project.PrjPcb", specific project by path
             filter: Pipe-separated property=value conditions (AND logic), e.g.:
-                "Text=VCC" — match net labels with Text equal to VCC
-                "Designator.Text=R1" — match component with designator R1
-                "" (empty) — match all objects of the type
+                "Text=VCC", match net labels with Text equal to VCC
+                "Designator.Text=R1", match component with designator R1
+                "" (empty), match all objects of the type
             limit: Maximum number of objects to return (0 = unlimited)
 
         Returns:
@@ -77,7 +77,7 @@ def register_generic_tools(mcp):
     ) -> dict[str, Any]:
         """Apply ONE set of property values to every object matching ONE filter.
 
-        IMPORTANT — if every target object needs a DIFFERENT value (move 10
+        IMPORTANT, if every target object needs a DIFFERENT value (move 10
         pins to 10 different positions, rename 5 nets to 5 different names,
         set distinct designators per component), use `batch_modify` instead.
         Each call to this tool is a full LLM round-trip; doing that in a
@@ -91,12 +91,12 @@ def register_generic_tools(mcp):
         Args:
             object_type: Altium object type constant (see query_objects)
             set: Pipe-separated property=value assignments to apply, e.g.:
-                "Text=NEW_NAME" — set Text property
-                "Location.X=100|Location.Y=200" — set multiple properties
+                "Text=NEW_NAME", set Text property
+                "Location.X=100|Location.Y=200", set multiple properties
             scope: Document scope:
-                "active_doc" — current sheet only (default)
-                "project" — all SCH sheets in focused project
-                "doc:C:\\path\\to\\Sheet.SchDoc" — specific sheet by path (no focus change)
+                "active_doc", current sheet only (default)
+                "project", all SCH sheets in focused project
+                "doc:C:\\path\\to\\Sheet.SchDoc", specific sheet by path (no focus change)
             filter: Pipe-separated property=value conditions (AND logic)
 
         Returns:
@@ -329,7 +329,7 @@ def register_generic_tools(mcp):
         """Apply many filter+set operations in ONE IPC round-trip.
 
         PREFER THIS over looping `modify_objects` whenever you have more
-        than one change to make — especially when each change targets a
+        than one change to make, especially when each change targets a
         different object (different designator, different pin name,
         different sheet). A single `batch_modify` call touches N objects
         in the same Altium transaction; N separate `modify_objects` calls
@@ -354,7 +354,7 @@ def register_generic_tools(mcp):
         Returns:
             Dictionary with operations_processed count
 
-        Example — reposition 10 pins on a library symbol in ONE call
+        Example, reposition 10 pins on a library symbol in ONE call
         (vs. 10 separate modify_objects calls, each a full LLM turn):
             batch_modify(operations=[
                 {"scope": "active_doc", "object_type": "ePin",
@@ -369,7 +369,7 @@ def register_generic_tools(mcp):
                 ... # 7 more pins
             ])
 
-        Example — update 4 parameters across every project sheet in ONE call:
+        Example, update 4 parameters across every project sheet in ONE call:
             batch_modify(operations=[
                 {"scope": "project", "object_type": "eParameter",
                  "filter": "Name=Engineer",     "set": "Text=John Smith"},
@@ -381,7 +381,7 @@ def register_generic_tools(mcp):
                  "filter": "Name=CompanyName",  "set": "Text=Acme Corp"},
             ])
 
-        Example — different titles on specific sheets in ONE call:
+        Example, different titles on specific sheets in ONE call:
             batch_modify(operations=[
                 {"scope": "doc:C:\\path\\TopLevel.SchDoc",
                  "object_type": "eParameter",
@@ -469,7 +469,7 @@ def register_generic_tools(mcp):
         PCB path sets IPCB_Net.IsHighlighted on the matched net (the
         documented property). Schematic path walks wires / net labels /
         power ports / pins / sheet entries on the active sheet and
-        marks those whose NetName matches as Selection=True — the
+        marks those whose NetName matches as Selection=True, the
         closest thing Altium exposes to a "highlight" on schematic
         without interactive commands.
 
@@ -483,7 +483,7 @@ def register_generic_tools(mcp):
 
         Returns:
             Dict with success, net, context ("pcb" or "schematic"), and
-            `highlighted` (count of matches — 1 for PCB, N for sch).
+            `highlighted` (count of matches, 1 for PCB, N for sch).
         """
         bridge = get_bridge()
         result = await bridge.send_command_async(
@@ -508,7 +508,7 @@ def register_generic_tools(mcp):
             surprises you or the user (e.g. a net appears to be missing
             a pin you expect on it, or appears to be disconnected from
             a component you know is wired).
-          - Investigating "board works but schematic says otherwise" —
+          - Investigating "board works but schematic says otherwise":
             a non-empty `pcb_only` list means the PCB was fabricated
             from an older schematic revision, or an edit broke the
             post-ECO merge. `Design > Update PCB from Schematic` would
@@ -527,9 +527,9 @@ def register_generic_tools(mcp):
               - sch_only_count, pcb_only_count
               - in_sync (True only when both sides list the same pins
                 AND the net exists on at least one side)
-              - sch_pins[], pcb_pins[] — each entry is
+              - sch_pins[], pcb_pins[], each entry is
                 "Designator.PinNumber"
-              - sch_only[], pcb_only[] — the diff lists. If
+              - sch_only[], pcb_only[], the diff lists. If
                 `sch_only` is non-empty the PCB is missing those
                 connections. If `pcb_only` is non-empty the PCB has
                 stale connections the current schematic doesn't have.
@@ -601,7 +601,7 @@ def register_generic_tools(mcp):
         """Toggle between 2D and 3D view for PCB documents.
 
         Args:
-            mode: Target view mode — "3d" or "2d" (default "3d")
+            mode: Target view mode, "3d" or "2d" (default "3d")
 
         Returns:
             Dictionary confirming the view switch
@@ -784,7 +784,7 @@ def register_generic_tools(mcp):
     ) -> dict[str, Any]:
         """Place a sheet symbol linking to a child schematic document.
 
-        Used for hierarchical designs — the parent sheet has one sheet
+        Used for hierarchical designs, the parent sheet has one sheet
         symbol per child .SchDoc in the project. The sheet_file_name
         must exactly match a .SchDoc that's a project member. Without
         that match the sheet symbol is dangling.
@@ -1028,8 +1028,8 @@ def register_generic_tools(mcp):
             name: Port name (maps to net name)
             x: X coordinate in mils
             y: Y coordinate in mils
-            style: Arrow style — "none", "left", "right", "left_right"
-            io_type: I/O direction — "unspecified", "output", "input", "bidirectional"
+            style: Arrow style, "none", "left", "right", "left_right"
+            io_type: I/O direction, "unspecified", "output", "input", "bidirectional"
 
         Returns:
             Dictionary confirming placement
@@ -1061,13 +1061,13 @@ def register_generic_tools(mcp):
             x: X coordinate in mils
             y: Y coordinate in mils
             style: Symbol style:
-                "circle" — circle symbol (default, typical for VCC)
-                "arrow" — arrow symbol
-                "bar" — bar/line symbol
-                "wave" — wave symbol
-                "gnd_power" — power ground symbol
-                "gnd_signal" — signal ground symbol
-                "gnd_earth" — earth ground symbol
+                "circle", circle symbol (default, typical for VCC)
+                "arrow", arrow symbol
+                "bar", bar/line symbol
+                "wave", wave symbol
+                "gnd_power", power ground symbol
+                "gnd_signal", signal ground symbol
+                "gnd_earth", earth ground symbol
 
         Returns:
             Dictionary confirming placement
@@ -1139,7 +1139,7 @@ def register_generic_tools(mcp):
         scope: str = "active_doc",
         filter: str = "",
     ) -> dict[str, Any]:
-        """Quick count of objects by type — faster than query_objects when you only need the count.
+        """Quick count of objects by type, faster than query_objects when you only need the count.
 
         Args:
             object_type: Altium object type constant (see query_objects for options)
@@ -1252,14 +1252,14 @@ def register_generic_tools(mcp):
 
         Args:
             unit: one of
-                "mil"            — imperial, mils (0.001 in)
-                "inch"           — imperial, inches
-                "dxp"            — DXP default
-                "auto_imperial"  — auto-scaled imperial display
-                "mm"             — metric, millimetres
-                "cm"             — metric, centimetres
-                "m"              — metric, metres
-                "auto_metric"    — auto-scaled metric display
+                "mil"           , imperial, mils (0.001 in)
+                "inch"          , imperial, inches
+                "dxp"           , DXP default
+                "auto_imperial" , auto-scaled imperial display
+                "mm"            , metric, millimetres
+                "cm"            , metric, centimetres
+                "m"             , metric, metres
+                "auto_metric"   , auto-scaled metric display
 
         Returns:
             Dictionary confirming the change, with the resulting
@@ -1286,14 +1286,14 @@ def register_generic_tools(mcp):
         uses:
 
         - ``param_name="DifferentialPair", param_value="USB"``
-          — marks the net as a member of the USB differential pair.
+         , marks the net as a member of the USB differential pair.
         - ``param_name="NetClass", param_value="HighSpeed"``
-          — assigns the net to the HighSpeed class.
+         , assigns the net to the HighSpeed class.
         - ``param_name="Signal_Stimulus", param_value="..."``
-          — any custom per-net rule parameter.
+         , any custom per-net rule parameter.
 
         Args:
-            x, y: Location in mils — place ON the target wire/net.
+            x, y: Location in mils, place ON the target wire/net.
             param_name: Parameter name (e.g. "NetClass", "DifferentialPair")
             param_value: Parameter value
 
@@ -1322,9 +1322,9 @@ def register_generic_tools(mcp):
         before a compile, or to verify a bulk placement worked.
 
         Returns:
-            Dictionary with ``directives`` array — each entry has
+            Dictionary with ``directives`` array, each entry has
             ``name``, ``x``, ``y``, and a ``parameters`` list of
-            ``{name, value}`` objects — plus ``count``.
+            ``{name, value}`` objects, plus ``count``.
         """
         bridge = get_bridge()
         result = await bridge.send_command_async("generic.get_directives", {})
@@ -1456,7 +1456,7 @@ def register_generic_tools(mcp):
         """Place a cross-sheet connector (off-sheet port) on the active sheet.
 
         Cross-sheet connectors are the hierarchical equivalent of a net
-        label — they connect a signal to the same net name on another
+        label, they connect a signal to the same net name on another
         sheet.
 
         Args:
@@ -1579,7 +1579,7 @@ def register_generic_tools(mcp):
 
         Args:
             operations: List of create dicts, each with:
-                - scope: "active_doc" (default) — only active_doc is
+                - scope: "active_doc" (default), only active_doc is
                   currently honored for creates.
                 - object_type: Altium type name (e.g. "eNetLabel",
                   "eJunction", "eNoERC").
@@ -1588,7 +1588,7 @@ def register_generic_tools(mcp):
                 - container: "document" (default) or "component" (for
                   library-symbol contents when a lib is active).
 
-        Example — drop 3 net labels in one call:
+        Example, drop 3 net labels in one call:
             batch_create(operations=[
                 {"object_type": "eNetLabel",
                  "properties": "Text=VCC|Location.X=100|Location.Y=200"},
@@ -1634,7 +1634,7 @@ def register_generic_tools(mcp):
         """Delete matching objects across many scope/type/filter operations.
 
         PREFER THIS over looping `delete_objects`. Each op is evaluated
-        in one go — cleaning a mixed set of stale junctions, no-ERCs,
+        in one go, cleaning a mixed set of stale junctions, no-ERCs,
         and net labels costs one IPC round-trip instead of N.
 
         Args:
@@ -1647,7 +1647,7 @@ def register_generic_tools(mcp):
                   conditions (AND logic), same format as
                   ``delete_objects``.
 
-        Example — purge all no-ERCs on a specific sheet and every
+        Example, purge all no-ERCs on a specific sheet and every
         junction on the project:
             batch_delete(operations=[
                 {"scope": "doc:C:\\proj\\Power.SchDoc",
@@ -1693,7 +1693,7 @@ def register_generic_tools(mcp):
         Args:
             wires: List of wire dicts, each with x1, y1, x2, y2 in mils.
 
-        Example — a 3-segment L-shaped bus routing:
+        Example, a 3-segment L-shaped bus routing:
             place_wires(wires=[
                 {"x1": 100, "y1": 200, "x2": 300, "y2": 200},
                 {"x1": 300, "y1": 200, "x2": 300, "y2": 400},
@@ -1730,15 +1730,15 @@ def register_generic_tools(mcp):
 
         Args:
             placements: List of placement dicts, each with:
-                - library_path (str, optional — empty uses an
+                - library_path (str, optional, empty uses an
                   already-open library)
-                - lib_reference (str, required) — component name
-                - x, y (int, mils) — placement location
-                - designator (str, optional) — override designator
-                - rotation (int, optional) — 0 / 90 / 180 / 270
-                - footprint (str, optional) — override current footprint
+                - lib_reference (str, required), component name
+                - x, y (int, mils), placement location
+                - designator (str, optional), override designator
+                - rotation (int, optional), 0 / 90 / 180 / 270
+                - footprint (str, optional), override current footprint
 
-        Example — place a 5-part BOM row:
+        Example, place a 5-part BOM row:
             place_sch_components_from_library(placements=[
                 {"library_path": "C:\\Lib\\ST.SchLib",
                  "lib_reference": "STM32F411RE",
@@ -1785,7 +1785,7 @@ def register_generic_tools(mcp):
     ) -> dict[str, Any]:
         """Attach SPICE primitives to MANY components in ONE call.
 
-        PREFER THIS after running `sch_get_simulation_readiness` — the
+        PREFER THIS after running `sch_get_simulation_readiness`, the
         readiness response typically lists 20-50 passives that all
         need the SpicePrefix + Value parameter pair. Looping
         `sch_attach_spice_primitive` costs one LLM turn per component;
@@ -1794,15 +1794,15 @@ def register_generic_tools(mcp):
         Args:
             attachments: List of attach dicts, each with:
                 - designator (str, required)
-                - primitive  (str, required) — R/L/C/V/I/D/Q/M/X
-                - value      (str, optional) — "10k", "100n",
+                - primitive  (str, required), R/L/C/V/I/D/Q/M/X
+                - value      (str, optional), "10k", "100n",
                   "DC 5", "SIN(0 1 1k)", etc.
-                - spice_model (str, optional) — model name for
+                - spice_model (str, optional), model name for
                   semi/sub-circuit parts
-                - sim_kind   (str, optional) — "General" /
+                - sim_kind   (str, optional), "General" /
                   "Subcircuit" / "Model"
 
-        Example — attach the 4 passives from a readiness audit:
+        Example, attach the 4 passives from a readiness audit:
             sch_attach_spice_primitives(attachments=[
                 {"designator": "R1", "primitive": "R", "value": "10k"},
                 {"designator": "R2", "primitive": "R", "value": "10k"},

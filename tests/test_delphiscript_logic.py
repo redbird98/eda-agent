@@ -18,7 +18,7 @@ import math
 
 
 # ---------------------------------------------------------------------------
-# Coordinate conversion mirrors — Utils.pas
+# Coordinate conversion mirrors, Utils.pas
 # ---------------------------------------------------------------------------
 
 
@@ -47,7 +47,7 @@ def coord_to_mm(coord: int) -> float:
 
 
 # ---------------------------------------------------------------------------
-# String/type conversion mirrors — Utils.pas
+# String/type conversion mirrors, Utils.pas
 # ---------------------------------------------------------------------------
 
 
@@ -82,11 +82,11 @@ def str_to_float_def(s: str, default: float) -> float:
 
 
 # ---------------------------------------------------------------------------
-# Object type mapping mirrors — Generic.pas / PCBGeneric.pas
+# Object type mapping mirrors, Generic.pas / PCBGeneric.pas
 # ---------------------------------------------------------------------------
 
 # Schematic object type constants (from Altium's API headers)
-# These don't need to match exact values — we just test the mapping logic
+# These don't need to match exact values, we just test the mapping logic
 SCH_OBJECT_TYPES = {
     'eNetLabel': 1, 'ePort': 2, 'ePowerObject': 3, 'eSchComponent': 4,
     'eWire': 5, 'eBus': 6, 'eBusEntry': 7, 'eParameter': 8, 'ePin': 9,
@@ -116,7 +116,7 @@ def object_type_from_string_pcb(type_str: str) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Batch file parsing mirrors — Library.pas
+# Batch file parsing mirrors, Library.pas
 # ---------------------------------------------------------------------------
 
 
@@ -164,7 +164,7 @@ def parse_batch_rename_line(line: str) -> tuple[str, str] | None:
 
 
 # ---------------------------------------------------------------------------
-# Pipe-separated parameter parsing — Application.pas
+# Pipe-separated parameter parsing, Application.pas
 # ---------------------------------------------------------------------------
 
 

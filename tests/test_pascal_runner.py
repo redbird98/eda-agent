@@ -29,7 +29,7 @@ REAL_PASCAL_SRC = TESTS_DIR / "test_real_pascal.pas"
 
 
 def _discover_fpc_unit_paths(fpc_exe: str) -> list:
-    """Mirror of test_cross_validate._discover_fpc_unit_paths — keep in sync."""
+    """Mirror of test_cross_validate._discover_fpc_unit_paths, keep in sync."""
     roots_to_scan: set = set()
     fpc_dir = Path(fpc_exe).resolve().parent
     for rel in ("../../units", "../units", "units"):
@@ -131,7 +131,7 @@ class TestPascalLogicProgram:
             )
             assert total > 0, "Pascal test program reported zero tests"
         else:
-            # No summary block — fall back to checking for failure keywords.
+            # No summary block, fall back to checking for failure keywords.
             assert not failure_lines, (
                 "Pascal test output contains failure-looking lines:\n"
                 + "\n".join(failure_lines)

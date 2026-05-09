@@ -124,7 +124,7 @@ class TestAltiumBridge:
 
         bridge.ensure_workspace()
 
-        # A different caller's response file — we should not even see it.
+        # A different caller's response file, we should not even see it.
         response_data = {
             "protocol_version": PROTOCOL_VERSION,
             "id": "differentid",

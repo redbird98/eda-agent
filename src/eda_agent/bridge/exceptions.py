@@ -3,7 +3,7 @@
 """Custom exceptions for Altium Bridge.
 
 Errors carry a code (programmatic dispatch), a message (user display), and
-optional details (structured failure context — e.g. which item in a batch
+optional details (structured failure context, e.g. which item in a batch
 failed). The hierarchy mirrors the canonical error code categories defined
 in scripts/altium/Main.pas comments and surfaces them as exception
 subclasses so callers can ``except PreconditionError`` instead of
@@ -14,7 +14,7 @@ from typing import Any, Optional
 
 
 # ---------------------------------------------------------------------------
-# Error code categories — keep aligned with the Pascal side. New codes get
+# Error code categories. Keep aligned with the Pascal side. New codes get
 # a category by adding them to the appropriate set below; uncategorised
 # codes default to AltiumCommandError.
 # ---------------------------------------------------------------------------
@@ -27,7 +27,7 @@ _CONNECTION_CODES = {
     "ALTIUM_TIMEOUT",
 }
 
-# Wire-protocol mismatch — versions disagree.
+# Wire-protocol mismatch, versions disagree.
 _PROTOCOL_CODES = {
     "PROTOCOL_VERSION_MISMATCH",
     "MALFORMED_REQUEST",
@@ -117,7 +117,7 @@ class ScriptNotLoadedError(AltiumError):
 
 
 class AltiumCommandError(AltiumError):
-    """Generic command failure — base for code-specific subclasses below.
+    """Generic command failure; base for code-specific subclasses below.
 
     Use ``raise_for_code`` to construct the right subclass automatically
     from a Pascal-side error code.
@@ -157,7 +157,7 @@ class PreconditionError(AltiumCommandError):
     """Altium isn't in the right state to answer this request.
 
     The caller fixes by opening the right project, loading the right doc,
-    selecting the right object — not by changing the request itself.
+    selecting the right object, not by changing the request itself.
     """
 
 
@@ -185,7 +185,7 @@ class OperationFailedError(AltiumCommandError):
 
 
 class InternalError(AltiumCommandError):
-    """Pascal-side bug — unhandled exception, contract violation, etc."""
+    """Pascal-side bug: unhandled exception, contract violation, etc."""
 
 
 # ---------------------------------------------------------------------------

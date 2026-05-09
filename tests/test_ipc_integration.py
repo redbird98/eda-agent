@@ -342,7 +342,7 @@ class TestFileIPCEdgeCases:
         assert req_path.read_text(encoding='utf-8') == ''
 
     def test_missing_request_id(self, workspace_dir):
-        """Pascal extracts ID from filename now, not body — but body lookup
+        """Pascal extracts ID from filename now, not body, but body lookup
         still returns '' for missing id field."""
         req_path = workspace_dir / "request_someid.json"
         req_path.write_text('{"command":"test","params":{}}', encoding='utf-8')

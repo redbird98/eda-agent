@@ -8,7 +8,7 @@ Function App_Ping(RequestId : String) : String;
 Begin
     // Return the compiled-in SCRIPT_VERSION so Python can detect a stale
     // Altium script cache. cast_errors surfaces the silent-cast counter
-    // (see RecordCastError) — non-zero at session end indicates an
+    // (see RecordCastError), non-zero at session end indicates an
     // interface mismatch worth investigating.
     Result := BuildSuccessResponse(RequestId,
         '{"pong":true,"script_version":"' + SCRIPT_VERSION +
@@ -132,7 +132,7 @@ Begin
     // RunProcess('WorkspaceManager:OpenObject') would load it but strip
     // any project association, producing a "free document" in the UI
     // (tab title shows the full absolute path instead of filename).
-    // Refuse the call if the doc isn't loaded — the caller must open
+    // Refuse the call if the doc isn't loaded, the caller must open
     // it in Altium first.
     ServerDoc := Client.GetDocumentByPath(FilePath);
     If ServerDoc = Nil Then
@@ -324,8 +324,8 @@ End;
 {                                                                               }
 { Params: kind (required, e.g. 'PCB' or 'SCH'),                                }
 {         file_path (required, absolute path where the doc should live),       }
-{         name (optional display name — defaults to the filename),             }
-{         add_to_project (optional bool — defaults to true)                    }
+{         name (optional display name, defaults to the filename),             }
+{         add_to_project (optional bool, defaults to true)                    }
 {..............................................................................}
 
 Function App_CreateDocument(Params : String; RequestId : String) : String;
@@ -370,7 +370,7 @@ Begin
       so DoFileSave('') becomes a no-op. SetFileName forces the path;
       ensure it's set before the save. If DoFileSave fails for any
       reason, fall back to WorkspaceManager:SaveObject with an explicit
-      FileName — that path is effectively Save-As, which is what we
+      FileName, that path is effectively Save-As, which is what we
       want for a previously-unsaved document. }
     Saved := False;
     Try ServerDoc.SetFileName(FilePath); Except End;
@@ -393,7 +393,7 @@ Begin
 
     { Add to the focused project via IProject.DM_AddSourceDocument.            }
     { The earlier RunProcess('WorkspaceManager:AddDocumentToProject') path     }
-    { silently no-ops in some workspace states — DM_AddSourceDocument is the  }
+    { silently no-ops in some workspace states, DM_AddSourceDocument is the  }
     { documented project-side API and is what working examples in the         }
     { reference/altium-delphiscripts-brett repo use.                          }
     Added := False;

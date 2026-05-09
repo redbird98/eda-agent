@@ -3,7 +3,7 @@
 """Full-preflight checks that talk to a running Altium.
 
 Runs all the health checks first, then a series of canaries that exercise
-the IPC bridge — script alive, version match, basic command round-trips,
+the IPC bridge, script alive, version match, basic command round-trips,
 the Pascal handlers we lean on most.
 
 Library-path canaries are explicit-input only: the doctor accepts an
@@ -30,7 +30,7 @@ def _altium_process_running() -> Check:
         return Check(
             name="altium process running",
             status=Status.SKIP,
-            message="psutil not installed — cannot enumerate processes",
+            message="psutil not installed, cannot enumerate processes",
         )
 
     target = os.environ.get("EDA_AGENT_ALTIUM_PROCESS", "X2.exe").lower()
@@ -90,7 +90,7 @@ def _check_script_version_match(ping: Optional[dict]) -> Check:
         return Check(
             name="script version match",
             status=Status.SKIP,
-            message="cannot check — script not responding",
+            message="cannot check, script not responding",
             severity=Severity.MINOR,
         )
 
@@ -112,7 +112,7 @@ def _check_script_version_match(ping: Optional[dict]) -> Check:
         return Check(
             name="script version match",
             status=Status.SKIP,
-            message=f"altium={altium_v!r} bundled={bundled_v!r} — incomplete",
+            message=f"altium={altium_v!r} bundled={bundled_v!r}, incomplete",
             severity=Severity.MINOR,
         )
 
@@ -147,7 +147,7 @@ def _check_save_all_canary() -> Check:
             status=Status.FAIL,
             message=f"save_all round-trip failed: {exc}",
             fix=(
-                "Script may be hung behind a modal Altium dialog — "
+                "Script may be hung behind a modal Altium dialog, "
                 "check Altium for a popup and click OK, then re-run."
             ),
         )
@@ -165,7 +165,7 @@ def _check_lib_paths(library_paths: Sequence[str]) -> list[Check]:
                 name="library paths",
                 status=Status.SKIP,
                 message=(
-                    "no --library paths supplied — pass one or more "
+                    "no --library paths supplied, pass one or more "
                     "--library PATH.SchLib to test lib reachability"
                 ),
                 severity=Severity.MINOR,
@@ -239,7 +239,7 @@ def run_doctor_checks(library_paths: Optional[Sequence[str]] = None) -> list[Che
     """Compose health + Altium-side preflight."""
     checks: list[Check] = []
 
-    # Health checks first — early failures often explain later ones.
+    # Health checks first, early failures often explain later ones.
     checks.extend(run_health_checks())
     if any(c.status == Status.FAIL and c.severity == Severity.CRITICAL for c in checks):
         return checks

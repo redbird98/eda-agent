@@ -4,7 +4,7 @@
 
 Unlike the simulator-based tests in the parent ``tests/`` directory, these
 fixtures wire to a live Altium Designer process. Each test is skipped if
-Altium isn't running and the fixture project isn't loaded — except when
+Altium isn't running and the fixture project isn't loaded, except when
 ``EDA_AGENT_INTEGRATION=1`` is set, in which case missing preconditions are
 hard failures (CI mode).
 """
@@ -48,7 +48,7 @@ def real_bridge() -> AltiumBridge:
     info = bridge.ping_with_version()
     if info is None:
         _enforce_or_skip(
-            "Altium responded but ping failed — is StartMCPServer running in the script project?"
+            "Altium responded but ping failed, is StartMCPServer running in the script project?"
         )
 
     bridge.attach()
@@ -70,7 +70,7 @@ def fixture_project_loaded(real_bridge) -> Path:
             "See tests/integration/fixtures/README for how to (re)build it."
         )
 
-    # Open the project (idempotent — Altium ignores duplicate opens).
+    # Open the project (idempotent, Altium ignores duplicate opens).
     real_bridge.send_command(
         "project.open", {"project_path": str(FIXTURE_PROJECT)}, timeout=15.0
     )

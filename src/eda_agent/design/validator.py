@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 George Saliba
-"""Validator — ERC + connectivity sanity report on the focused project.
+"""Validator, ERC + connectivity sanity report on the focused project.
 
 Slice C.1 scope: schematic-only checks. Bundles three reads:
 
-    project.get_messages       — compile + ERC violations
-    generic.get_unconnected_pins — floating pins
-    generic.run_erc            — ensure compile/ERC are fresh first
+    project.get_messages      , compile + ERC violations
+    generic.get_unconnected_pins, floating pins
+    generic.run_erc           , ensure compile/ERC are fresh first
 
 Returns a structured ValidationReport that the planner (Claude Code) reads,
 classifies, and uses to revise the DesignPlan. Each Issue is small and
@@ -23,7 +23,7 @@ from typing import Any, Optional
 logger = logging.getLogger("eda_agent.design.validator")
 
 
-# Severity ranking — used to compute the report's overall passed flag.
+# Severity ranking, used to compute the report's overall passed flag.
 _FATAL_SEVERITIES = {"error", "fatal"}
 
 
@@ -89,7 +89,7 @@ def _bucket(report: ValidationReport, issue: Issue) -> None:
         report.warnings.append(issue)
     else:
         # Info-level messages still get attached so Claude sees compile noise
-        # — bucket as warnings so it shows up in the readable list.
+        #, bucket as warnings so it shows up in the readable list.
         report.warnings.append(issue)
 
 
@@ -98,7 +98,7 @@ def _ingest_messages(report: ValidationReport, raw: Any) -> None:
 
     The Pascal handler returns ``{messages: [...], count: N}`` where each
     message has ``message``, ``severity``, ``source``. We don't try to parse
-    the source string into refdes/net here — Claude can read it raw and
+    the source string into refdes/net here, Claude can read it raw and
     pattern-match if needed.
     """
     if not isinstance(raw, dict):
@@ -110,7 +110,7 @@ def _ingest_messages(report: ValidationReport, raw: Any) -> None:
         if not text:
             continue
         sev = _classify_severity(msg.get("severity"))
-        # Heuristic category — anything mentioning "ERC" goes to erc, anything
+        # Heuristic category, anything mentioning "ERC" goes to erc, anything
         # mentioning "Compiler" goes to compile, otherwise generic.
         upper = text.upper()
         if "ERC" in upper:
@@ -179,7 +179,7 @@ def validate(
     report = ValidationReport(project_path=project_path)
 
     if bridge is None:
-        from eda_agent.bridge import get_bridge  # late import — needs Altium
+        from eda_agent.bridge import get_bridge  # late import, needs Altium
         bridge = get_bridge()
 
     project_param: dict[str, Any] = {}

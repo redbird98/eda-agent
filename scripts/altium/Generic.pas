@@ -41,9 +41,9 @@ End;
 {..............................................................................}
 
 {..............................................................................}
-{ Typed component property helper — extract designator / comment text by    }
+{ Typed component property helper, extract designator / comment text by    }
 { casting to ISch_Component first. Required because `Obj.Designator` on a    }
-{ base ISch_GraphicalObject fails to compile — DelphiScript cannot late-bind }
+{ base ISch_GraphicalObject fails to compile, DelphiScript cannot late-bind }
 { properties that return compound interfaces (ISch_Parameter) the way it can  }
 { for primitive returns.                                                      }
 {..............................................................................}
@@ -59,7 +59,7 @@ Begin
         If PropName = 'Designator' Then Result := C.Designator.Text
         Else If PropName = 'Comment' Then Result := C.Comment.Text;
     Except
-        // Cast unexpectedly failed despite ObjectId check — surface via counter.
+        // Cast unexpectedly failed despite ObjectId check, surface via counter.
         RecordCastError('GetSchComponentSubText:' + PropName);
         Result := '';
     End;
@@ -93,7 +93,7 @@ Begin
 
         // Coordinates (returned in mils). Corner is declared only on
         // ISch_Rectangle and ISch_Line (ISch_RoundRectangle inherits from
-        // ISch_Rectangle) — NOT on the base ISch_GraphicalObject. The
+        // ISch_Rectangle), NOT on the base ISch_GraphicalObject. The
         // DelphiScript compiler rejects any textual reference to
         // 'Obj.Corner' when Obj is typed ISch_GraphicalObject, regardless
         // of the assignment target. The only compile-safe path is to
@@ -126,7 +126,7 @@ Begin
             End;
         End
 
-        // String properties (late-bound across all types — primitives only)
+        // String properties (late-bound across all types, primitives only)
         Else If PropName = 'Text'        Then Result := Obj.Text
         Else If PropName = 'Name'        Then Result := Obj.Name
         Else If PropName = 'LibReference'       Then Result := Obj.LibReference
@@ -134,7 +134,7 @@ Begin
         Else If PropName = 'ComponentDescription' Then Result := Obj.ComponentDescription
         Else If PropName = 'UniqueId'    Then Result := Obj.UniqueId
 
-        // Sub-object string properties (compound interfaces — typed cast required)
+        // Sub-object string properties (compound interfaces, typed cast required)
         Else If PropName = 'Designator'      Then Result := GetSchComponentSubText(Obj, 'Designator')
         Else If PropName = 'Designator.Text' Then Result := GetSchComponentSubText(Obj, 'Designator')
         Else If PropName = 'Comment'         Then Result := GetSchComponentSubText(Obj, 'Comment')
@@ -199,7 +199,7 @@ Begin
             Obj.Location := Loc;
         End
         // Corner lives on ISch_Rectangle and ISch_Line only (not on the base
-        // ISch_GraphicalObject — the compiler rejects Obj.Corner regardless
+        // ISch_GraphicalObject, the compiler rejects Obj.Corner regardless
         // of assignment target). Dispatch on ObjectId and narrow to a typed
         // local before touching Corner. See GetSchProperty for the read side.
         Else If (PropName = 'Corner.X') Or (PropName = 'Corner.Y') Then
@@ -226,13 +226,13 @@ Begin
             End;
         End
 
-        // String properties (late-bound across all types — primitives only)
+        // String properties (late-bound across all types, primitives only)
         Else If PropName = 'Text'        Then Obj.Text := Value
         Else If PropName = 'Name'        Then Obj.Name := Value
         Else If PropName = 'LibReference'       Then Obj.LibReference := Value
         Else If PropName = 'ComponentDescription' Then Obj.ComponentDescription := Value
 
-        // Sub-object string properties (compound interfaces — typed cast required)
+        // Sub-object string properties (compound interfaces, typed cast required)
         Else If (PropName = 'Designator') Or (PropName = 'Designator.Text') Then
             SetSchComponentSubText(Obj, 'Designator', Value)
         Else If (PropName = 'Comment') Or (PropName = 'Comment.Text') Then
@@ -263,7 +263,7 @@ Begin
         Else If PropName = 'IsMirrored'  Then Obj.IsMirrored := StrToBool(Value)
         Else If PropName = 'Selection'   Then Obj.Selection := StrToBool(Value);
     Except
-        // Property doesn't exist on this object type — silently skip
+        // Property doesn't exist on this object type, silently skip
     End;
 End;
 
@@ -532,7 +532,7 @@ Begin
 
         // Do NOT force-open documents. Calling RunProcess('Client:OpenDocument')
         // loads the file but strips its project association, so it appears
-        // as a "free document" with the absolute path as its tab title —
+        // as a "free document" with the absolute path as its tab title,
         // clutters the UI and breaks project-member semantics.
         //
         // Instead, only iterate documents that SchServer already has in
@@ -632,7 +632,7 @@ Var
 Begin
     DocPath := StringReplace(DocPath, '\\', '\', -1);
 
-    // Do NOT RunProcess Client:OpenDocument — that loads the file but
+    // Do NOT RunProcess Client:OpenDocument, that loads the file but
     // strips any project association, producing a "free document" in the
     // UI with the full path as its tab title. Require the document to
     // already be open in Altium; the caller has to open it first.
@@ -678,7 +678,7 @@ End;
 {                                                                              }
 { For batch-operation strings (compact key=value;...~~ encoding) the scope    }
 { is still a plain string token: active_doc / project / doc:path /            }
-{ project:path. ParseScope handles both forms — JSON-object first, then the   }
+{ project:path. ParseScope handles both forms, JSON-object first, then the   }
 { legacy compact form for batch-op fields.                                    }
 {..............................................................................}
 
@@ -1034,7 +1034,7 @@ Begin
 End;
 
 {..............................................................................}
-{ Select objects matching filter — sets Selection/Selected on matching objs  }
+{ Select objects matching filter, sets Selection/Selected on matching objs  }
 {..............................................................................}
 
 Function Gen_SelectObjects(Params : String; RequestId : String) : String;
@@ -1137,7 +1137,7 @@ End;
 {..............................................................................}
 { BATCH MODIFY: Multiple modify operations in a single IPC call.             }
 {                                                                            }
-{ Params: operations — pipe-separated list of operations, each semicolon-    }
+{ Params: operations, pipe-separated list of operations, each semicolon-    }
 {   separated as: scope;object_type;filter;set                               }
 {   Example: "project;eParameter;Name=Engineer;Text=John|                    }
 {             project;eParameter;Name=Revision;Text=2.0"                     }
@@ -1295,7 +1295,7 @@ Begin
     Board := GetPCBBoardAnywhere;
     SchDoc := SchServer.GetCurrentSchDocument;
 
-    { PCB path — use the documented IPCB_Net.IsHighlighted property set    }
+    { PCB path, use the documented IPCB_Net.IsHighlighted property set    }
     { directly on the net object. The earlier RunProcess('PCB:NetColor-    }
     { Highlight') was a guess; that process name isn't in the reference   }
     { and silently no-ops, which is why the tool appeared to do nothing.  }
@@ -1338,16 +1338,16 @@ Begin
         Exit;
     End;
 
-    { Schematic path — nets aren't first-class objects in Altium's Sch    }
+    { Schematic path, nets aren't first-class objects in Altium's Sch    }
     { API. The base ISch_GraphicalObject has no NetName property          }
     { (compile-time "Undeclared identifier: NetName"; Try/Except can't    }
     { rescue it). Instead, dispatch on ObjectId:                          }
-    {   - eNetLabel / ePowerObject / ePort  — match against .Text         }
-    {   - eSheetEntry                        — match against .Name         }
-    {   - eWire                              — wires don't store a net    }
+    {   - eNetLabel / ePowerObject / ePort , match against .Text         }
+    {   - eSheetEntry                       , match against .Name         }
+    {   - eWire                             , wires don't store a net    }
     {     name as a primitive property; the net is derived at compile     }
     {     time from the labels / ports attached to the wire segment.     }
-    {     We skip them — selecting the net labels is enough to make the  }
+    {     We skip them, selecting the net labels is enough to make the  }
     {     user eyeball-trace the wires.                                  }
     If SchDoc <> Nil Then
     Begin
@@ -1415,7 +1415,7 @@ Begin
     Begin
         { Walk every net on the board and clear its IsHighlighted flag.   }
         { RunProcess('PCB:ClearAllHighlights') isn't documented and       }
-        { appears to no-op — use the typed API path.                      }
+        { appears to no-op, use the typed API path.                      }
         Iterator := Board.BoardIterator_Create;
         Try
             Iterator.AddFilter_ObjectSet(MkSet(eNetObject));
@@ -1515,7 +1515,7 @@ Begin
         NewDocPath := Copy(NewDocPath, 1, Length(NewDocPath) - 1);
     NewDocPath := NewDocPath + SheetName + '.SchDoc';
 
-    // Create blank schematic (no FileName param — causes null key error)
+    // Create blank schematic (no FileName param, causes null key error)
     ResetParameters;
     AddStringParameter('ObjectKind', 'SchDoc');
     RunProcess('WorkspaceManager:CreateNewDocument');
@@ -1991,7 +1991,7 @@ Begin
 End;
 
 {..............................................................................}
-{ Place a rectangle on the schematic — graphic box, not a functional shape.   }
+{ Place a rectangle on the schematic, graphic box, not a functional shape.   }
 { Params: x1,y1,x2,y2 in mils, solid=true/false, line_width=0..3              }
 {..............................................................................}
 
@@ -2151,7 +2151,7 @@ Begin
 End;
 
 {..............................................................................}
-{ Place a sheet symbol on the schematic — reference to a child SchDoc.        }
+{ Place a sheet symbol on the schematic, reference to a child SchDoc.        }
 { Params: x1,y1,x2,y2 in mils, sheet_file_name (e.g. PSU.SchDoc),             }
 {         sheet_name (display name)                                           }
 {..............................................................................}
@@ -2194,7 +2194,7 @@ Begin
 
     Sym.Location := Point(MilsToCoord(X1), MilsToCoord(Y1));
     Sym.Corner := Point(MilsToCoord(X2), MilsToCoord(Y2));
-    { SheetFileName is the link to the child sheet file — must match an
+    { SheetFileName is the link to the child sheet file, must match an
       existing .SchDoc in the project. SheetName is the display label
       shown inside the sheet-symbol block. }
     Sym.SheetFileName := FileNameStr;
@@ -2443,7 +2443,7 @@ End;
 
 {..............................................................................}
 { Place a schematic component instance from a library onto the active sheet.  }
-{ Uses ISch_Document.PlaceSchComponent — the verified direct-placement API.   }
+{ Uses ISch_Document.PlaceSchComponent, the verified direct-placement API.   }
 { Params: library_path (.SchLib full path), lib_reference (component name),   }
 {         x, y (mils), designator (optional), rotation (0|90|180|270),        }
 {         footprint (optional override)                                        }
@@ -2451,7 +2451,7 @@ End;
 
 { Validate lib_path + lib_reference resolve via CreateLibCompInfoReader     }
 { BEFORE calling PlaceSchComponent. PlaceSchComponent pops a modal Error    }
-{ dialog when its lookup fails — Altium shows the popup at the COM layer    }
+{ dialog when its lookup fails, Altium shows the popup at the COM layer    }
 { before our Try/Except can swallow it, which freezes the polling loop.    }
 { Pre-validating off-disk avoids that path entirely.                         }
 { Returns ''  if found, otherwise a comma-separated sample of names that    }
@@ -2589,13 +2589,13 @@ Begin
 
     { THE WORKING PLACEMENT API (per SamacSys Altium Library Loader and    }
     { the Altium Circad translator reference):                              }
-    {   1. SchServer.LoadComponentFromLibrary(LibRef, LibPath) — note the }
+    {   1. SchServer.LoadComponentFromLibrary(LibRef, LibPath), note the }
     {      argument order is (REF, PATH), opposite of PlaceSchComponent.   }
-    {   2. SchDoc.AddSchObject(comp) — attach to the sheet.                }
-    {   3. comp.MoveToXY(MilsToCoord(X), MilsToCoord(Y)) — proper          }
+    {   2. SchDoc.AddSchObject(comp), attach to the sheet.                }
+    {   3. comp.MoveToXY(MilsToCoord(X), MilsToCoord(Y)), proper          }
     {      whole-component positioning. Moves designator / comment / pins }
     {      together.                                                        }
-    {   4. comp.SetState_Orientation(N) — 0/1/2/3 for 0°/90°/180°/270°.    }
+    {   4. comp.SetState_Orientation(N), 0/1/2/3 for 0°/90°/180°/270°.    }
     {                                                                        }
     { This replaces the broken PlaceSchComponent + Comp.Location :=         }
     { Point(...) approach which 16-bit-truncates coords and pops modal      }
@@ -2688,7 +2688,7 @@ Begin
         Exit;
     End;
 
-    { ISch_ParameterSet is the proper directive interface — a group of
+    { ISch_ParameterSet is the proper directive interface, a group of
       parameters applied to the wire/net at its location. Create the
       parameter set first, then add a child ISch_Parameter carrying the
       actual (name, value) payload. ISch_Parameter alone would render
@@ -3004,7 +3004,7 @@ Begin
 
                 { Pin.Location on a placed component returns the pin in       }
                 { component-LOCAL coords. Convert to world by adding the      }
-                { component's own Location. (Rotation/mirror not handled —    }
+                { component's own Location. (Rotation/mirror not handled,    }
                 { Slice B keeps placement axis-aligned.)                       }
                 CompLoc := Comp.Location;
                 CompX := CoordToMils(CompLoc.X);
@@ -3381,7 +3381,7 @@ Begin
             Exit;
         End;
 
-        // PCB count — active doc only
+        // PCB count, active doc only
         Result := ProcessActivePCBDoc(ObjTypeInt, FilterStr, '', '', 'query', RequestId, 0);
         // The query result already has count, just return it
         Exit;
@@ -3416,7 +3416,7 @@ Begin
             If Doc.DM_DocumentKind <> 'SCH' Then Continue;
 
             FilePath := Doc.DM_FullPath;
-            // Don't force-open — that creates free documents. Skip
+            // Don't force-open, that creates free documents. Skip
             // sheets that aren't currently loaded into SchServer.
             SchDoc := SchServer.GetSchDocumentByPath(FilePath);
             If SchDoc = Nil Then Continue;
@@ -3619,7 +3619,7 @@ Begin
         Except
         End;
 
-        // Unit system — ISch_Document.UnitSystem returns a TUnitSystem enum
+        // Unit system, ISch_Document.UnitSystem returns a TUnitSystem enum
         // (eImperial / eMetric). TUnit has finer granularity but UnitSystem is
         // the right read for a simple "metric vs imperial" field.
         Try
@@ -4186,7 +4186,7 @@ End;
 { Gen_AddDatafileLink - Add an ISch_ModelDatafileLink to a component's active  }
 { implementation. This is how parametric data (IBIS model files, sim models,   }
 { external CSVs) is attached to a schematic part.                              }
-{ Params: designator, file_path, kind (optional string — implementation-       }
+{ Params: designator, file_path, kind (optional string, implementation-       }
 {         specific, e.g. "SimModel", "IBIS")                                   }
 {..............................................................................}
 
@@ -4277,7 +4277,7 @@ Begin
     Ch := UpCase(S[1]);
     If (Ch = 'R') Or (Ch = 'L') Or (Ch = 'C') Then
     Begin
-        { Accept "R1", "10k", "Res", "Cap" etc. — anything that starts with    }
+        { Accept "R1", "10k", "Res", "Cap" etc., anything that starts with    }
         { the letter and is short. Longer names (e.g. "Resonator") we skip.    }
         If (Length(S) <= 20) And ((Length(S) = 1) Or (S[2] = ' ') Or
            (S[2] >= '0') And (S[2] <= '9') Or (UpCase(S[2]) >= 'A') And
@@ -4477,7 +4477,7 @@ End;
 {..............................................................................}
 { Gen_AttachSpicePrimitive - Attach a built-in SPICE primitive to a component.  }
 { For passives (R/L/C) and sources (V/I), this is just SpicePrefix + Value;     }
-{ no model file is needed — Altium's simulator maps these to built-in          }
+{ no model file is needed, Altium's simulator maps these to built-in          }
 { primitives directly.                                                          }
 { Params: designator, primitive (R|L|C|V|I|D|Q), value, spice_model (optional  }
 {         subckt / model name for semi devices like D / Q), sim_kind (optional }
@@ -4655,7 +4655,7 @@ End;
 {..............................................................................}
 { Gen_RunSimulation - Trigger an Altium mixed-signal simulation. The analysis  }
 { type and parameters must already be configured on the project's simulation  }
-{ profile — this handler just kicks the run.                                  }
+{ profile, this handler just kicks the run.                                  }
 { Params: analysis (optional: operating_point | transient | ac | dc | noise | }
 {         tran | etc). Currently used only for the success-response echo;    }
 {         Altium picks up the active simulation profile regardless.          }
@@ -5192,12 +5192,12 @@ Var
     Pin : IPin;
     Board : IPCB_Board;
     Iter : IPCB_BoardIterator;
-    { Must be typed as IPCB_Pad — the base IPCB_Primitive doesn't expose   }
+    { Must be typed as IPCB_Pad, the base IPCB_Primitive doesn't expose   }
     { .Net, .Component, or .Name, and accesses fail silently under the    }
     { surrounding Try/Except, which is why every net returned 0 pads.     }
     Pad : IPCB_Pad;
     I, J, K, N : Integer;
-    { Diagnostic counters — emitted in the response so we can tell "PCB   }
+    { Diagnostic counters, emitted in the response so we can tell "PCB   }
     { is open but iterator returned nothing" from "iterator returned pads }
     { but every one had Pad.Net = nil" from "iterator ran fine and we    }
     { just got no name match".                                            }
@@ -5262,11 +5262,11 @@ Begin
     { --- PCB side: iterate every pad on the board, collect the ones whose }
     { .Net matches. Each property access is in its own Try/Except and     }
     { we use nested If (not boolean And) so a nil/raising step never      }
-    { drops an otherwise-valid pad — that was the bug that made pcb_pin_ }
+    { drops an otherwise-valid pad, that was the bug that made pcb_pin_ }
     { count come back 0 even though pcb_get_component_pads found them.    }
     { GetCurrentPCBBoard only returns a board when a PCB tab has focus.   }
     { crossref_net is typically called while the USER is looking at a    }
-    { schematic, so focus-based lookup silently returns nil — that's the }
+    { schematic, so focus-based lookup silently returns nil, that's the }
     { source of the original pcb_pin_count:0 bug. Fall back to iterating }
     { the project's documents, find the first .PcbDoc, resolve it via   }
     { PCBServer.GetPCBBoardByPath which doesn't care about focus.         }

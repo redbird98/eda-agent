@@ -6,18 +6,18 @@ DelphiScript under Altium is a RemObjects PascalScript variant with specific
 behaviours that differ from Free Pascal or Delphi. These regressions kept
 landing on users and costing debugging sessions, so they are pinned here:
 
-1.  ``Inc(arr[i])`` — parse error ")" expected. DelphiScript only accepts
+1.  ``Inc(arr[i])``, parse error ")" expected. DelphiScript only accepts
     Inc/Dec on plain identifiers. Expand to ``arr[i] := arr[i] + 1``.
 
-2.  ``{`` or ``}`` inside a ``{ ... }`` comment — the inner brace closes the
+2.  ``{`` or ``}`` inside a ``{ ... }`` comment, the inner brace closes the
     comment early and the tail of the line is parsed as code, usually
     yielding "Unterminated string" somewhere unrelated.
 
-3.  ``Try ... .UseMetricUnit ... Except`` — ISch_Document.UseMetricUnit is
+3.  ``Try ... .UseMetricUnit ... Except``, ISch_Document.UseMetricUnit is
     undeclared. Try/Except can NOT guard compile-time undeclared identifiers
     in DelphiScript; the whole file fails to compile. Use UnitSystem instead.
 
-4.  ``Try ... .MemberCount ... Except`` / ``Try ... .MemberName[...]`` —
+4.  ``Try ... .MemberCount ... Except`` / ``Try ... .MemberName[...]``:
     IPCB_ObjectClass has no per-member enumeration surface; these are
     compile-time errors.
 
@@ -57,7 +57,7 @@ def _strip_string_literals(src: str) -> str:
     don't match text inside strings. Pascal escapes '' inside strings.
 
     Apostrophes inside ``{ ... }`` and ``// ...`` comments are preserved
-    (left as-is) — they are not Pascal string delimiters there and
+    (left as-is), they are not Pascal string delimiters there and
     treating them as such caused an earlier version to swallow whole
     files after an ``aren't`` in a comment.
     """
@@ -100,7 +100,7 @@ def _strip_string_literals(src: str) -> str:
             i += 1
             continue
         if c == "'":
-            # String literal — replace with spaces, keeping newlines.
+            # String literal, replace with spaces, keeping newlines.
             out.append(" ")
             i += 1
             while i < n:
@@ -126,7 +126,7 @@ def _strip_string_literals(src: str) -> str:
 def _iter_lines_outside_comments(src: str):
     """Yield (lineno, line) for lines not inside a { ... } comment block.
 
-    This is approximate — it treats {...} as a block comment region and
+    This is approximate, it treats {...} as a block comment region and
     ignores // line comments for the bad-pattern grep. Good enough for
     catching DelphiScript foot-guns; not a full Pascal parser.
     """
@@ -157,12 +157,12 @@ def _iter_lines_outside_comments(src: str):
 BAD_PATTERNS: list[tuple[re.Pattern, str, str]] = [
     (
         re.compile(r"\bInc\s*\(\s*\w+\s*\["),
-        "Inc() on an array/record element — DelphiScript parse error",
+        "Inc() on an array/record element, DelphiScript parse error",
         "Inc(arr[i])  →  arr[i] := arr[i] + 1",
     ),
     (
         re.compile(r"\bDec\s*\(\s*\w+\s*\["),
-        "Dec() on an array/record element — DelphiScript parse error",
+        "Dec() on an array/record element, DelphiScript parse error",
         "Dec(arr[i])  →  arr[i] := arr[i] - 1",
     ),
     (
@@ -185,13 +185,13 @@ BAD_PATTERNS: list[tuple[re.Pattern, str, str]] = [
         # Any textual reference to `.Corner` on an `Obj` variable typed
         # as ISch_GraphicalObject (the base interface). Corner is only
         # on ISch_Line and ISch_Rectangle, so even `Crn := Obj.Corner`
-        # fails to compile regardless of the assignment target — the
+        # fails to compile regardless of the assignment target, the
         # typed-local trick does NOT sidestep it. The only compile-safe
         # access is via ObjectId dispatch into a typed-subtype local
         # (R : ISch_Rectangle; L : ISch_Line; R := Obj; Crn := R.Corner).
         # See SetSchProperty / GetSchProperty in Generic.pas.
         re.compile(r"\bObj\.Corner\b"),
-        "Obj.Corner on an ISch_GraphicalObject variable — Corner is "
+        "Obj.Corner on an ISch_GraphicalObject variable, Corner is "
         "only on ISch_Rectangle / ISch_Line subtypes, the compiler "
         "rejects it on the base interface",
         "dispatch on Obj.ObjectId, narrow to R : ISch_Rectangle or "
@@ -203,29 +203,29 @@ BAD_PATTERNS: list[tuple[re.Pattern, str, str]] = [
         # `Client.GetDocument(I)` are both undeclared. The working
         # path is to walk `Workspace.DM_Projects(i).DM_LogicalDocuments(j)`
         # and resolve each logical doc via `Client.GetDocumentByPath(path)`
-        # — see App_GetOpenDocuments in Application.pas or
+        #, see App_GetOpenDocuments in Application.pas or
         # Proj_GetCompileFreshness in Project.pas for the pattern.
         re.compile(r"\bClient\.GetDocumentCount\b|\bClient\.GetDocument\s*\("),
         "Client.GetDocumentCount / Client.GetDocument(I) are "
-        "undeclared in DelphiScript — no numeric enumerator on IClient",
+        "undeclared in DelphiScript, no numeric enumerator on IClient",
         "walk Workspace.DM_Projects(i).DM_LogicalDocuments(j), resolve "
         "each via Client.GetDocumentByPath(path)",
     ),
     (
         # Open-array parameters (`Var X : Array of T`) crash DelphiScript
-        # at call time with "wrong number of params" — PascalScript
+        # at call time with "wrong number of params", PascalScript
         # expands the parameter into a hidden (base_ptr, high_index)
         # pair, and fixed-size arrays (Array[0..N] Of T) don't auto-
         # coerce. See NextBatchOp in Main.pas for the cursor-based
         # replacement every batch helper uses.
         re.compile(r"\bVar\s+\w+\s*:\s*Array\s+of\s+"),
-        "Open-array parameter (Var X : Array of T) — DelphiScript "
+        "Open-array parameter (Var X : Array of T), DelphiScript "
         "fails the call with 'wrong number of params'",
         "Use a cursor: Function NextBatchOp(Var Remaining : String) "
         ": String; caller loops and checks for ''",
     ),
     (
-        # PCBServer.GetCurrentPCBBoard is focus-dependent — it returns
+        # PCBServer.GetCurrentPCBBoard is focus-dependent, it returns
         # nil whenever the active Altium tab is a schematic, even though
         # the PCB is loaded in the project. Handlers should use the
         # focus-independent helper GetPCBBoardAnywhere (Main.pas)
@@ -234,7 +234,7 @@ BAD_PATTERNS: list[tuple[re.Pattern, str, str]] = [
         # The only legitimate direct caller is GetPCBBoardAnywhere
         # itself (lives in Main.pas).
         re.compile(r"PCBServer\.GetCurrentPCBBoard\b"),
-        "Direct PCBServer.GetCurrentPCBBoard — fails when user is on a "
+        "Direct PCBServer.GetCurrentPCBBoard, fails when user is on a "
         "sch tab. Use GetPCBBoardAnywhere (focus-independent wrapper)",
         "Board := GetPCBBoardAnywhere;  "
         "(only GetPCBBoardAnywhere itself may call the raw API)",
@@ -242,14 +242,14 @@ BAD_PATTERNS: list[tuple[re.Pattern, str, str]] = [
     ),
     (
         # Sch primitives don't expose a unified NetName property on the
-        # base ISch_GraphicalObject interface — nets are graph data
+        # base ISch_GraphicalObject interface, nets are graph data
         # derived at compile time, not a per-primitive attribute. Net
         # labels / power ports / ports store the name in .Text; sheet
         # entries in .Name; wires don't store it at all. Dispatch on
         # ObjectId and read the per-type property. Try/Except does NOT
         # catch the compile error.
         re.compile(r"\b(?:Obj|Primitive|Prim)\.NetName\b"),
-        "Obj.NetName on an ISch_GraphicalObject variable — NetName is "
+        "Obj.NetName on an ISch_GraphicalObject variable, NetName is "
         "not a property on the base schematic primitive interface",
         "dispatch on Obj.ObjectId; read .Text for eNetLabel / "
         "ePowerObject / ePort, .Name for eSheetEntry; wires carry no "
@@ -285,7 +285,7 @@ def _check_comment_braces(path: Path) -> list[str]:
     so a literal `}` inside the comment text closes it early and turns the
     rest into code. Catches the JSON-shape-in-comment foot-gun.
 
-    String literals and ``//`` line comments are ignored — braces inside
+    String literals and ``//`` line comments are ignored, braces inside
     them are harmless.
     """
     raw = path.read_text(encoding="utf-8", errors="replace")
@@ -320,7 +320,7 @@ def _check_comment_braces(path: Path) -> list[str]:
             if depth > 0:
                 violations.append(
                     f"{path.name}:{line}:{col}  "
-                    "literal '{' inside a `{{ ... }}` comment — will corrupt the parse"
+                    "literal '{' inside a `{{ ... }}` comment, will corrupt the parse"
                 )
             depth += 1
         elif c == "}":
@@ -355,6 +355,6 @@ class TestDelphiScriptLint:
         # layout has drifted and the lint is silently scanning nothing.
         for required in ("Main.pas", "Dispatcher.pas", "PCB.pas", "Generic.pas"):
             assert required in names, (
-                f"{required} missing from scripts/altium/ — the lint would "
+                f"{required} missing from scripts/altium/, the lint would "
                 f"silently pass"
             )

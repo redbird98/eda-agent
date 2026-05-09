@@ -1,12 +1,12 @@
 # eda-agent
 
-MCP server that lets an AI (or any MCP-compatible client) **interact with a live Altium Designer session**. It exposes 200+ tools covering schematic, PCB, library, project, and design-agent operations over a persistent DelphiScript bridge — the AI reads the design you currently have open, asks questions about it, and can modify it in place while you watch.
+MCP server that lets an AI (or any MCP-compatible client) **interact with a live Altium Designer session**. It exposes 200+ tools covering schematic, PCB, library, project, and design-agent operations over a persistent DelphiScript bridge. The AI reads the design you currently have open, asks questions about it, and can modify it in place while you watch.
 
 > **⚠️ Experimental.** Not all tools are extensively tested. Some can crash the Altium DelphiScript engine. See [Known limitations](#known-limitations) before using on any design you haven't backed up.
 
 ## Demo
 
-Claude Code reviewing a buck converter through eda-agent. The feedback resistor divider on this schematic is intentionally wrong — Claude catches it among other recommendations.
+Claude Code reviewing a buck converter through eda-agent. The feedback resistor divider on this schematic is intentionally wrong; Claude catches it among other recommendations.
 
 [![eda-agent demo: Claude Code reviewing a buck converter](https://img.youtube.com/vi/snRyCx3OlxM/maxresdefault.jpg)](https://youtu.be/snRyCx3OlxM)
 
@@ -24,28 +24,28 @@ A floating Altium-side window shows live status, request count, cumulative Altiu
 - Altium executes, writes a response, and returns to polling
 - You see the changes happen live in Altium
 
-This is **not** a batch tool that opens a project, runs a script, and exits. It's a live connection for as long as you want it — conversational design review, guided refactoring, ad-hoc BOM queries, "what nets does this resistor connect to?" — all on the project you currently have open.
+This is **not** a batch tool that opens a project, runs a script, and exits. It's a live connection for as long as you want it (conversational design review, guided refactoring, ad-hoc BOM queries, "what nets does this resistor connect to?"), all on the project you currently have open.
 
 ## Features
 
 - **200+ tools** across application, project, library, schematic/general, PCB, and design-agent categories
-- **Generic primitives** (`query_objects`, `modify_objects`, `create_object`, `delete_objects`, `run_process`) that work on almost any schematic or PCB object type via late-binding — avoids per-type handler proliferation
-- **Bulk batch primitives** — `batch_modify`, `batch_create`, `batch_delete`, `pcb_place_tracks`, `pcb_move_components`, `place_wires`, `place_sch_components_from_library`, `lib_add_pins`, `get_connectivity_many`, `sch_attach_spice_primitives`. Collapse N LLM turns + N IPC round-trips into one. Typical wall-time savings: 10–100× on multi-item edits
-- **Design review snapshot** — `design_review_snapshot` bundles 8–12 review reads (project info, components, nets, rules, diff, messages, stats, unrouted, BOM) into a single call. One LLM turn instead of a dozen
-- **Datasheet-first discipline** — every component-surfacing response (`pcb_get_components`, `get_bom`, `get_component_info`, `find_component`, `lib_search`, `design_review_snapshot`, `sch_get_simulation_readiness`) carries a `_datasheet_guidance` block with per-part vendor search queries. `attach_to_altium` / `ping_altium` carry a `_system_reminder` so every MCP client that connects sees the rule at session start. LLM-fabricated datasheet values are forbidden; WebFetch/WebSearch are called out by name
-- **Sch ↔ PCB netlist crossref** — `crossref_net(net_name)` compares the schematic pin list against the PCB pad list for the same net. Catches ECO drift, stale post-fabrication routing, phantom nets from port/sheet-entry rename conflicts. `in_sync` flag + `sch_only` / `pcb_only` diff
-- **SPICE simulation workflow** — `sch_get_simulation_readiness` audits every component and partitions into ready / needs-primitive / needs-file. `sch_attach_spice_primitive(s)` sets SpicePrefix + Value on passives. `sch_attach_spice_model` links a vendor `.mdl` / `.ckt`. `sim_run` dispatches the simulator. Built-in guardrail: never fabricate a SPICE model file, fetch the vendor one
-- **Focus-independent PCB access** — every PCB handler falls back to `GetPCBBoardByPath` when `GetCurrentPCBBoard` returns nil (user has a sch tab focused). No more misleading "No PCB document is active" when the PCB is right there
-- **Fast & compile-cached** — persistent polling loop; ~10 ms per call in active mode. `SmartCompile` caches `DM_Compile` with a 2 s TTL so a multi-read review pays for one compile instead of a dozen. Explicit `force_recompile` + `get_compile_freshness` probes for cases that need a guaranteed-fresh netlist (e.g. after user edits)
-- **Persistent polling loop** — one script start, then ~10 ms per tool call in active mode
-- **Annotation runs silently** — `annotate` designates components without popping the annotate dialog
-- **Deferred save for speed** — mutations mark documents as modified in memory; disk writes happen on explicit `save_all` (or automatically on `detach_from_altium`). Before this, every edit triggered a full project save, which dominated latency
-- **Live dashboard** — a floating Altium-side window shows status, request count, per-command performance stats, and a command log. Detach button exits the loop cleanly; `Hide pings` / `Only >100ms` checkboxes filter noise
-- **Activity logs** — every command is appended to `workspace/activity.log` (CSV with timestamps, durations, command name, response size). The bridge also writes `bridge_trace.log` for IPC-level diagnostics
-- **Bulk-tool nudge** — when a singular tool is hit 2–3 times in 10 s, the response carries a `_hint_bulk` field pointing at the batch variant. Clients that missed the bulk tool in the docstring learn about it at runtime
-- **Design agent surface** — five MCP tools (`design_get_discipline`, `design_snapshot_inventory`, `design_validate_plan`, `design_execute_plan`, `design_validate`) that let an MCP-client LLM produce a structured `DesignPlan` JSON, instantiate it on a fresh sheet (parts + net labels + power ports), and validate ERC + connectivity. Discipline is net-label-driven, datasheet-first, NDA-isolated by construction
-- **Health and doctor preflight** — `eda-agent health` (offline checks: workspace dir, pointer file, bundled scripts) and `eda-agent doctor` (full preflight talking to Altium: process running, script polling responsive, version match, save_all canary, optional `--library` lib-path checks). `--json` for machine-readable output
-- **pip-installable** — no admin, no installer, no touching Altium's config
+- **Generic primitives** (`query_objects`, `modify_objects`, `create_object`, `delete_objects`, `run_process`) that work on almost any schematic or PCB object type via late-binding, avoiding per-type handler proliferation
+- **Bulk batch primitives**: `batch_modify`, `batch_create`, `batch_delete`, `pcb_place_tracks`, `pcb_move_components`, `place_wires`, `place_sch_components_from_library`, `lib_add_pins`, `get_connectivity_many`, `sch_attach_spice_primitives`. Collapse N LLM turns + N IPC round-trips into one. Typical wall-time savings: 10 to 100x on multi-item edits
+- **Design review snapshot**: `design_review_snapshot` bundles 8 to 12 review reads (project info, components, nets, rules, diff, messages, stats, unrouted, BOM) into a single call. One LLM turn instead of a dozen
+- **Datasheet-first discipline**: every component-surfacing response (`pcb_get_components`, `get_bom`, `get_component_info`, `find_component`, `lib_search`, `design_review_snapshot`, `sch_get_simulation_readiness`) carries a `_datasheet_guidance` block with per-part vendor search queries. `attach_to_altium` / `ping_altium` carry a `_system_reminder` so every MCP client that connects sees the rule at session start. LLM-fabricated datasheet values are forbidden; WebFetch/WebSearch are called out by name
+- **Sch <-> PCB netlist crossref**: `crossref_net(net_name)` compares the schematic pin list against the PCB pad list for the same net. Catches ECO drift, stale post-fabrication routing, phantom nets from port/sheet-entry rename conflicts. `in_sync` flag + `sch_only` / `pcb_only` diff
+- **SPICE simulation workflow**: `sch_get_simulation_readiness` audits every component and partitions into ready / needs-primitive / needs-file. `sch_attach_spice_primitive(s)` sets SpicePrefix + Value on passives. `sch_attach_spice_model` links a vendor `.mdl` / `.ckt`. `sim_run` dispatches the simulator. Built-in guardrail: never fabricate a SPICE model file, fetch the vendor one
+- **Focus-independent PCB access**: every PCB handler falls back to `GetPCBBoardByPath` when `GetCurrentPCBBoard` returns nil (user has a sch tab focused). No more misleading "No PCB document is active" when the PCB is right there
+- **Fast and compile-cached**: persistent polling loop; ~10 ms per call in active mode. `SmartCompile` caches `DM_Compile` with a 2 s TTL so a multi-read review pays for one compile instead of a dozen. Explicit `force_recompile` + `get_compile_freshness` probes for cases that need a guaranteed-fresh netlist (e.g. after user edits)
+- **Persistent polling loop**: one script start, then ~10 ms per tool call in active mode
+- **Annotation runs silently**: `annotate` designates components without popping the annotate dialog
+- **Deferred save for speed**: mutations mark documents as modified in memory; disk writes happen on explicit `save_all` (or automatically on `detach_from_altium`). Before this, every edit triggered a full project save, which dominated latency
+- **Live dashboard**: a floating Altium-side window shows status, request count, per-command performance stats, and a command log. Detach button exits the loop cleanly; `Hide pings` / `Only >100ms` checkboxes filter noise
+- **Activity logs**: every command is appended to `workspace/activity.log` (CSV with timestamps, durations, command name, response size). The bridge also writes `bridge_trace.log` for IPC-level diagnostics
+- **Bulk-tool nudge**: when a singular tool is hit 2 to 3 times in 10 s, the response carries a `_hint_bulk` field pointing at the batch variant. Clients that missed the bulk tool in the docstring learn about it at runtime
+- **Design agent surface**: five MCP tools (`design_get_discipline`, `design_snapshot_inventory`, `design_validate_plan`, `design_execute_plan`, `design_validate`) that let an MCP-client LLM produce a structured `DesignPlan` JSON, instantiate it on a fresh sheet (parts + net labels + power ports), and validate ERC + connectivity. Discipline is net-label-driven, datasheet-first, NDA-isolated by construction
+- **Health and doctor preflight**: `eda-agent health` (offline checks: workspace dir, pointer file, bundled scripts) and `eda-agent doctor` (full preflight talking to Altium: process running, script polling responsive, version match, save_all canary, optional `--library` lib-path checks). `--json` for machine-readable output
+- **pip-installable**: no admin, no installer, no touching Altium's config
 
 ## Requirements
 
@@ -61,7 +61,7 @@ cd eda-agent
 pip install -e .
 ```
 
-Register the server with your MCP client. The binary is `eda-agent` and runs on stdio — consult your client's docs for how to add a local stdio-based server.
+Register the server with your MCP client. The binary is `eda-agent` and runs on stdio; consult your client's docs for how to add a local stdio-based server.
 
 ### Claude Code
 
@@ -75,7 +75,7 @@ Adds `eda-agent` as an MCP server named `altium` to your Claude Code project con
 claude mcp add -s user altium eda-agent
 ```
 
-If `eda-agent` isn't on your `PATH`, give the full path instead — pip reports it after install, typically `%USERPROFILE%\AppData\Roaming\Python\Python312\Scripts\eda-agent.exe` on Windows. To verify the connection: `/mcp` in a Claude Code session should list `altium` as connected.
+If `eda-agent` isn't on your `PATH`, give the full path instead (pip reports it after install, typically `%USERPROFILE%\AppData\Roaming\Python\Python312\Scripts\eda-agent.exe` on Windows). To verify the connection: `/mcp` in a Claude Code session should list `altium` as connected.
 
 ### Other MCP clients
 
@@ -103,7 +103,7 @@ From then on, every Altium startup compiles the script project and the polling l
 
 The polling loop starts and your MCP client can drive Altium.
 
-> If you'd rather not register the script globally, you can also open `Altium_API.PrjScr` via **File → Open...** and launch `StartMCPServer` from the **Run Script...** dialog the same way — the dialog picks up any loaded script project.
+> If you'd rather not register the script globally, you can also open `Altium_API.PrjScr` via **File > Open...** and launch `StartMCPServer` from the **Run Script...** dialog the same way; the dialog picks up any loaded script project.
 
 ## Example use cases
 
@@ -111,7 +111,7 @@ The polling loop starts and your MCP client can drive Altium.
 
 > *"Do a design review of the PoE front-end. Pull the snapshot, fetch the TPS2372 and TL072 datasheets, and flag anything that doesn't match."*
 
-One `design_review_snapshot` call gives the AI project info, design stats, components, nets, rules, diff, messages, board stats, and BOM — plus a datasheet-fetch checklist. The AI then grounds every recommendation in the vendor datasheets it actually pulled. 8–12 separate queries → one tool call.
+One `design_review_snapshot` call gives the AI project info, design stats, components, nets, rules, diff, messages, board stats, and BOM, plus a datasheet-fetch checklist. The AI then grounds every recommendation in the vendor datasheets it actually pulled. 8 to 12 separate queries collapse into one tool call.
 
 ### Schematic review
 
@@ -119,13 +119,13 @@ The AI reads your schematic live. Ask it anything a reviewer would:
 
 > *"List every component connected to the 3V3 rail and flag anything whose datasheet limit is below that."*
 >
-> *"Find all net labels that appear only once across the whole project — those are probably typos."*
+> *"Find all net labels that appear only once across the whole project. Those are probably typos."*
 >
 > *"What's driving the /RESET net? Walk the connectivity and tell me where it resets and how."*
 >
 > *"Do any two components share a designator prefix with gaps in numbering (e.g. R1, R2, R4)? Re-annotate or tell me what's missing."*
 >
-> *"Compare the focused schematic to the version from 3 weeks ago — what parameter values changed?"*
+> *"Compare the focused schematic to the version from 3 weeks ago. What parameter values changed?"*
 
 Under the hood, the AI calls tools like `query_objects(object_type="eSchComponent", scope="project")`, `get_connectivity_many(designators=[...])`, `get_nets(...)`, `modify_objects(...)`, and so on. You watch Altium repaint as it works.
 
@@ -133,13 +133,13 @@ Under the hood, the AI calls tools like `query_objects(object_type="eSchComponen
 
 > *"Run `crossref_net` on POE_PG. The PCB seems to have R7 on this net but I'm not sure the schematic still does."*
 
-The response shows sch pins, PCB pads, matched count, and the diff in each direction. A non-empty `pcb_only` list means the board was fabricated from an earlier schematic revision and a later edit broke the post-ECO merge — catch this before the next ECO push rips routed connections. `in_sync: false` plus the exact diff tells you which port or sheet-entry rename to undo.
+The response shows sch pins, PCB pads, matched count, and the diff in each direction. A non-empty `pcb_only` list means the board was fabricated from an earlier schematic revision and a later edit broke the post-ECO merge; catch this before the next ECO push rips routed connections. `in_sync: false` plus the exact diff tells you which port or sheet-entry rename to undo.
 
 ### SPICE simulation setup
 
 > *"Set this schematic up for an AC sweep. Attach SPICE primitives to every passive, fetch vendor SPICE models for the op-amps, and tell me if any part can't be simulated."*
 
-`sch_get_simulation_readiness` partitions the design into `ready` / `needs_primitive` / `needs_file`. The AI batches primitives onto every passive in one `sch_attach_spice_primitives` call, searches vendor sites for the IC models, attaches them with `sch_attach_spice_model`, and reports any holdouts. It will not fabricate a SPICE model file — the rule is baked into the tool response.
+`sch_get_simulation_readiness` partitions the design into `ready` / `needs_primitive` / `needs_file`. The AI batches primitives onto every passive in one `sch_attach_spice_primitives` call, searches vendor sites for the IC models, attaches them with `sch_attach_spice_model`, and reports any holdouts. It will not fabricate a SPICE model file; the rule is baked into the tool response.
 
 ### Library hygiene
 
@@ -149,7 +149,7 @@ The response shows sch pins, PCB pads, matched count, and the diff in each direc
 >
 > *"Create a new 48-pin symbol for STM32F411 with this pinout table."*
 
-The last one uses `lib_add_pins` — one call places the whole pinout in a single transaction instead of 48 LLM turns.
+The last one uses `lib_add_pins`: one call places the whole pinout in a single transaction instead of 48 LLM turns.
 
 ### PCB spot-checks
 
@@ -161,9 +161,9 @@ The last one uses `lib_add_pins` — one call places the whole pinout in a singl
 >
 > *"Run DRC and summarize the violations by severity."*
 >
-> *"What does the `Clearance_HV` rule actually enforce — clearance value, scope expressions, priority?"*
+> *"What does the `Clearance_HV` rule actually enforce: clearance value, scope expressions, priority?"*
 
-That last one uses `pcb_get_rule_properties` — returns the actual numeric gap / widths / impedance targets, not just rule metadata.
+That last one uses `pcb_get_rule_properties`, which returns the actual numeric gap / widths / impedance targets, not just rule metadata.
 
 ### Bulk changes
 
@@ -186,9 +186,9 @@ Some tool paths trigger DelphiScript compile or runtime errors ("Undeclared iden
 - An Altium error dialog stating the problem
 - Your MCP client timing out waiting for a response
 
-**Recovery:** in Altium Designer, open the script project tab and press the **red Stop** button in the Script IDE toolbar — equivalently **Run → Stop** from the menu, or **Ctrl+F3** (use **Ctrl+Pause/Break** if the script is stuck in an infinite loop). This stops the halted debugger. Then re-launch the polling loop via **File → Run Script... → StartMCPServer → Run**.
+**Recovery:** in Altium Designer, open the script project tab and press the **red Stop** button in the Script IDE toolbar (equivalently **Run > Stop** from the menu, or **Ctrl+F3**; use **Ctrl+Pause/Break** if the script is stuck in an infinite loop). This stops the halted debugger. Then re-launch the polling loop via **File > Run Script... > StartMCPServer > Run**.
 
-This is an ongoing reliability effort. Every identified crash is either fixed or guarded. If you hit a new one, the Altium error dialog tells you the exact identifier or line — opening an issue with that text helps us harden the relevant path.
+This is an ongoing reliability effort. Every identified crash is either fixed or guarded. If you hit a new one, the Altium error dialog tells you the exact identifier or line. Opening an issue with that text helps us harden the relevant path.
 
 ### Altium tool buttons relying on internal scripting pause while the server is running
 
@@ -196,14 +196,14 @@ Altium itself uses DelphiScript internally for many built-in commands (some ribb
 
 **The polling loop owns the scripting engine for as long as it's running.** While it runs, Altium's own script-backed buttons sit waiting. The loop exits when either:
 
-- The MCP client calls `detach_from_altium` (or the dashboard **Detach** button is clicked) — loop saves all dirty docs, exits within ~500 ms, and Altium becomes fully responsive, OR
+- The MCP client calls `detach_from_altium` (or the dashboard **Detach** button is clicked); the loop saves all dirty docs, exits within ~500 ms, and Altium becomes fully responsive, OR
 - **10 minutes of total silence** from the MCP client (no commands AND no keep-alive pings) triggers the built-in auto-shutdown
 
-In practice, while an MCP client is attached and sending keep-alive pings every 30 s, the loop will never time out on its own — you need to either have the AI call `detach_from_altium` or close the MCP client session entirely. After the client disconnects, expect up to ~10 minutes for the loop to auto-exit unless you use **Detach** to release it immediately.
+In practice, while an MCP client is attached and sending keep-alive pings every 30 s, the loop will never time out on its own; you need to either have the AI call `detach_from_altium` or close the MCP client session entirely. After the client disconnects, expect up to ~10 minutes for the loop to auto-exit unless you use **Detach** to release it immediately.
 
 ### ECO (sch → PCB update) is not reliably scriptable
 
-`update_pcb` wraps `RunProcess('PCB:UpdatePCBFromProject')`. On some Altium builds this runs silently without applying changes; on others it pops the modal ECO dialog. The Altium Schematic API doesn't expose a fully scripted ECO executor — `IECO` only records proposed changes, no `DM_Execute` method is documented, and no factory is exposed for obtaining an `IECO` instance from a script.
+`update_pcb` wraps `RunProcess('PCB:UpdatePCBFromProject')`. On some Altium builds this runs silently without applying changes; on others it pops the modal ECO dialog. The Altium Schematic API doesn't expose a fully scripted ECO executor: `IECO` only records proposed changes, no `DM_Execute` method is documented, and no factory is exposed for obtaining an `IECO` instance from a script.
 
 **Practical workflow:** call `update_pcb` and check the result's `components_added_to_pcb` count. If it's zero while `in_sync` is `false`, open the PCB in Altium and run **Design → Import Changes From …** yourself. Once the dialog is dismissed, every other tool (`pcb_move_component`, `pcb_place_track`, `pcb_run_drc`, etc.) works normally.
 
@@ -219,7 +219,7 @@ The server has **three independent timeout mechanisms**:
 
 When the MCP client calls a tool, the Python bridge writes a request file and waits up to **10 seconds by default** for a response. Fast queries typically complete in under 100 ms, so a 10 s ceiling surfaces stalls quickly while leaving plenty of margin for real work. Long-running tools that are expected to take longer (`save_all`, `stop_server`, `pcb_get_unrouted_nets`) set their own larger timeouts internally.
 
-Each request is published to its own `request_<id>.json` file; Altium replies in `response_<id>.json` with the matching ID. The bridge's keep-alive thread and MCP-client calls each use their own request IDs, so responses never race — the older single-`response.json` channel was retired in IPC v2.
+Each request is published to its own `request_<id>.json` file; Altium replies in `response_<id>.json` with the matching ID. The bridge's keep-alive thread and MCP-client calls each use their own request IDs, so responses never race. The older single-`response.json` channel was retired in IPC v2.
 
 ### 2. Server auto-shutdown (Altium side)
 
@@ -299,7 +299,7 @@ Lifecycle, parameters, compilation, analysis, outputs, ECO sync, variants.
 | `cross_probe` / `lock_designator` / `annotate` | Designator management |
 | `compare_sch_pcb` / `update_pcb` / `update_schematic` | ECO sync (see [ECO limitation](#eco-sch--pcb-update-is-not-reliably-scriptable)) |
 | `get_connectivity_many` | Pin-net connectivity for many designators in one round-trip (bulk) |
-| `force_recompile` / `get_compile_freshness` | Explicit SmartCompile cache control — save all dirty docs, invalidate, recompile; report cache age + dirty-in-editor docs |
+| `force_recompile` / `get_compile_freshness` | Explicit SmartCompile cache control: save all dirty docs, invalidate, recompile; report cache age + dirty-in-editor docs |
 | `get_variants` / `get_active_variant` / `set_active_variant` / `create_variant` | Variant management |
 | `export_pdf` / `export_step` / `export_dxf` / `export_image` / `generate_output` | Output generation |
 | `get_outjob_containers` / `run_outjob` | OutJob execution |
@@ -343,16 +343,16 @@ Schematic-side operations plus viewport and sheet management.
 | `get_font_spec` / `get_font_id` | Font table lookup |
 | `batch_create` / `batch_delete` | Generic bulk create / delete meta-tools |
 | `place_wires` | Place many wire segments in one IPC round-trip |
-| `place_sch_components_from_library` | Bulk BOM placement — library_path + lib_ref + x/y/rotation per entry |
+| `place_sch_components_from_library` | Bulk BOM placement: library_path + lib_ref + x/y/rotation per entry |
 | `sch_add_directive` / `sch_get_directives` | Parameter-set directives (diff pair tags, net class, custom rules) |
 | `sch_place_harness_connector` / `sch_place_cross_sheet_connector` | Harness bundles + hierarchical off-sheet ports |
 | `sch_place_probe` | SPICE / simulation measurement node |
 | `sch_set_component_part_id` | Switch active sub-part on a multi-gate symbol (U1A ↔ U1B) |
 | `sch_add_datafile_link` | Attach IBIS / SPICE model / CSV to a component's implementation |
 | `sch_get_constraint_groups` | Enumerate `DM_ConstraintGroups` (FPGA-style pin/timing constraints) |
-| `sch_get_simulation_readiness` / `sch_attach_spice_primitive` / `sch_attach_spice_primitives` / `sch_attach_spice_model` / `sim_run` | SPICE workflow — audit, attach, simulate |
+| `sch_get_simulation_readiness` / `sch_attach_spice_primitive` / `sch_attach_spice_primitives` / `sch_attach_spice_model` / `sim_run` | SPICE workflow: audit, attach, simulate |
 | `design_review_snapshot` / `datasheet_checklist` | One-call full-project review + datasheet discipline |
-| `crossref_net` | Sch pin list vs PCB pad list for a named net — diff + `in_sync` flag |
+| `crossref_net` | Sch pin list vs PCB pad list for a named net: diff + `in_sync` flag |
 | `generic_run_process` | Run any Altium process command |
 
 ### PCB (55 tools)
@@ -363,7 +363,7 @@ Queries and modifications on the active PCB document.
 |---|---|
 | `pcb_get_nets` / `pcb_get_net_classes` / `pcb_create_net_class` | Net / net class management |
 | `pcb_get_design_rules` / `pcb_create_design_rule` / `pcb_delete_design_rule` / `pcb_get_diff_pair_rules` / `pcb_get_room_rules` | Design rules. `pcb_create_design_rule` dispatches to typed `IPCB_*Constraint` subtypes for clearance / width / via-size with the proper per-layer setters |
-| `pcb_get_rule_properties` / `pcb_set_rule_properties` | Read rule metadata + the `descriptor` string (which carries every constraint value in human-readable form, e.g. `Width Constraint (Min=0.102mm) (Max=5.08mm) (Preferred=0.127mm)`); set metadata-only (Enabled / Priority / Scope1 / Scope2 / Comment). Constraint values must be set via `pcb_create_design_rule` or the Altium UI — they live on per-kind subtypes that DelphiScript cannot dispatch to safely from a base `IPCB_Rule` reference |
+| `pcb_get_rule_properties` / `pcb_set_rule_properties` | Read rule metadata + the `descriptor` string (which carries every constraint value in human-readable form, e.g. `Width Constraint (Min=0.102mm) (Max=5.08mm) (Preferred=0.127mm)`); set metadata-only (Enabled / Priority / Scope1 / Scope2 / Comment). Constraint values must be set via `pcb_create_design_rule` or the Altium UI; they live on per-kind subtypes that DelphiScript cannot dispatch to safely from a base `IPCB_Rule` reference |
 | `pcb_run_drc` | Run design rule check, return violations |
 | `pcb_get_components` / `pcb_move_component` / `pcb_move_components` / `pcb_flip_component` / `pcb_align_components` / `pcb_snap_to_grid` | Component placement (bulk `pcb_move_components` for N components in one round-trip) |
 | `pcb_get_component_pads` / `pcb_get_pad_properties` | Pad inspection |
@@ -372,11 +372,11 @@ Queries and modifications on the active PCB document.
 | `pcb_place_arc` / `pcb_place_text` / `pcb_place_fill` / `pcb_place_pad` | Primitive placement |
 | `pcb_place_dimension` / `pcb_place_angular_dimension` / `pcb_place_radial_dimension` | Dimension annotations |
 | `pcb_start_polygon_placement` / `pcb_place_polygon_rect` / `pcb_place_region` / `pcb_get_polygons` / `pcb_modify_polygon` / `pcb_repour_polygons` | Polygons and regions |
-| `pcb_place_embedded_board` | Panelization — drop an `IPCB_EmbeddedBoard` grid referencing a child `.PcbDoc` |
+| `pcb_place_embedded_board` | Panelization: drop an `IPCB_EmbeddedBoard` grid referencing a child `.PcbDoc` |
 | `pcb_create_diff_pair` / `pcb_distribute_components` / `pcb_set_board_shape` | Higher-level ops |
 | `pcb_create_room` | Room placement |
 | `pcb_get_unrouted_nets` | Ratsnest / unrouted analysis |
-| `pcb_get_layer_stackup` / `pcb_add_layer` / `pcb_remove_layer` / `pcb_modify_layer` / `pcb_set_layer_visibility` | Layer stack — get, add/remove layers, copper thickness + dielectric properties |
+| `pcb_get_layer_stackup` / `pcb_add_layer` / `pcb_remove_layer` / `pcb_modify_layer` / `pcb_set_layer_visibility` | Layer stack: get, add/remove layers, copper thickness + dielectric properties |
 | `pcb_get_board_outline` / `pcb_get_board_statistics` | Board-level queries |
 | `pcb_get_selected_objects` | Current selection |
 | `pcb_export_coordinates` | Pick-and-place export |
@@ -390,7 +390,7 @@ A high-level surface for autonomous schematic creation. The MCP client's LLM is 
 |---|---|
 | `design_get_discipline` | Returns the design discipline doc (net-label-driven wiring, datasheet-first part choice, NDA isolation, ...) plus the `DesignPlan` JSON schema the executor enforces. Always call this first when starting a design task |
 | `design_snapshot_inventory` | Open a list of `.SchLib` paths and report what components they contain (lib_ref, designator prefix, pin count, description, footprint). The planner uses this to bias its part choices toward existing-lib parts |
-| `design_validate_plan` | Schema + cross-check on a candidate `DesignPlan` JSON. No Altium round-trip — cheap pre-flight |
+| `design_validate_plan` | Schema + cross-check on a candidate `DesignPlan` JSON. No Altium round-trip; cheap pre-flight |
 | `design_execute_plan` | Open or create the project, create SchDoc(s) for each plan sheet, place every existing-lib part on a grid, drop net labels at every plan-defined pin endpoint, drop power ports for `is_power` / `is_ground` nets, save. Halts on any `needs_creation` part with a structured error so the planner can resolve before instantiating |
 | `design_validate` | ERC + `get_unconnected_pins` + compile messages bundled into a structured `ValidationReport(passed, errors[], warnings[], notes[])` so the planner can read failures and revise the plan |
 
@@ -432,7 +432,7 @@ All intelligence lives in Python. The DelphiScript side is a pass-through layer 
 | `eda-agent scripts-path` | Print path to bundled DelphiScript sources |
 | `eda-agent install-scripts [--dest PATH] [--force]` | Copy scripts to a directory of your choice |
 | `eda-agent health` | Fast offline preconditions: workspace dir + writable, pointer file + matches config, bundled scripts findable, bridge constructable. Exit 0 = clean, 1 = critical fail |
-| `eda-agent doctor [--library PATH]... [--json]` | Full preflight talking to Altium: all `health` checks plus process running, script polling responsive, script-version matches bundled, `save_all` canary round-trip, optional `--library` lib reachability checks (no hardcoded paths — repeat the flag for each lib you want tested) |
+| `eda-agent doctor [--library PATH]... [--json]` | Full preflight talking to Altium: all `health` checks plus process running, script polling responsive, script-version matches bundled, `save_all` canary round-trip, optional `--library` lib reachability checks (no hardcoded paths; repeat the flag for each lib you want tested) |
 
 ## Configuration
 
@@ -482,15 +482,15 @@ At wheel build time `scripts/altium/` is copied into `src/eda_agent/scripts/` in
 
 ## Troubleshooting
 
-**"Altium Designer is not running"** — open Altium before invoking MCP tools.
+**"Altium Designer is not running"**: open Altium before invoking MCP tools.
 
-**"Script not responding" / MCP tools time out** — confirm the script project is loaded and `StartMCPServer` is running. Re-launch it via **File → Run Script... → StartMCPServer → Run**. Check `%USERPROFILE%\EDA Agent\workspace\` is writable.
+**"Script not responding" / MCP tools time out**: confirm the script project is loaded and `StartMCPServer` is running. Re-launch it via **File > Run Script... > StartMCPServer > Run**. Check `%USERPROFILE%\EDA Agent\workspace\` is writable.
 
-**Altium error dialog "Undeclared identifier: …" or "Could not convert variant…"** — a DelphiScript crash in one of the bridge handlers. In Altium's Script IDE toolbar, press the red **Stop** button (or **Run → Stop** / **Ctrl+F3**; use **Ctrl+Pause/Break** if the script is stuck in an infinite loop) to halt the debugger. Then re-launch the polling loop via **File → Run Script... → StartMCPServer → Run**. Report the identifier or error text as an issue.
+**Altium error dialog "Undeclared identifier: ..." or "Could not convert variant..."**: a DelphiScript crash in one of the bridge handlers. In Altium's Script IDE toolbar, press the red **Stop** button (or **Run > Stop** / **Ctrl+F3**; use **Ctrl+Pause/Break** if the script is stuck in an infinite loop) to halt the debugger. Then re-launch the polling loop via **File > Run Script... > StartMCPServer > Run**. Report the identifier or error text as an issue.
 
-**Some Altium buttons don't respond while the server is running** — expected while the AI is actively issuing commands. Built-in Altium functions that depend on DelphiScript wait for the polling loop to yield. The loop enters an idle/yield mode within ~1 s of the last AI command; if a button is still unresponsive after that, call `detach_from_altium` from the MCP client to fully release the scripting engine.
+**Some Altium buttons don't respond while the server is running**: expected while the AI is actively issuing commands. Built-in Altium functions that depend on DelphiScript wait for the polling loop to yield. The loop enters an idle/yield mode within ~1 s of the last AI command; if a button is still unresponsive after that, call `detach_from_altium` from the MCP client to fully release the scripting engine.
 
-**Command timeouts on very large boards** — default is 10 s so stalls surface fast. Tools known to take longer (`save_all`, `pcb_get_unrouted_nets`, `stop_server`) set their own internal timeouts up to 60 s. If you hit a timeout on a custom long-running operation, embed the bridge directly and pass a higher `timeout=` to `send_command_async`. The polling loop itself adapts (10 ms active, 100 ms idle) so it doesn't add latency.
+**Command timeouts on very large boards**: default is 10 s so stalls surface fast. Tools known to take longer (`save_all`, `pcb_get_unrouted_nets`, `stop_server`) set their own internal timeouts up to 60 s. If you hit a timeout on a custom long-running operation, embed the bridge directly and pass a higher `timeout=` to `send_command_async`. The polling loop itself adapts (10 ms active, 100 ms idle) so it doesn't add latency.
 
 ## License
 
@@ -501,7 +501,7 @@ Apache License 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
 **Use at your own risk.** `eda-agent` drives Altium Designer programmatically and can modify, save, or delete design data. An AI client operating it can issue rapid, irreversible changes. Before using this tool on any design:
 
 - **Back up your project.** Commit to version control, copy the folder elsewhere, or both. Do not rely solely on Altium's own history.
-- Expect the possibility of **data loss, corrupted documents, or Altium crashes** — especially on large boards, unusual object configurations, or untested API paths.
+- Expect the possibility of **data loss, corrupted documents, or Altium crashes**, especially on large boards, unusual object configurations, or untested API paths.
 - Review automated changes before saving. Prefer working on a branch or a copy until you have trust in a given workflow.
 
 This software is provided "as is", without warranty of any kind, express or implied. The authors and contributors are not liable for any damage to your designs, projects, data, or installation.

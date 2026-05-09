@@ -4,7 +4,7 @@
 
 These tests exercise the full Python <-> Pascal IPC contract against a
 running Altium instance. They are the only honest way to validate the
-Pascal handlers — the simulator-based tests in tests/test_*.py prove that
+Pascal handlers, the simulator-based tests in tests/test_*.py prove that
 our Python re-implementation of Pascal logic matches itself, not that the
 Pascal code actually behaves as expected.
 
@@ -133,7 +133,7 @@ class TestErrorCodeMapping:
         # This test only meaningfully runs when there is no .PcbDoc loaded.
         docs = real_bridge.send_command("application.get_open_documents", timeout=5.0)
         if any((d.get("document_kind") or "").upper() == "PCB" for d in docs):
-            pytest.skip("A PCB document is loaded — can't test the no-PCB error path.")
+            pytest.skip("A PCB document is loaded, can't test the no-PCB error path.")
 
         with pytest.raises(PreconditionError) as exc_info:
             real_bridge.send_command("pcb.get_components", timeout=5.0)

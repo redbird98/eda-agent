@@ -42,13 +42,13 @@ class TestExpensiveThreshold:
         BulkHintTracker.record_and_hint("get_nets")
         hint = BulkHintTracker.record_and_hint("get_nets")
         assert hint is not None
-        # get_nets' "bulk" is itself — the nudge is to call it ONCE
+        # get_nets' "bulk" is itself, the nudge is to call it ONCE
         # unfiltered and filter locally.
         assert hint["bulk_tool"] == "get_nets"
         assert "no filters" in hint["hint"].lower() or "once" in hint["hint"].lower()
 
     def test_non_expensive_singular_still_threshold_3(self):
-        # create_object is non-expensive — should still need 3 calls.
+        # create_object is non-expensive, should still need 3 calls.
         assert BulkHintTracker.record_and_hint("create_object") is None
         assert BulkHintTracker.record_and_hint("create_object") is None
         tripped = BulkHintTracker.record_and_hint("create_object")

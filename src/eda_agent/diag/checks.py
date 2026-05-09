@@ -24,7 +24,7 @@ class Severity(str, Enum):
     """How fatal is a FAIL on this check.
 
     A 'critical' fail makes the whole run exit non-zero.
-    A 'minor' fail still exits zero — useful for nice-to-have signals.
+    A 'minor' fail still exits zero, useful for nice-to-have signals.
     """
     CRITICAL = "critical"
     MINOR = "minor"
@@ -61,7 +61,7 @@ def format_report(checks: list[Check], title: str = "") -> str:
     for c in checks:
         head = f"  [{icons[c.status]}] {c.name}"
         if c.message:
-            head += f" — {c.message}"
+            head += f", {c.message}"
         lines.append(head)
         if c.status == Status.FAIL and c.fix:
             lines.append(f"           fix: {c.fix}")

@@ -203,7 +203,7 @@ def register_project_tools(mcp):
     ) -> dict[str, Any]:
         """Get net-to-pin connectivity from the compiled project netlist.
 
-        CRITICAL for bulk queries — if you need connectivity for MORE
+        CRITICAL for bulk queries, if you need connectivity for MORE
         THAN ONE component or net, do NOT loop this tool. Call it
         ONCE with no filters (`component=""`, `net_name=""`, raise
         `limit` if needed) to pull the entire pin-net table in a
@@ -228,7 +228,7 @@ def register_project_tools(mcp):
             Dict with "pins" and "count".
 
         Examples:
-            # PREFERRED — one unfiltered call, then filter locally:
+            # PREFERRED, one unfiltered call, then filter locally:
             all_pins = get_nets(limit=10000)["pins"]
             u1_pins = [p for p in all_pins if p["component"] == "U1"]
 
@@ -280,7 +280,7 @@ def register_project_tools(mcp):
         Project-scope operations (query_objects, batch_modify, etc. with
         scope="project") only iterate sheets already resident in SchServer.
         A sheet listed as a project member via get_open_documents may still
-        show loaded=false — meaning Altium hasn't opened its editor state.
+        show loaded=false, meaning Altium hasn't opened its editor state.
         Call this tool first to force every sheet to load as a proper
         project member (no free documents).
 
@@ -348,13 +348,13 @@ def register_project_tools(mcp):
         component's pin function, voltage rating, timing, or electrical
         behavior, fetch its datasheet (WebSearch + WebFetch if needed).
         The parameters / comment / library metadata returned here are
-        NOT authoritative — only the manufacturer datasheet is.
+        NOT authoritative, only the manufacturer datasheet is.
         `_datasheet_guidance` in the response carries the rule and a
         suggested search query.
 
         Compiles the project and returns the component's designator, comment,
         footprint, library reference, all parameters, and every pin with its
-        net assignment — all in one call.
+        net assignment, all in one call.
 
         Args:
             designator: Component designator (e.g., "U1", "R8", "C3")
@@ -455,7 +455,7 @@ def register_project_tools(mcp):
 
     @mcp.tool()
     async def get_board_info() -> dict[str, Any]:
-        """Get PCB board information — outline vertices, layer stack, origin.
+        """Get PCB board information, outline vertices, layer stack, origin.
 
         Requires an active PCB document.
 
@@ -471,7 +471,7 @@ def register_project_tools(mcp):
     async def annotate(
         order: str = "down_then_across",
     ) -> dict[str, Any]:
-        """Annotate schematic designators programmatically — no dialog, no user interaction.
+        """Annotate schematic designators programmatically, no dialog, no user interaction.
 
         Compiles the project, iterates every schematic sheet, collects all
         unlocked components, sorts them by the chosen order, and assigns
@@ -482,7 +482,7 @@ def register_project_tools(mcp):
         SchServer.ProcessControl.PreProcess/PostProcess for undo support.
 
         Args:
-            order: Annotation traversal order —
+            order: Annotation traversal order:
                    "down_then_across" (default: row-major top-to-bottom, left-to-right)
                    "up_then_across"   (row-major bottom-to-top, left-to-right)
                    "across_then_down" (column-major left-to-right, top-to-bottom)
@@ -515,7 +515,7 @@ def register_project_tools(mcp):
         Note: These may open Altium's export dialogs for configuration.
 
         Args:
-            output_type: Type of output — "gerber", "drill", "pick_place", "ipc_netlist"
+            output_type: Type of output, "gerber", "drill", "pick_place", "ipc_netlist"
             output_path: Optional output directory/file path
 
         Returns:
@@ -603,7 +603,7 @@ def register_project_tools(mcp):
 
         Args:
             output_path: Full path for the output image file
-            format: Image format — "png", "jpg", or "bmp" (default "png")
+            format: Image format, "png", "jpg", or "bmp" (default "png")
             width: Image width in pixels (default 1920)
             height: Image height in pixels (default 1080)
 
@@ -855,7 +855,7 @@ def register_project_tools(mcp):
 
         Args:
             search_text: Text to search for (e.g., "U1", "100nF", "LM317")
-            search_by: Property to search — "designator", "value", or "comment" (default "designator")
+            search_by: Property to search, "designator", "value", or "comment" (default "designator")
             project_path: Optional project path. If None, uses active project.
 
         Returns:
@@ -873,7 +873,7 @@ def register_project_tools(mcp):
         result = await bridge.send_command_async("project.find_component", params)
         if isinstance(result, dict):
             # find_component response puts matches under "results"
-            # with comment/value fields — reshape to the components form
+            # with comment/value fields, reshape to the components form
             # extract_unique_parts understands.
             synthetic = {"components": result.get("results") or []}
             return tag_response(
@@ -891,7 +891,7 @@ def register_project_tools(mcp):
     ) -> dict[str, Any]:
         """Get pin-to-net connectivity for a specific component.
 
-        IMPORTANT — if you need connectivity for MORE THAN ONE
+        IMPORTANT, if you need connectivity for MORE THAN ONE
         component, use `get_connectivity_many` (batch). Looping this
         tool for a set of designators is the biggest wall-time sink
         in design-review workflows.
@@ -958,7 +958,7 @@ def register_project_tools(mcp):
     async def force_recompile() -> dict[str, Any]:
         """Flush all dirty docs, invalidate the compile cache, and recompile.
 
-        Use this when you need a guaranteed-fresh netlist — e.g.
+        Use this when you need a guaranteed-fresh netlist, e.g.
         immediately before re-running a connectivity check the user
         has disputed. Returns prev / new compile tick so you can
         verify the recompile actually happened.
@@ -977,7 +977,7 @@ def register_project_tools(mcp):
         """Report the age of the cached netlist and which docs are dirty.
 
         Use this when you're about to disagree with the user about
-        connectivity — first check how stale the netlist you're
+        connectivity, first check how stale the netlist you're
         reading actually is, and whether any open editor docs haven't
         been saved yet. A dirty doc means the netlist does NOT
         reflect what the user is looking at.
@@ -1036,13 +1036,13 @@ def register_project_tools(mcp):
         parameter object is created on the sheet.
 
         NOTE: the target sheet must already be loaded as a proper project
-        member. Call load_project_sheets once at the start of a batch —
+        member. Call load_project_sheets once at the start of a batch;
         auto-opening from inside set_document_parameter risks detaching
         the sheet and rendering it as a "free document". If the sheet
         isn't loaded this tool returns NOT_LOADED.
 
         The write is persisted to disk immediately via the IServerDocument
-        API — no subsequent save_all is required.
+        API, no subsequent save_all is required.
 
         Args:
             file_path: Full path to the schematic document (.SchDoc).
@@ -1077,7 +1077,7 @@ def register_project_tools(mcp):
 
         DATASHEET DISCIPLINE: If the diff reveals mismatched or missing
         parts and you're proposing a fix, the datasheets of the parts
-        involved are authoritative on their pinout and behavior — fetch
+        involved are authoritative on their pinout and behavior, fetch
         them before suggesting a footprint change or pin reassignment.
 
         Args:
@@ -1109,7 +1109,7 @@ def register_project_tools(mcp):
              Altium builds (AD20+) honor DisableDialog=True and apply
              changes without a dialog. Older builds may still display the
              ECO dialog.
-          3. Recompiles and reports the after-state — the delta tells you
+          3. Recompiles and reports the after-state, the delta tells you
              exactly how many components were added/removed programmatically.
           4. If counts did not change but differences existed, the response
              includes dialog_may_have_opened:true to flag that manual

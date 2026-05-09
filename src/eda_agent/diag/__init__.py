@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 George Saliba
-"""Diagnostic CLI subcommands — health (fast, offline) + doctor (Altium).
+"""Diagnostic CLI subcommands, health (fast, offline) + doctor (Altium).
 
 These exist to short-circuit "why isn't it working?" by checking the
 boring failure modes (stale script cache, workspace pointer mismatch,

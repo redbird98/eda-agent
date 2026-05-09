@@ -98,7 +98,7 @@ Begin
     Json := '{"path":"C:\\Users\\test\\file.txt"}';
     AssertEqual(ExtractJsonValue(Json, 'path'), 'C:\\Users\\test\\file.txt', 'ExtractJsonValue Windows path');
 
-    // Nested object — should contain inner content
+    // Nested object, should contain inner content
     Json := '{"outer":{"inner":"value"}}';
     AssertTrue(Pos('inner', ExtractJsonValue(Json, 'outer')) > 0, 'ExtractJsonValue nested object');
 

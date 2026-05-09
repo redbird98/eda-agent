@@ -4,7 +4,7 @@
 
 Utility for locating the bundled Altium_API.PrjScr and, when Altium is
 running, asking it to open the project via COM. The main IPC path
-(request.json / response.json) does not use COM — this helper is only
+(request.json / response.json) does not use COM, this helper is only
 for the convenience of opening the script project from Python.
 """
 

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 George Saliba
-"""Executor tests with a fake bridge — no Altium round-trips."""
+"""Executor tests with a fake bridge, no Altium round-trips."""
 
 from __future__ import annotations
 

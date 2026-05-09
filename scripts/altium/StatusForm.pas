@@ -171,7 +171,7 @@ End;
 Procedure ShowStatusForm;
 Begin
     Try
-        { Initial flags derived from initial checkbox captions in the DFM —     }
+        { Initial flags derived from initial checkbox captions in the DFM,     }
         { "[x]" means on, "[ ]" means off.                                       }
         HidePingsFlag := Pos('[x]', chk_HidePings.Caption) > 0;
         OnlySlowFlag  := Pos('[x]', chk_OnlySlow.Caption) > 0;
@@ -229,7 +229,7 @@ Begin
     Except End;
 End;
 
-{ Hover handlers — brighten the panel while the mouse is over it, revert    }
+{ Hover handlers, brighten the panel while the mouse is over it, revert    }
 { to the resting colour on leave. Tab handlers preserve the active/inactive }
 { distinction so leaving a tab returns to the correct resting colour.        }
 
