@@ -186,7 +186,7 @@ Some tool paths trigger DelphiScript compile or runtime errors ("Undeclared iden
 - An Altium error dialog stating the problem
 - Your MCP client timing out waiting for a response
 
-**Recovery:** in Altium Designer, open the script project tab and press the **red Stop** button in the Script IDE toolbar (or **Run → Reset** from the menu — the keyboard shortcut depends on your Altium version). This stops the halted debugger. Then re-launch the polling loop via **File → Run Script... → StartMCPServer → Run**.
+**Recovery:** in Altium Designer, open the script project tab and press the **red Stop** button in the Script IDE toolbar — equivalently **Run → Stop** from the menu, or **Ctrl+F3** (use **Ctrl+Pause/Break** if the script is stuck in an infinite loop). This stops the halted debugger. Then re-launch the polling loop via **File → Run Script... → StartMCPServer → Run**.
 
 This is an ongoing reliability effort. Every identified crash is either fixed or guarded. If you hit a new one, the Altium error dialog tells you the exact identifier or line — opening an issue with that text helps us harden the relevant path.
 
@@ -486,7 +486,7 @@ At wheel build time `scripts/altium/` is copied into `src/eda_agent/scripts/` in
 
 **"Script not responding" / MCP tools time out** — confirm the script project is loaded and `StartMCPServer` is running. Re-launch it via **File → Run Script... → StartMCPServer → Run**. Check `%USERPROFILE%\EDA Agent\workspace\` is writable.
 
-**Altium error dialog "Undeclared identifier: …" or "Could not convert variant…"** — a DelphiScript crash in one of the bridge handlers. In Altium's Script IDE toolbar, press the red **Stop** button (or **Run → Reset** from the menu — keyboard shortcut varies by Altium version) to halt the debugger. Then re-launch the polling loop via **File → Run Script... → StartMCPServer → Run**. Report the identifier or error text as an issue.
+**Altium error dialog "Undeclared identifier: …" or "Could not convert variant…"** — a DelphiScript crash in one of the bridge handlers. In Altium's Script IDE toolbar, press the red **Stop** button (or **Run → Stop** / **Ctrl+F3**; use **Ctrl+Pause/Break** if the script is stuck in an infinite loop) to halt the debugger. Then re-launch the polling loop via **File → Run Script... → StartMCPServer → Run**. Report the identifier or error text as an issue.
 
 **Some Altium buttons don't respond while the server is running** — expected while the AI is actively issuing commands. Built-in Altium functions that depend on DelphiScript wait for the polling loop to yield. The loop enters an idle/yield mode within ~1 s of the last AI command; if a button is still unresponsive after that, call `detach_from_altium` from the MCP client to fully release the scripting engine.
 
