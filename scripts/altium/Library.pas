@@ -613,13 +613,21 @@ Var
     Param : ISch_Parameter;
     Workspace : IWorkspace;
     Doc : IDocument;
-    LibPath, Data, CompName, ParamList : String;
+    LibPath, Data, CompName, ParamList, WithParamsStr : String;
     CompNum, I : Integer;
-    First : Boolean;
+    First, WithParams : Boolean;
 Begin
     // Get library path from parameter or active document
     LibPath := ExtractJsonValue(Params, 'library_path');
     LibPath := StringReplace(LibPath, '\\', '\', -1);
+
+    // Optional flag: dump parameters per component. Default is FALSE because
+    // GetState_SchComponentByLibRef + parameter iterator runs O(N) and is the
+    // bottleneck on large libraries (a 400+ component standard lib takes
+    // tens of seconds with parameters on, sub-second without). Callers that
+    // need parameters for a specific symbol should use lib_get_component_details.
+    WithParamsStr := ExtractJsonValue(Params, 'with_parameters');
+    WithParams := (WithParamsStr = 'true') Or (WithParamsStr = 'True') Or (WithParamsStr = '1');
 
     If LibPath = '' Then
     Begin
@@ -645,7 +653,10 @@ Begin
         Exit;
     End;
 
-    // Use CreateLibCompInfoReader to enumerate components
+    // Use CreateLibCompInfoReader to enumerate components. ICompInfoReader is
+    // a fast metadata reader, it returns CompName, AliasName, PartCount and
+    // Description directly from the lib file without loading every symbol's
+    // primitives, so the cheap path scales linearly with file IO.
     LibReader := SchServer.CreateLibCompInfoReader(LibPath);
     If LibReader = Nil Then
     Begin
@@ -656,8 +667,11 @@ Begin
     LibReader.ReadAllComponentInfo;
     CompNum := LibReader.NumComponentInfos;
 
-    // Get SchLib handle to read parameters from each component
-    SchLib := SchServer.GetCurrentSchDocument;
+    // Only navigate to live components when the caller asked for parameters,
+    // otherwise we skip GetState_SchComponentByLibRef entirely.
+    SchLib := Nil;
+    If WithParams Then
+        SchLib := SchServer.GetCurrentSchDocument;
 
     Data := '[';
     First := True;
@@ -668,29 +682,35 @@ Begin
         CompInfo := LibReader.ComponentInfos[I];
         CompName := CompInfo.CompName;
 
-        // Read ALL parameters by navigating to the component
-        ParamList := '';
-        If (SchLib <> Nil) And (SchLib.ObjectId = eSchLib) Then
-        Begin
-            Component := SchLib.GetState_SchComponentByLibRef(CompName);
-            If Component <> Nil Then
-            Begin
-                ParamIterator := Component.SchIterator_Create;
-                ParamIterator.AddFilter_ObjectSet(MkSet(eParameter));
-                Param := ParamIterator.FirstSchObject;
-                While Param <> Nil Do
-                Begin
-                    If ParamList <> '' Then ParamList := ParamList + ',';
-                    ParamList := ParamList + '"' + EscapeJsonString(Param.Name) + '":"' + EscapeJsonString(Param.Text) + '"';
-                    Param := ParamIterator.NextSchObject;
-                End;
-                Component.SchIterator_Destroy(ParamIterator);
-            End;
-        End;
-
         Data := Data + '{"name":"' + EscapeJsonString(CompName) + '"';
+        Try Data := Data + ',"alias_name":"' + EscapeJsonString(CompInfo.AliasName) + '"'; Except End;
+        Try Data := Data + ',"part_count":' + IntToStr(CompInfo.PartCount); Except End;
         Data := Data + ',"description":"' + EscapeJsonString(CompInfo.Description) + '"';
-        Data := Data + ',"parameters":{' + ParamList + '}}';
+
+        // Slow path, opt-in via with_parameters=true.
+        If WithParams Then
+        Begin
+            ParamList := '';
+            If (SchLib <> Nil) And (SchLib.ObjectId = eSchLib) Then
+            Begin
+                Component := SchLib.GetState_SchComponentByLibRef(CompName);
+                If Component <> Nil Then
+                Begin
+                    ParamIterator := Component.SchIterator_Create;
+                    ParamIterator.AddFilter_ObjectSet(MkSet(eParameter));
+                    Param := ParamIterator.FirstSchObject;
+                    While Param <> Nil Do
+                    Begin
+                        If ParamList <> '' Then ParamList := ParamList + ',';
+                        ParamList := ParamList + '"' + EscapeJsonString(Param.Name) + '":"' + EscapeJsonString(Param.Text) + '"';
+                        Param := ParamIterator.NextSchObject;
+                    End;
+                    Component.SchIterator_Destroy(ParamIterator);
+                End;
+            End;
+            Data := Data + ',"parameters":{' + ParamList + '}';
+        End;
+        Data := Data + '}';
     End;
 
     SchServer.DestroyCompInfoReader(LibReader);

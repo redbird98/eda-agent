@@ -13,7 +13,7 @@ Const
     // returns, mismatch means Altium is running a stale compiled script
     // (DelphiScript caches compiled units until the script project is
     // reopened or Altium is restarted).
-    SCRIPT_VERSION = '2026.05.09.2';
+    SCRIPT_VERSION = '2026.05.09.4';
 
     // Wire protocol version. Bumped whenever the request/response JSON shape
     // changes incompatibly. Python and Pascal must agree; mismatch returns
@@ -202,6 +202,41 @@ Begin
     Project.DM_Compile;
     LastCompiledProject := Project;
     LastCompileTick := GetTickCount;
+End;
+
+{ Resolve the post-compile document set. After Project.DM_Compile the          }
+{ flattened netlist (with hierarchy resolved through sheet symbols and sheet  }
+{ entries) lives on DM_PhysicalDocuments, NOT on DM_LogicalDocuments. The      }
+{ source-side per-sheet Pin.DM_FlattenedNetName values are NOT unified across  }
+{ hierarchy boundaries, only the physical-document pin reads carry the flat   }
+{ project-wide net names. Reference: Altium SDK Connectivity.pas              }
+{ (DM_PhysicalDocuments walked after DM_Compile to harvest pin nets).         }
+{                                                                              }
+{ Returns the physical-document count when populated (the standard post-      }
+{ compile case), falls back to logical for projects that haven't compiled or  }
+{ have a single sheet so the caller keeps working in degenerate cases.         }
+Procedure GetCompiledDocs(Project : IProject; Var DocCount : Integer; Var UsePhysical : Boolean);
+Begin
+    DocCount := 0;
+    UsePhysical := False;
+    If Project = Nil Then Exit;
+    Try DocCount := Project.DM_PhysicalDocumentCount; Except End;
+    If DocCount > 0 Then
+    Begin
+        UsePhysical := True;
+        Exit;
+    End;
+    Try DocCount := Project.DM_LogicalDocumentCount; Except End;
+End;
+
+Function GetCompiledDoc(Project : IProject; Idx : Integer; UsePhysical : Boolean) : IDocument;
+Begin
+    Result := Nil;
+    If Project = Nil Then Exit;
+    If UsePhysical Then
+        Try Result := Project.DM_PhysicalDocuments(Idx); Except End
+    Else
+        Try Result := Project.DM_LogicalDocuments(Idx); Except End;
 End;
 
 Procedure InvalidateCompileCache;

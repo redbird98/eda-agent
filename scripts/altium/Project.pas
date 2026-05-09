@@ -490,7 +490,8 @@ Var
     Doc : IDocument;
     Comp : IComponent;
     Pin : IPin;
-    I, J, K, Count, Limit : Integer;
+    I, J, K, Count, Limit, DocCount : Integer;
+    UsePhysical : Boolean;
     Data, CompDesig, NetName : String;
     First : Boolean;
 Begin
@@ -527,10 +528,11 @@ Begin
     First := True;
     Count := 0;
 
-    For I := 0 To Project.DM_LogicalDocumentCount - 1 Do
+    GetCompiledDocs(Project, DocCount, UsePhysical);
+    For I := 0 To DocCount - 1 Do
     Begin
         If Count >= Limit Then Break;
-        Doc := Project.DM_LogicalDocuments(I);
+        Doc := GetCompiledDoc(Project, I, UsePhysical);
         If Doc = Nil Then Continue;
 
         For J := 0 To Doc.DM_ComponentCount - 1 Do
@@ -579,7 +581,8 @@ Var
     Doc : IDocument;
     Comp : IComponent;
     Pin : IPin;
-    I, J, K, Count, Limit : Integer;
+    I, J, K, Count, Limit, DocCount : Integer;
+    UsePhysical : Boolean;
     Data, CompDesig, CompComment, CompFP, CompLib, PinList : String;
     First, FirstPin : Boolean;
 Begin
@@ -600,10 +603,11 @@ Begin
     First := True;
     Count := 0;
 
-    For I := 0 To Project.DM_LogicalDocumentCount - 1 Do
+    GetCompiledDocs(Project, DocCount, UsePhysical);
+    For I := 0 To DocCount - 1 Do
     Begin
         If Count >= Limit Then Break;
-        Doc := Project.DM_LogicalDocuments(I);
+        Doc := GetCompiledDoc(Project, I, UsePhysical);
         If Doc = Nil Then Continue;
 
         For J := 0 To Doc.DM_ComponentCount - 1 Do
@@ -658,7 +662,8 @@ Var
     Doc : IDocument;
     Comp : IComponent;
     Pin : IPin;
-    I, J, K : Integer;
+    I, J, K, DocCount : Integer;
+    UsePhysical : Boolean;
     Data, PinList, ParamList : String;
     FirstPin, FirstParam : Boolean;
     Found : Boolean;
@@ -680,10 +685,11 @@ Begin
     SmartCompile(Project);
     Found := False;
 
-    For I := 0 To Project.DM_LogicalDocumentCount - 1 Do
+    GetCompiledDocs(Project, DocCount, UsePhysical);
+    For I := 0 To DocCount - 1 Do
     Begin
         If Found Then Break;
-        Doc := Project.DM_LogicalDocuments(I);
+        Doc := GetCompiledDoc(Project, I, UsePhysical);
         If Doc = Nil Then Continue;
 
         For J := 0 To Doc.DM_ComponentCount - 1 Do
@@ -2072,7 +2078,8 @@ Var
     Doc : IDocument;
     Comp : IComponent;
     Pin : IPin;
-    I, J, K : Integer;
+    I, J, K, DocCount : Integer;
+    UsePhysical : Boolean;
     Data, PinList : String;
     FirstPin, Found : Boolean;
 Begin
@@ -2093,10 +2100,11 @@ Begin
     SmartCompile(Project);
     Found := False;
 
-    For I := 0 To Project.DM_LogicalDocumentCount - 1 Do
+    GetCompiledDocs(Project, DocCount, UsePhysical);
+    For I := 0 To DocCount - 1 Do
     Begin
         If Found Then Break;
-        Doc := Project.DM_LogicalDocuments(I);
+        Doc := GetCompiledDoc(Project, I, UsePhysical);
         If Doc = Nil Then Continue;
 
         For J := 0 To Doc.DM_ComponentCount - 1 Do
@@ -2158,7 +2166,8 @@ Var
     Doc : IDocument;
     Comp : IComponent;
     Pin : IPin;
-    I, J, K, N : Integer;
+    I, J, K, N, DocCount : Integer;
+    UsePhysical : Boolean;
     Data, PinList, CompEntry, NotFoundJson, ThisDesig : String;
     FirstPin, FirstC, FirstNF, Matched : Boolean;
     Wanted : Array[0..499] Of String;
@@ -2216,9 +2225,10 @@ Begin
     FirstC := True;
     MatchCount := 0;
 
-    For I := 0 To Project.DM_LogicalDocumentCount - 1 Do
+    GetCompiledDocs(Project, DocCount, UsePhysical);
+    For I := 0 To DocCount - 1 Do
     Begin
-        Doc := Project.DM_LogicalDocuments(I);
+        Doc := GetCompiledDoc(Project, I, UsePhysical);
         If Doc = Nil Then Continue;
 
         For J := 0 To Doc.DM_ComponentCount - 1 Do

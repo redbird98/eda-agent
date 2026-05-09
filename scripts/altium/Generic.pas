@@ -79,6 +79,33 @@ Begin
     End;
 End;
 
+{ Read the Designator and SheetFileName text labels carried by a sheet symbol. }
+{ ISch_SheetSymbol exposes them as compound sub-objects (ISch_SheetName,        }
+{ ISch_SheetFileName), so the Obj.SheetName / Obj.SheetFileName access has to  }
+{ go through a typed-local cast and then read .Text. The same primitive cast   }
+{ pattern as GetSchComponentSubText, just for the sheet-symbol family.          }
+Function GetSheetSymbolText(Obj : ISch_GraphicalObject; PropName : String) : String;
+Var
+    SS : ISch_SheetSymbol;
+Begin
+    Result := '';
+    If Obj.ObjectId <> eSheetSymbol Then Exit;
+    Try
+        SS := Obj;
+        If PropName = 'Designator' Then
+        Begin
+            Try If SS.SheetName <> Nil Then Result := SS.SheetName.Text; Except End;
+        End
+        Else If PropName = 'Filename' Then
+        Begin
+            Try If SS.SheetFileName <> Nil Then Result := SS.SheetFileName.Text; Except End;
+        End;
+    Except
+        RecordCastError('GetSheetSymbolText:' + PropName);
+        Result := '';
+    End;
+End;
+
 Function GetSchProperty(Obj : ISch_GraphicalObject; PropName : String) : String;
 Var
     R : ISch_Rectangle;
@@ -134,9 +161,21 @@ Begin
         Else If PropName = 'ComponentDescription' Then Result := Obj.ComponentDescription
         Else If PropName = 'UniqueId'    Then Result := Obj.UniqueId
 
-        // Sub-object string properties (compound interfaces, typed cast required)
-        Else If PropName = 'Designator'      Then Result := GetSchComponentSubText(Obj, 'Designator')
-        Else If PropName = 'Designator.Text' Then Result := GetSchComponentSubText(Obj, 'Designator')
+        // Sub-object string properties (compound interfaces, typed cast required).
+        // Designator dispatches by ObjectId, ISch_Component carries the live designator
+        // text on its sub-object Designator.Text, ISch_SheetSymbol carries it on
+        // SheetName.Text. Filename / SheetFileName are sheet-symbol only and read the
+        // SheetFileName.Text label that links the symbol to its child sheet.
+        Else If (PropName = 'Designator') Or (PropName = 'Designator.Text') Then
+        Begin
+            If Obj.ObjectId = eSheetSymbol Then
+                Result := GetSheetSymbolText(Obj, 'Designator')
+            Else
+                Result := GetSchComponentSubText(Obj, 'Designator');
+        End
+        Else If (PropName = 'Filename') Or (PropName = 'FileName')
+             Or (PropName = 'SheetFileName') Then
+            Result := GetSheetSymbolText(Obj, 'Filename')
         Else If PropName = 'Comment'         Then Result := GetSchComponentSubText(Obj, 'Comment')
         Else If PropName = 'Comment.Text'    Then Result := GetSchComponentSubText(Obj, 'Comment')
 
@@ -1830,7 +1869,8 @@ Var
     Doc : IDocument;
     Comp : IComponent;
     Pin : IPin;
-    I, J, K, PinCount, CompCount, Total : Integer;
+    I, J, K, PinCount, CompCount, Total, DocCount : Integer;
+    UsePhysical : Boolean;
     NetName, Designator, PinNumber, PinName, JsonItems : String;
     First : Boolean;
 Begin
@@ -1855,9 +1895,10 @@ Begin
     JsonItems := '';
     First := True;
 
-    For I := 0 To Project.DM_LogicalDocumentCount - 1 Do
+    GetCompiledDocs(Project, DocCount, UsePhysical);
+    For I := 0 To DocCount - 1 Do
     Begin
-        Doc := Project.DM_LogicalDocuments(I);
+        Doc := GetCompiledDoc(Project, I, UsePhysical);
         If Doc = Nil Then Continue;
         If Doc.DM_DocumentKind <> 'SCH' Then Continue;
 
@@ -5196,7 +5237,8 @@ Var
     { .Net, .Component, or .Name, and accesses fail silently under the    }
     { surrounding Try/Except, which is why every net returned 0 pads.     }
     Pad : IPCB_Pad;
-    I, J, K, N : Integer;
+    I, J, K, N, DocCount : Integer;
+    UsePhysical : Boolean;
     { Diagnostic counters, emitted in the response so we can tell "PCB   }
     { is open but iterator returned nothing" from "iterator returned pads }
     { but every one had Pad.Net = nil" from "iterator ran fine and we    }
@@ -5233,9 +5275,10 @@ Begin
         If Project <> Nil Then
         Begin
             SmartCompile(Project);
-            For I := 0 To Project.DM_LogicalDocumentCount - 1 Do
+            GetCompiledDocs(Project, DocCount, UsePhysical);
+            For I := 0 To DocCount - 1 Do
             Begin
-                Doc := Project.DM_LogicalDocuments(I);
+                Doc := GetCompiledDoc(Project, I, UsePhysical);
                 If Doc = Nil Then Continue;
                 For J := 0 To Doc.DM_ComponentCount - 1 Do
                 Begin

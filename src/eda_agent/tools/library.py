@@ -448,19 +448,42 @@ def register_library_tools(mcp):
     # =========================================================================
 
     @mcp.tool()
-    async def lib_get_components(library_path: Optional[str] = None) -> dict[str, Any]:
+    async def lib_get_components(
+        library_path: Optional[str] = None,
+        with_parameters: bool = False,
+    ) -> dict[str, Any]:
         """Get all components in a library.
+
+        Default fast path returns only the metadata that the
+        ``ILibCompInfoReader`` exposes directly: name, alias_name,
+        part_count, description. That path scales linearly with file IO
+        and finishes in well under a second on typical libraries.
+
+        Setting ``with_parameters=True`` adds each component's full
+        parameter dict (Manufacturer, Value, Footprint, etc.) to the
+        result. That branch calls ``GetState_SchComponentByLibRef`` once
+        per symbol and iterates parameters, which is O(N) in the live
+        SchLib document and is what makes the call slow on libraries
+        with many hundreds of components. Use it when you need the
+        parameters; for a single symbol's parameters, prefer
+        ``lib_get_component_details``.
 
         Args:
             library_path: Path to library (uses active library if not specified)
+            with_parameters: If True, include each component's parameter
+                dict (slow on large libraries). Default False.
 
         Returns:
-            Dictionary with "count" and "components" list
+            Dictionary with ``count`` and ``components`` list. Each
+            component carries name, alias_name, part_count, description,
+            and (only when with_parameters is True) parameters.
         """
         bridge = get_bridge()
-        params = {}
+        params: dict[str, Any] = {}
         if library_path:
             params["library_path"] = library_path
+        if with_parameters:
+            params["with_parameters"] = "true"
         result = await bridge.send_command_async("library.get_components", params)
         return result or {}
 
