@@ -906,8 +906,16 @@ def register_project_tools(mcp):
                 before reading. Use when you need a guaranteed-fresh
                 netlist.
 
+        DATASHEET DISCIPLINE: pin_name in the response comes from the
+        symbol, which can be wrong. Before reasoning about the pin's
+        function (input vs output, drive strength, voltage range,
+        active level), fetch the manufacturer datasheet and verify
+        against its pin-description table. The response carries
+        `_datasheet_guidance` + `_datasheet_parts`.
+
         Returns:
-            Dict with designator, comment, sheet, pin_count, pins[].
+            Dict with designator, comment, sheet, pin_count, pins[],
+            plus `_datasheet_guidance` + `_datasheet_parts`.
         """
         bridge = get_bridge()
         params: dict[str, Any] = {"designator": designator}
@@ -919,6 +927,16 @@ def register_project_tools(mcp):
         hint = BulkHintTracker.record_and_hint("get_connectivity")
         if hint and isinstance(result, dict):
             result["_hint_bulk"] = hint
+        if isinstance(result, dict):
+            comment = str(result.get("comment") or "").strip()
+            explicit = [{
+                "manufacturer": "",
+                "part_number": comment,
+                "designators": designator,
+            }]
+            return tag_response(
+                result, explicit_parts=explicit, context="get_connectivity"
+            )
         return result
 
     @mcp.tool()
@@ -931,6 +949,12 @@ def register_project_tools(mcp):
 
         PREFER THIS over looping `get_connectivity`.
 
+        DATASHEET DISCIPLINE: pin_name on every component in the
+        response comes from the symbol and can be wrong. Before
+        reasoning about pin functions, fetch each part's manufacturer
+        datasheet. The response carries `_datasheet_guidance` +
+        `_datasheet_parts`.
+
         Args:
             designators: List of component designators.
             project_path: Optional project path.
@@ -939,7 +963,8 @@ def register_project_tools(mcp):
                 netlist.
 
         Returns:
-            Dict with components[], matched, requested, not_found[].
+            Dict with components[], matched, requested, not_found[],
+            plus `_datasheet_guidance` + `_datasheet_parts`.
         """
         bridge = get_bridge()
         cleaned = [str(d).strip() for d in (designators or []) if str(d).strip()]
@@ -950,9 +975,33 @@ def register_project_tools(mcp):
             params["project_path"] = project_path
         if force_recompile:
             params["force_recompile"] = "true"
-        return await bridge.send_command_async(
+        result = await bridge.send_command_async(
             "project.get_connectivity_batch", params
         )
+        if isinstance(result, dict):
+            comps = result.get("components") or []
+            explicit = []
+            seen_keys: set[tuple[str, str]] = set()
+            for c in comps:
+                if not isinstance(c, dict):
+                    continue
+                desig = str(c.get("designator") or "").strip()
+                pn = str(c.get("comment") or "").strip()
+                key = (pn.lower(), desig.lower())
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                explicit.append({
+                    "manufacturer": "",
+                    "part_number": pn,
+                    "designators": desig,
+                })
+            return tag_response(
+                result,
+                explicit_parts=explicit,
+                context="get_connectivity_many",
+            )
+        return result
 
     @mcp.tool()
     async def force_recompile() -> dict[str, Any]:

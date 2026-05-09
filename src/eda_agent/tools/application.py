@@ -14,19 +14,27 @@ from .datasheet_hints import DATASHEET_RULES
 _VERSION_RE = re.compile(r"SCRIPT_VERSION\s*=\s*'([^']+)'")
 
 _SESSION_REMINDER = {
-    "title": "Datasheet discipline, read before every design decision",
+    "__DATASHEET_FIRST__": (
+        "MANDATORY for this whole session: every device-related "
+        "claim (pin function, pin number, rating, package, "
+        "polarity, register, timing, threshold, behaviour, "
+        "footprint pad map) requires the manufacturer datasheet, "
+        "fetched and cited, BEFORE the answer. No exceptions. No "
+        "'I'll assume'. No leaning on Comment / Description / "
+        "Value, distributor copy, or prior-turn memory. WebSearch "
+        "+ WebFetch the manufacturer PDF first, then answer with "
+        "a section/page citation."
+    ),
+    "title": "Datasheet discipline, mandatory before every device-related claim",
     "rule": (
-        "For any question about a component's pin function, voltage "
-        "rating, timing, current limit, or electrical behavior, the "
+        "For ANY question that touches a real device (IC, sensor, "
+        "regulator, MOSFET, connector, passive, anything), the "
         "manufacturer datasheet is the only authoritative source. "
-        "Library symbol metadata (Description, Comment, Value) can "
-        "be wrong and must not be trusted. If the datasheet for a "
-        "referenced part is not already in the conversation, use "
-        "WebSearch + WebFetch to fetch it from the vendor before "
-        "drawing conclusions. Never fabricate or guess datasheet-"
-        "derived values. Tool responses that surface component "
-        "information carry a `_datasheet_guidance` block with per-"
-        "part search queries, use them."
+        "Symbol metadata can be wrong, distributor pages can be "
+        "wrong, your own prior-turn memory can be wrong. The "
+        "datasheet is ground truth. Tool responses that surface "
+        "component information carry a `_datasheet_guidance` "
+        "block, treat it as a checklist, not an FYI."
     ),
     "datasheet_rules": DATASHEET_RULES,
 }

@@ -28,27 +28,41 @@ from typing import Any
 
 
 DATASHEET_RULES: list[str] = [
-    "The manufacturer datasheet is the only authoritative source "
-    "for pin function, voltage rating, current limit, timing, and "
-    "any electrical spec. Library symbol metadata (Description, "
-    "Comment, Value fields, footprint assignments) can be wrong or "
-    "outdated and must not be trusted for any conclusion.",
-    "Before proposing any fix, pin change, part substitution, or "
-    "rule/clearance decision on a specific part: open and read the "
-    "actual datasheet.",
-    "If the datasheet is not already available locally or in the "
-    "conversation, you MUST search for it with WebSearch "
-    "('<manufacturer> <part_number> datasheet filetype:pdf') and "
-    "fetch it with WebFetch. Do not skip this step. Do not answer "
-    "'I'll assume ...' about an electrical spec, find the sheet.",
-    "When citing a claim derived from a datasheet, include the page "
-    "or section you relied on. If you cannot cite it, you have not "
-    "actually verified, say so and go read the datasheet.",
-    "Never fabricate, guess, or LLM-generate datasheet-derived "
-    "values (pin functions, Vmax, Vmin, absolute maximums, sim "
-    "models). If a datasheet is genuinely unavailable after a real "
-    "search (proprietary, obsolete), flag that to the user and stop. "
-    "Do not substitute a plausible guess.",
+    "MANDATORY: Before stating ANY device-related fact (pin "
+    "function, pin number, voltage rating, current limit, package, "
+    "polarity, default state, register map, threshold, timing, "
+    "thermal, ESD/clamp, internal block, recommended layout, "
+    "decoupling, pull values, footprint pad map), the manufacturer "
+    "datasheet MUST be fetched and read first. No exceptions, no "
+    "shortcuts, no 'I'll assume...', no 'it's typically...'.",
+    "Symbol metadata (Description, Comment, Value, Manufacturer, "
+    "Manufacturer Part Number), footprint pad mapping, distributor "
+    "pages, parametric search results, and your prior-turn memory "
+    "of a part are ALL UNTRUSTED. Treat them as hints to FIND the "
+    "datasheet, never as substitutes for reading it.",
+    "If the datasheet is not already in the conversation: STOP "
+    "answering, run WebSearch '<manufacturer> <part_number> "
+    "datasheet filetype:pdf', follow the manufacturer or major-"
+    "distributor (Mouser/Digi-Key) link, WebFetch the PDF, THEN "
+    "resume the user's request. Skipping this step is a bug.",
+    "Every assertion derived from a datasheet must cite the "
+    "section or page used. No citation means not verified, say so "
+    "explicitly and go fetch instead of guessing.",
+    "Different vendors of nominally-same generic parts (2N3904, "
+    "1N4148, common opamps, LDOs) have different absolute-max "
+    "specs and sometimes different pinouts. Always cite which "
+    "vendor's datasheet you used.",
+    "Re-verify even for parts you have 'looked at this session'. A "
+    "casing typo or near-MPN substitution (LM317 vs LM317T vs "
+    "LM317M) breaks recall, the datasheet does not.",
+    "If a datasheet is genuinely unavailable (proprietary, "
+    "obsolete, NDA-only) AFTER a real search: flag it explicitly "
+    "to the user and refuse to guess. A plausible-sounding wrong "
+    "answer is worse than 'I don't know'.",
+    "This rule overrides terseness, response speed, and 'just give "
+    "me the quick answer' framing. A fast wrong answer about a "
+    "real device is the wrong answer, the user has been burned by "
+    "both LLM intuition and library metadata being wrong.",
 ]
 
 
@@ -168,24 +182,35 @@ def build_guidance_block(
     """
     parts = parts or []
     return {
+        "__DATASHEET_FIRST__": (
+            "MANDATORY: every device-related claim REQUIRES the "
+            "manufacturer datasheet, fetched and cited, BEFORE the "
+            "answer. No shortcuts, no guesses, no library metadata, "
+            "no prior-turn memory. WebSearch + WebFetch the PDF first."
+        ),
         "datasheet_rules": DATASHEET_RULES,
         "action_required": (
-            "For every manufacturer part number in _datasheet_parts "
-            "that you don't already have a datasheet for: use "
-            "WebSearch with the provided datasheet_query, then "
-            "WebFetch the PDF, and ground any decision about that "
-            "part in what the datasheet actually says. Do not guess, "
-            "do not assume, do not rely on the symbol's Comment or "
-            "Description field. If the datasheet is genuinely not "
-            "available after a real search, flag that explicitly and "
-            "ask the user."
+            "MANDATORY for every part listed in _datasheet_parts "
+            "that is NOT already covered by a datasheet PDF in this "
+            "conversation: (1) WebSearch with the provided "
+            "datasheet_query, (2) WebFetch the manufacturer PDF, "
+            "(3) ground every claim about that part in what the "
+            "datasheet says with a section or page citation. Do not "
+            "guess, do not assume, do not lean on Comment / "
+            "Description / Value / Manufacturer fields, do not "
+            "trust distributor pages or your own prior-turn memory. "
+            "If the datasheet is genuinely unreachable after a real "
+            "search, flag it explicitly and stop, do NOT substitute "
+            "a plausible-sounding guess."
         ),
         "unique_part_count": len(parts),
         "search_hints": [_search_hint(p) for p in parts],
         "reminder": (
-            "The symbol, footprint, Comment, and parameter fields can "
-            "be wrong. The manufacturer datasheet is ground truth. "
-            "Fetch it with WebFetch if you don't already have it."
+            "Symbol Comment / Description / Value, footprint "
+            "assignments, distributor copy, and prior-turn memory "
+            "are UNTRUSTED. Manufacturer datasheet is the only "
+            "ground truth. Cite the section/page when you state a "
+            "fact, no citation means not verified."
         ),
         "context": context,
     }

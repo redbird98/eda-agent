@@ -896,19 +896,39 @@ def register_pcb_tools(mcp):
         Returns detailed pad information including pin name, position,
         net assignment, size, and hole information.
 
+        DATASHEET DISCIPLINE: Pad name -> pin function mapping comes
+        from the footprint, which can be wrong (especially the thermal
+        pad on QFN/DFN, which is rarely numbered consistently across
+        vendors). Before stating which pin a pad corresponds to,
+        cross-check the manufacturer datasheet's mechanical /
+        recommended-land-pattern section. The response carries
+        `_datasheet_guidance` + `_datasheet_parts`.
+
         Args:
             designator: Component reference designator (e.g., "U1", "J3")
 
         Returns:
             Dictionary with "designator", "pads" array (each with name,
             x, y, net, layer, hole_size, top_x_size, top_y_size,
-            rotation), and "pad_count"
+            rotation), "pad_count", plus `_datasheet_guidance` +
+            `_datasheet_parts`.
         """
         bridge = get_bridge()
         result = await bridge.send_command_async(
             "pcb.get_component_pads",
             {"designator": designator},
         )
+        if isinstance(result, dict):
+            explicit = [{
+                "manufacturer": "",
+                "part_number": "",
+                "designators": designator,
+            }]
+            return tag_response(
+                result,
+                explicit_parts=explicit,
+                context="pcb_get_component_pads",
+            )
         return result
 
     @mcp.tool()

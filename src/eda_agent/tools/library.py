@@ -485,6 +485,10 @@ def register_library_tools(mcp):
         if with_parameters:
             params["with_parameters"] = "true"
         result = await bridge.send_command_async("library.get_components", params)
+        if isinstance(result, dict):
+            return tag_response(
+                result, components=result, context="lib_get_components"
+            )
         return result or {}
 
     @mcp.tool()
@@ -529,6 +533,14 @@ def register_library_tools(mcp):
     ) -> dict[str, Any]:
         """Get detailed information about a library component.
 
+        DATASHEET DISCIPLINE: This response is the highest-density
+        device-fact surface in the library API (pins, parameters,
+        Manufacturer/MPN). Treat every value as a hint to find the
+        manufacturer datasheet, not as ground truth. The response
+        carries `_datasheet_guidance` and `_datasheet_parts`, fetch
+        the PDF and cite a section/page before stating any pin or
+        rating.
+
         NOTE: Uses the focused library document, not library_path. Open the
         target library in Altium before calling.
 
@@ -537,13 +549,44 @@ def register_library_tools(mcp):
             library_path: Path to the library (currently ignored, see note)
 
         Returns:
-            Dictionary with full component details including pins and parameters
+            Dictionary with full component details including pins and
+            parameters, plus `_datasheet_guidance` + `_datasheet_parts`.
         """
         bridge = get_bridge()
         result = await bridge.send_command_async(
             "library.get_component_details",
             {"component_name": component_name, "library_path": library_path},
         )
+        if isinstance(result, dict):
+            mfr = ""
+            mpn = ""
+            params = result.get("parameters") or {}
+            if isinstance(params, dict):
+                mfr = str(
+                    params.get("Manufacturer")
+                    or params.get("manufacturer")
+                    or ""
+                ).strip()
+                mpn = str(
+                    params.get("ManufacturerPartNumber")
+                    or params.get("Manufacturer Part Number")
+                    or params.get("Partnumber")
+                    or params.get("PartNumber")
+                    or params.get("Comment")
+                    or ""
+                ).strip()
+            if not mpn:
+                mpn = str(result.get("name") or component_name or "").strip()
+            explicit = (
+                [{"manufacturer": mfr, "part_number": mpn, "designators": ""}]
+                if mpn
+                else []
+            )
+            return tag_response(
+                result,
+                explicit_parts=explicit,
+                context="lib_get_component_details",
+            )
         return result
 
     @mcp.tool()
@@ -754,15 +797,34 @@ def register_library_tools(mcp):
     async def lib_get_pin_list() -> dict[str, Any]:
         """Get all pins of the current library component.
 
+        DATASHEET DISCIPLINE: Pin name + electrical_type from the
+        symbol can be wrong, especially on libraries that have been
+        edited by hand or imported from third-party sources. Before
+        relying on a pin's function for any decision, fetch the
+        manufacturer datasheet and verify against its pin-description
+        table. The response carries `_datasheet_guidance` +
+        `_datasheet_parts`.
+
         Returns:
             Dictionary with "count", "component" name, and "pins" array.
             Each pin has: designator, name, electrical_type, x, y,
-            orientation, hidden
+            orientation, hidden. Plus `_datasheet_guidance` +
+            `_datasheet_parts`.
         """
         bridge = get_bridge()
         result = await bridge.send_command_async(
             "library.get_pin_list", {}
         )
+        if isinstance(result, dict):
+            comp = str(result.get("component") or "").strip()
+            explicit = (
+                [{"manufacturer": "", "part_number": comp, "designators": ""}]
+                if comp
+                else []
+            )
+            return tag_response(
+                result, explicit_parts=explicit, context="lib_get_pin_list"
+            )
         return result
 
     @mcp.tool()
