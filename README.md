@@ -1,6 +1,6 @@
 # eda-agent
 
-MCP server that lets an AI (or any MCP-compatible client) **interact with a live Altium Designer session**. It exposes 195+ tools covering schematic, PCB, library, and project operations over a persistent DelphiScript bridge — the AI reads the design you currently have open, asks questions about it, and can modify it in place while you watch.
+MCP server that lets an AI (or any MCP-compatible client) **interact with a live Altium Designer session**. It exposes 200+ tools covering schematic, PCB, library, project, and design-agent operations over a persistent DelphiScript bridge — the AI reads the design you currently have open, asks questions about it, and can modify it in place while you watch.
 
 > **⚠️ Experimental.** Not all tools are extensively tested. Some can crash the Altium DelphiScript engine. See [Known limitations](#known-limitations) before using on any design you haven't backed up.
 
@@ -186,7 +186,7 @@ Some tool paths trigger DelphiScript compile or runtime errors ("Undeclared iden
 - An Altium error dialog stating the problem
 - Your MCP client timing out waiting for a response
 
-**Recovery:** in Altium Designer, open the script project tab, press the **red Stop** button in the Script IDE toolbar (or press **Ctrl+F2**). This stops the halted debugger. Then re-launch the polling loop via **File → Run Script... → StartMCPServer → Run**.
+**Recovery:** in Altium Designer, open the script project tab and press the **red Stop** button in the Script IDE toolbar (or **Run → Reset** from the menu — the keyboard shortcut depends on your Altium version). This stops the halted debugger. Then re-launch the polling loop via **File → Run Script... → StartMCPServer → Run**.
 
 This is an ongoing reliability effort. Every identified crash is either fixed or guarded. If you hit a new one, the Altium error dialog tells you the exact identifier or line — opening an issue with that text helps us harden the relevant path.
 
@@ -209,7 +209,7 @@ In practice, while an MCP client is attached and sending keep-alive pings every 
 
 ### Tools vary in maturity
 
-Not every one of the 195+ tools has been exercised on every Altium version or design size. The [generic primitives](#generic-primitives) and the core `application` / `project` tools are the best-tested. Some PCB modify operations (polygon repour, room creation, align-components) are less battle-tested. Queries are generally safer than mutations.
+Not every one of the 200+ tools has been exercised on every Altium version or design size. The [generic primitives](#generic-primitives) and the core `application` / `project` tools are the best-tested. Some PCB modify operations (polygon repour, room creation, align-components) are less battle-tested. Queries are generally safer than mutations.
 
 ## Timeout and server lifecycle
 
@@ -219,7 +219,7 @@ The server has **three independent timeout mechanisms**:
 
 When the MCP client calls a tool, the Python bridge writes a request file and waits up to **10 seconds by default** for a response. Fast queries typically complete in under 100 ms, so a 10 s ceiling surfaces stalls quickly while leaving plenty of margin for real work. Long-running tools that are expected to take longer (`save_all`, `stop_server`, `pcb_get_unrouted_nets`) set their own larger timeouts internally.
 
-Concurrent calls from the MCP client and the keep-alive thread are serialized by a `threading.Lock` in the bridge so their responses never race on the single `response.json` channel.
+Each request is published to its own `request_<id>.json` file; Altium replies in `response_<id>.json` with the matching ID. The bridge's keep-alive thread and MCP-client calls each use their own request IDs, so responses never race — the older single-`response.json` channel was retired in IPC v2.
 
 ### 2. Server auto-shutdown (Altium side)
 
@@ -241,11 +241,11 @@ The polling loop goes into idle mode after ~1 second of no MCP commands. In idle
 
 ## Tool reference
 
-195+ tools grouped into five categories. The **generic primitives** are the engine; the rest are convenience wrappers or category-specific operations.
+200+ tools grouped into six categories. The **generic primitives** are the engine; the rest are convenience wrappers or category-specific operations.
 
 ### Generic primitives (the core)
 
-These five tools cover most day-to-day work. They accept any object type supported by the bridge.
+These six tools cover most day-to-day work. They accept any object type supported by the bridge.
 
 | Tool | Purpose |
 |---|---|
@@ -262,7 +262,7 @@ These five tools cover most day-to-day work. They accept any object type support
 
 **Scope values:** `active_doc`, `project`, `project:<path>`, `doc:<path>`.
 
-### Application (13 tools)
+### Application (14 tools)
 
 | Tool | Purpose |
 |---|---|
@@ -279,6 +279,7 @@ These five tools cover most day-to-day work. They accept any object type support
 | `get_preferences` | Snap grids, unit system, common prefs |
 | `execute_menu` | Run a menu command by path (e.g., `Tools|Design Rule Check`) |
 | `get_clipboard_text` | Read text from Windows clipboard |
+| `diag_workspace` | Diagnostic: enumerate the IPC workspace directory and report pending request files. Useful when investigating IPC plumbing |
 
 ### Project (47 tools)
 
@@ -404,13 +405,14 @@ A high-level surface for autonomous schematic creation. The MCP client's LLM is 
                   v
     +-----------------------------+
     |     eda-agent (Python)      |
-    |   application / project /   |
-    |   library / generic / pcb   |
+    | application / project / lib |
+    | / generic / pcb / design    |
     |              |              |
     |     Altium bridge (IPC)     |
     +-----------------------------+
                   |
-                  |  request.json / response.json
+                  |  request_<id>.json
+                  |  response_<id>.json
                   v
     +-----------------------------+
     |      Altium Designer        |
@@ -484,7 +486,7 @@ At wheel build time `scripts/altium/` is copied into `src/eda_agent/scripts/` in
 
 **"Script not responding" / MCP tools time out** — confirm the script project is loaded and `StartMCPServer` is running. Re-launch it via **File → Run Script... → StartMCPServer → Run**. Check `%USERPROFILE%\EDA Agent\workspace\` is writable.
 
-**Altium error dialog "Undeclared identifier: …" or "Could not convert variant…"** — a DelphiScript crash in one of the bridge handlers. In Altium's Script IDE toolbar, press the red **Stop** button (or `Ctrl+F2`) to halt the debugger. Then re-launch the polling loop via **File → Run Script... → StartMCPServer → Run**. Report the identifier or error text as an issue.
+**Altium error dialog "Undeclared identifier: …" or "Could not convert variant…"** — a DelphiScript crash in one of the bridge handlers. In Altium's Script IDE toolbar, press the red **Stop** button (or **Run → Reset** from the menu — keyboard shortcut varies by Altium version) to halt the debugger. Then re-launch the polling loop via **File → Run Script... → StartMCPServer → Run**. Report the identifier or error text as an issue.
 
 **Some Altium buttons don't respond while the server is running** — expected while the AI is actively issuing commands. Built-in Altium functions that depend on DelphiScript wait for the polling loop to yield. The loop enters an idle/yield mode within ~1 s of the last AI command; if a button is still unresponsive after that, call `detach_from_altium` from the MCP client to fully release the scripting engine.
 
