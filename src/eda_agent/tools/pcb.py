@@ -1516,28 +1516,28 @@ def register_pcb_tools(mcp):
 
     @mcp.tool()
     async def pcb_get_rule_properties(name: str) -> dict[str, Any]:
-        """Read the full property set of a named PCB design rule.
+        """Read properties of a named PCB design rule.
 
-        `pcb_get_design_rules` returns only metadata (name, kind, scope,
-        enabled). This tool returns the actual numeric values that
-        drive DRC: clearance gap, min/max/preferred trace width
-        (per layer, reported at the top layer), min/max hole size,
-        via diameters, parallel-segment limits, and min/max
-        impedance. Properties that don't apply to the rule's kind
-        are silently skipped — you get back only the keys that are
-        meaningful for this specific rule.
+        Returns metadata (name, rule_kind, enabled, priority) plus a
+        ``descriptor`` string that contains the rule's constraint values
+        in human-readable form, e.g.:
+
+            "Width Constraint (Min=0.102mm) (Max=5.08mm) (Preferred=0.127mm) (All)"
+            "Clearance Constraint (Gap=0.127mm) (All),(All)"
+            "Hole Size Constraint (Min=0.1mm) (Max=4mm) (All)"
+            "Routing Via (Templates Used To Check Via: v30h10m0mx0, ...) (All)"
+
+        Constraint values live on per-kind subtype interfaces
+        (IPCB_ClearanceConstraint, IPCB_MaxMinWidthConstraint, ...) which
+        cannot be safely accessed from a base IPCB_Rule reference in
+        DelphiScript, so we surface the descriptor string instead. Parse
+        it client-side if you need numeric values.
 
         Args:
             name: Design rule name (e.g., "Clearance", "Width", "RoutingVias").
 
         Returns:
-            Dict with name, rule_kind, enabled, priority, plus any of:
-            gap_mils, min_width_mils, max_width_mils, preferred_width_mils,
-            min_limit_mils, max_limit_mils, min_hole_size_mils,
-            max_hole_size_mils, preferred_hole_size_mils,
-            min_width_via_mils, max_width_via_mils, preferred_width_via_mils,
-            parallel_limit_mils, parallel_gap_mils,
-            min_impedance, max_impedance, preferred_impedance.
+            Dict with name, rule_kind, enabled, priority, descriptor.
         """
         bridge = get_bridge()
         return await bridge.send_command_async(
@@ -1547,43 +1547,29 @@ def register_pcb_tools(mcp):
     @mcp.tool()
     async def pcb_set_rule_properties(
         name: str,
-        gap_mils: int | None = None,
-        min_width_mils: int | None = None,
-        max_width_mils: int | None = None,
-        preferred_width_mils: int | None = None,
-        min_limit_mils: int | None = None,
-        max_limit_mils: int | None = None,
-        min_hole_size_mils: int | None = None,
-        max_hole_size_mils: int | None = None,
-        preferred_hole_size_mils: int | None = None,
-        min_impedance: float | None = None,
-        max_impedance: float | None = None,
-        preferred_impedance: float | None = None,
         enabled: bool | None = None,
         priority: int | None = None,
         scope1: str | None = None,
         scope2: str | None = None,
         comment: str | None = None,
     ) -> dict[str, Any]:
-        """Update kind-specific properties of a named PCB design rule.
+        """Update metadata of a named PCB design rule.
+
+        Constraint values (gap, width, hole size, impedance, ...) are
+        intentionally NOT settable here. Those properties live on per-kind
+        IPCB_*Constraint subtypes that DelphiScript cannot dispatch to
+        safely from a base IPCB_Rule reference; the older code that tried
+        crashed on Altium 26.5+ with "Undeclared identifier" compile
+        errors. To change a constraint value, edit the rule in the Altium
+        UI (PCB > Rules and Constraints Editor), or recreate the rule
+        with ``pcb_create_design_rule`` which dispatches to the right
+        subtype factory + setter internally.
 
         Pass only the parameters you want to change; leave the rest at
-        None. Properties that don't apply to this rule's kind are
-        silently ignored (trying to set gap_mils on a Width rule is
-        a no-op, not an error). Width properties are applied to every
-        copper layer.
+        None.
 
         Args:
             name: Rule name to update.
-            gap_mils: Clearance (for Clearance rules).
-            min_width_mils / max_width_mils / preferred_width_mils:
-                For Width rules. Applied across all layers.
-            min_limit_mils / max_limit_mils: Generic min/max
-                (hole size, flight time, etc.).
-            min_hole_size_mils / max_hole_size_mils /
-                preferred_hole_size_mils: For via rules.
-            min_impedance / max_impedance / preferred_impedance:
-                For MaxMinImpedance rules (ohms).
             enabled: Whether DRC enforces the rule.
             priority: Rule priority (lower number = higher priority).
             scope1 / scope2: Rule scope query expressions.
@@ -1594,18 +1580,6 @@ def register_pcb_tools(mcp):
         """
         params: dict[str, Any] = {"name": name}
         for key, value in [
-            ("gap_mils", gap_mils),
-            ("min_width_mils", min_width_mils),
-            ("max_width_mils", max_width_mils),
-            ("preferred_width_mils", preferred_width_mils),
-            ("min_limit_mils", min_limit_mils),
-            ("max_limit_mils", max_limit_mils),
-            ("min_hole_size_mils", min_hole_size_mils),
-            ("max_hole_size_mils", max_hole_size_mils),
-            ("preferred_hole_size_mils", preferred_hole_size_mils),
-            ("min_impedance", min_impedance),
-            ("max_impedance", max_impedance),
-            ("preferred_impedance", preferred_impedance),
             ("priority", priority),
             ("scope1", scope1),
             ("scope2", scope2),
