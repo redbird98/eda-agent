@@ -2523,13 +2523,9 @@ End;
 Function Gen_PlaceSchComponentFromLibrary(Params : String; RequestId : String) : String;
 Var
     LibPath, LibRef, DesigStr, FootprintStr, AvailHint, SheetPath : String;
-    X, Y, Rotation : Integer;
+    X, Y, Rotation, OrientationVal : Integer;
     SchDoc : ISch_Document;
     Comp : ISch_Component;
-    CompLoc : TLocation;
-    RotCount, I : Integer;
-    SchObjectHandle : Integer;
-    PlaceOk : Boolean;
     SrvDoc : IServerDocument;
 Begin
     LibPath := ExtractJsonValue(Params, 'library_path');
@@ -2547,10 +2543,7 @@ Begin
         Exit;
     End;
 
-    { Resolve target sheet. If sheet_path is given, use GetSchDocumentByPath  }
-    { which is focus-independent — Client.ShowDocument is unreliable for     }
-    { switching focus, so the previously-relied-on GetCurrentSchDocument     }
-    { could return a different doc (or a SchLib) than the caller expected.   }
+    { Resolve target sheet (focus-independent). }
     SchDoc := Nil;
     If SheetPath <> '' Then
     Begin
@@ -2573,9 +2566,6 @@ Begin
         End;
     End;
 
-    { Reject SchLib (or anything else) — placing on a SchLib creates a new    }
-    { symbol in the lib, not an instance on a sheet. The only valid target   }
-    { for PlaceSchComponent is an eSheet (a schematic .SchDoc).               }
     If SchDoc.ObjectId <> eSheet Then
     Begin
         Result := BuildErrorResponse(RequestId, 'WRONG_DOC_KIND',
@@ -2584,9 +2574,8 @@ Begin
         Exit;
     End;
 
-    { Pre-validate when a lib_path was supplied. Skips the dialog-popping path }
-    { in PlaceSchComponent. When LibPath is empty, Altium searches its open   }
-    { libs / integrated libs as before.                                        }
+    { Pre-validate that lib_reference exists in the SchLib. Cheap on-disk   }
+    { check via CreateLibCompInfoReader; avoids any internal-popup path.    }
     If LibPath <> '' Then
     Begin
         If Not ResolveLibRef(LibPath, LibRef, AvailHint) Then
@@ -2598,52 +2587,45 @@ Begin
         End;
     End;
 
-    { PlaceSchComponent is a PROCEDURE with three args:                         }
-    {   Procedure PlaceSchComponent(ALibPath, ALibRef : WideString;             }
-    {                               Var SchObject : TSchObjectHandle);          }
-    { Calling it as a function (Comp := SchDoc.PlaceSchComponent(...)) is a     }
-    { signature mismatch — Altium pops an empty modal Error dialog at the COM  }
-    { layer that freezes the polling loop. The 3-arg call returns the new      }
-    { component's handle in SchObjectHandle; we then walk the doc to grab the  }
-    { actual ISch_Component (the SDK has no GetByHandle helper exposed).       }
+    { THE WORKING PLACEMENT API (per SamacSys Altium Library Loader and    }
+    { the Altium Circad translator reference):                              }
+    {   1. SchServer.LoadComponentFromLibrary(LibRef, LibPath) — note the }
+    {      argument order is (REF, PATH), opposite of PlaceSchComponent.   }
+    {   2. SchDoc.AddSchObject(comp) — attach to the sheet.                }
+    {   3. comp.MoveToXY(MilsToCoord(X), MilsToCoord(Y)) — proper          }
+    {      whole-component positioning. Moves designator / comment / pins }
+    {      together.                                                        }
+    {   4. comp.SetState_Orientation(N) — 0/1/2/3 for 0°/90°/180°/270°.    }
+    {                                                                        }
+    { This replaces the broken PlaceSchComponent + Comp.Location :=         }
+    { Point(...) approach which 16-bit-truncates coords and pops modal      }
+    { errors.                                                               }
     SchServer.ProcessControl.PreProcess(SchDoc, '');
-    SchObjectHandle := 0;
-    PlaceOk := True;
-    Try
-        SchDoc.PlaceSchComponent(LibPath, LibRef, SchObjectHandle);
-    Except
-        PlaceOk := False;
-    End;
-
     Comp := Nil;
-    If PlaceOk Then
-        Comp := FindPlacedComponentByLibRef(SchDoc, LibRef);
+    Try
+        Comp := SchServer.LoadComponentFromLibrary(LibRef, LibPath);
+    Except
+        Comp := Nil;
+    End;
 
     If Comp = Nil Then
     Begin
         SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
         Result := BuildErrorResponse(RequestId, 'PLACE_FAILED',
-            'PlaceSchComponent did not register a component for ' + LibRef +
+            'LoadComponentFromLibrary returned nil for ' + LibRef +
             ' from ' + LibPath);
         Exit;
     End;
 
-    { Position the newly placed component. Use the documented TLocation       }
-    { read-modify-write pattern: Point(...) returns a 16-bit-clipped TPoint   }
-    { in DelphiScript, which silently truncates large coords like             }
-    { MilsToCoord(3500)=35,000,000 → ~350 → bottom-left corner.               }
-    CompLoc := Comp.Location;
-    CompLoc.X := MilsToCoord(X);
-    CompLoc.Y := MilsToCoord(Y);
-    Try Comp.Location := CompLoc; Except End;
+    Try SchDoc.AddSchObject(Comp); Except End;
+    Try Comp.MoveToXY(MilsToCoord(X), MilsToCoord(Y)); Except End;
 
-    { Apply 90-degree rotations. }
-    RotCount := 0;
-    If Rotation = 90 Then RotCount := 1
-    Else If Rotation = 180 Then RotCount := 2
-    Else If Rotation = 270 Then RotCount := 3;
-    For I := 1 To RotCount Do
-        Try Comp.RotateBy90(CompLoc); Except End;
+    { Translate degrees to the orientation enum. }
+    OrientationVal := 0;
+    If Rotation = 90 Then OrientationVal := 1
+    Else If Rotation = 180 Then OrientationVal := 2
+    Else If Rotation = 270 Then OrientationVal := 3;
+    Try Comp.SetState_Orientation(OrientationVal); Except End;
 
     { Override designator if caller supplied one. }
     If DesigStr <> '' Then
@@ -2653,30 +2635,11 @@ Begin
     If FootprintStr <> '' Then
         Try Comp.CurrentFootprintModelName := FootprintStr; Except End;
 
-    { Pin the designator + comment text fields next to the component body.   }
-    { Many SchLib symbols have these fields anchored at large absolute      }
-    { offsets (e.g. -4000 mils X) from the symbol origin, which on a       }
-    { placed instance lands them off in the corner of the sheet.            }
-    Try
-        CompLoc := Comp.Designator.Location;
-        CompLoc.X := MilsToCoord(X);
-        CompLoc.Y := MilsToCoord(Y) + MilsToCoord(50);
-        Comp.Designator.Location := CompLoc;
-    Except End;
-    Try
-        CompLoc := Comp.Comment.Location;
-        CompLoc.X := MilsToCoord(X);
-        CompLoc.Y := MilsToCoord(Y) - MilsToCoord(50);
-        Comp.Comment.Location := CompLoc;
-    Except End;
-
     SchRegisterObject(SchDoc, Comp);
     SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
     SchDoc.GraphicallyInvalidate;
 
-    { Belt: explicitly flag the IServerDocument dirty so save_all flushes  }
-    { it. ProcessControl.PostProcess sometimes doesn't propagate the      }
-    { Modified flag through to the IServerDocument layer.                  }
+    { Explicitly flag the IServerDocument dirty so save_all flushes it.    }
     Try
         SrvDoc := Client.GetDocumentByPath(SchDoc.DocumentName);
         If SrvDoc <> Nil Then SrvDoc.SetModified(True);
@@ -4994,14 +4957,11 @@ End;
 Function Gen_PlaceSchComponentsFromLibrary(Params : String; RequestId : String) : String;
 Var
     PlaceStr, Op, Remaining : String;
-    OpCount, Placed, Failed, Rotation, RotCount, J : Integer;
+    OpCount, Placed, Failed, Rotation, OrientationVal : Integer;
     LibPath, LibRef, Desig, Footprint, AvailHint : String;
     X, Y : Integer;
     SchDoc : ISch_Document;
     Comp : ISch_Component;
-    CompLoc : TLocation;
-    SchObjectHandle : Integer;
-    PlaceOk : Boolean;
 Begin
     PlaceStr := ExtractJsonValue(Params, 'placements');
     If PlaceStr = '' Then
@@ -5043,7 +5003,7 @@ Begin
                 Continue;
             End;
 
-            { Pre-validate to dodge PlaceSchComponent's modal-error popup. }
+            { Pre-validate to short-circuit any internal-popup path. }
             If LibPath <> '' Then
                 If Not ResolveLibRef(LibPath, LibRef, AvailHint) Then
                 Begin
@@ -5051,34 +5011,29 @@ Begin
                     Continue;
                 End;
 
-            { 3-arg procedure call — function-form mismatches the SDK and    }
-            { triggers Altium's empty Error modal that freezes the script.   }
-            SchObjectHandle := 0;
-            PlaceOk := True;
-            Try
-                SchDoc.PlaceSchComponent(LibPath, LibRef, SchObjectHandle);
-            Except
-                PlaceOk := False;
-            End;
+            { Working SchDoc placement API: LoadComponentFromLibrary +     }
+            { AddSchObject + MoveToXY + SetState_Orientation. Note arg     }
+            { order (REF, PATH) is opposite of PlaceSchComponent.           }
             Comp := Nil;
-            If PlaceOk Then
-                Comp := FindPlacedComponentByLibRef(SchDoc, LibRef);
-
+            Try
+                Comp := SchServer.LoadComponentFromLibrary(LibRef, LibPath);
+            Except
+                Comp := Nil;
+            End;
             If Comp = Nil Then
             Begin
                 Inc(Failed);
                 Continue;
             End;
 
-            CompLoc := Point(MilsToCoord(X), MilsToCoord(Y));
-            Try Comp.Location := CompLoc; Except End;
+            Try SchDoc.AddSchObject(Comp); Except End;
+            Try Comp.MoveToXY(MilsToCoord(X), MilsToCoord(Y)); Except End;
 
-            RotCount := 0;
-            If Rotation = 90 Then RotCount := 1
-            Else If Rotation = 180 Then RotCount := 2
-            Else If Rotation = 270 Then RotCount := 3;
-            For J := 1 To RotCount Do
-                Try Comp.RotateBy90(CompLoc); Except End;
+            OrientationVal := 0;
+            If Rotation = 90 Then OrientationVal := 1
+            Else If Rotation = 180 Then OrientationVal := 2
+            Else If Rotation = 270 Then OrientationVal := 3;
+            Try Comp.SetState_Orientation(OrientationVal); Except End;
 
             If Desig <> '' Then
                 Try Comp.Designator.Text := Desig; Except End;
