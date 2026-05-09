@@ -400,9 +400,12 @@ A high-level surface for autonomous schematic creation. The MCP client's LLM is 
     +-----------------------------+
     |    MCP-compatible client    |
     +-----------------------------+
-                  |
-                  |  MCP (stdio)
-                  v
+            |              ^
+            v              |
+       tool call       tool result
+       (JSON-RPC)      (JSON-RPC)
+            |              |
+            v              |
     +-----------------------------+
     |     eda-agent (Python)      |
     | application / project / lib |
@@ -410,10 +413,11 @@ A high-level surface for autonomous schematic creation. The MCP client's LLM is 
     |              |              |
     |     Altium bridge (IPC)     |
     +-----------------------------+
-                  |
-                  |  request_<id>.json
-                  |  response_<id>.json
-                  v
+            |              ^
+            v              |
+   request_<id>.json   response_<id>.json
+            |              |
+            v              |
     +-----------------------------+
     |      Altium Designer        |
     |  DelphiScript polling loop  |
