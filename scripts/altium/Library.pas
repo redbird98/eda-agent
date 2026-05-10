@@ -2332,6 +2332,304 @@ Begin
 End;
 
 {..............................................................................}
+{ Lib_SetLabelFormat - bulk OR single-component label-style writer.            }
+{                                                                              }
+{ Sets any subset of {font_id, color, is_hidden, orientation, justification}  }
+{ on a target ISch_Label (designator, comment, or one named parameter) for    }
+{ either one component (component_name supplied) or every component in the   }
+{ library (component_name omitted). Symmetric counterpart to                  }
+{ lib_audit_styles' filtering: when only_mismatched is true (default), the   }
+{ handler skips components whose target label already matches every          }
+{ specified field, so re-runs after partial application stay idempotent.     }
+{                                                                              }
+{ The whole edit batch is wrapped in ProcessControl.PreProcess /              }
+{ PostProcess('Edit') so Altium's undo stack records it as one step. Each    }
+{ label modification is bracketed by SchBeginModify / SchEndModify on the    }
+{ ISch_Label so the SchServer broadcasts a refresh for that primitive.      }
+{ MarkLibDirty fires once at the end; saves are deferred per the project-    }
+{ side perf_deferred_save pattern.                                            }
+{                                                                              }
+{ Params (any combination of style fields, omitted ones are left untouched): }
+{   library_path                  - .SchLib path. Defaults to focused doc.   }
+{   component_name                - optional, single-component mode.         }
+{   target=designator|comment|parameter:<name>  (default 'designator')      }
+{   font_id, color, is_hidden, orientation, justification - new style values }
+{   only_mismatched=true|false    (default true) - skip already-compliant   }
+{   limit=5000                    - cap on processed components in bulk     }
+{                                                                              }
+{ Returns: {library_path, target, scope, total, modified, already_compliant, }
+{          missing_target, failed, limit, truncated}.                         }
+Procedure ResolveTargetLabel(Component : ISch_Component; Target : String;
+    Var Lbl : ISch_Label; Var Found : Boolean);
+Var
+    Iter : ISch_Iterator;
+    Param : ISch_Parameter;
+    ParamName : String;
+Begin
+    Lbl := Nil;
+    Found := False;
+
+    If Target = 'designator' Then
+    Begin
+        Try Lbl := Component.Designator; Found := (Lbl <> Nil); Except End;
+    End
+    Else If Target = 'comment' Then
+    Begin
+        Try Lbl := Component.Comment; Found := (Lbl <> Nil); Except End;
+    End
+    Else If Pos('parameter:', Target) = 1 Then
+    Begin
+        ParamName := Copy(Target, 11, Length(Target) - 10);
+        If ParamName = '' Then Exit;
+        Iter := Component.SchIterator_Create;
+        Iter.AddFilter_ObjectSet(MkSet(eParameter));
+        Try
+            Param := Iter.FirstSchObject;
+            While Param <> Nil Do
+            Begin
+                If Param.Name = ParamName Then
+                Begin
+                    Lbl := Param;
+                    Found := True;
+                    Break;
+                End;
+                Param := Iter.NextSchObject;
+            End;
+        Finally
+            Component.SchIterator_Destroy(Iter);
+        End;
+    End;
+End;
+
+Function ApplyLabelFormat(Lbl : ISch_Label;
+    HasFontId : Boolean; NewFontId : Integer;
+    HasColor : Boolean; NewColor : Integer;
+    HasIsHidden : Boolean; NewIsHidden : Boolean;
+    HasOrientation : Boolean; NewOrientation : Integer;
+    HasJustification : Boolean; NewJustification : Integer;
+    OnlyMismatched : Boolean) : Integer;
+{ Returns 1 if modified, 0 if compliant (skipped), -1 if the write itself     }
+{ raised (counted as failed by the caller).                                   }
+Var
+    Compliant : Boolean;
+Begin
+    Result := 0;
+    If Lbl = Nil Then Exit;
+
+    If OnlyMismatched Then
+    Begin
+        Compliant := True;
+        If HasFontId Then
+            Try If Lbl.FontId <> NewFontId Then Compliant := False; Except End;
+        If Compliant And HasColor Then
+            Try If Lbl.Color <> NewColor Then Compliant := False; Except End;
+        If Compliant And HasIsHidden Then
+            Try If Lbl.IsHidden <> NewIsHidden Then Compliant := False; Except End;
+        If Compliant And HasOrientation Then
+            Try If Lbl.Orientation <> NewOrientation Then Compliant := False; Except End;
+        If Compliant And HasJustification Then
+            Try If Lbl.Justification <> NewJustification Then Compliant := False; Except End;
+        If Compliant Then Exit;
+    End;
+
+    Try
+        SchBeginModify(Lbl);
+        If HasFontId Then Lbl.FontId := NewFontId;
+        If HasColor Then Lbl.Color := NewColor;
+        If HasIsHidden Then Lbl.IsHidden := NewIsHidden;
+        If HasOrientation Then Lbl.Orientation := NewOrientation;
+        If HasJustification Then Lbl.Justification := NewJustification;
+        SchEndModify(Lbl);
+        Result := 1;
+    Except
+        Result := -1;
+    End;
+End;
+
+Function Lib_SetLabelFormat(Params : String; RequestId : String) : String;
+Var
+    LibPath, FocusedPath, Target, CompName, FlagStr : String;
+    HasFontId, HasColor, HasIsHidden, HasOrientation, HasJustification : Boolean;
+    NewFontId, NewColor, NewOrientation, NewJustification : Integer;
+    NewIsHidden, OnlyMismatched, Found : Boolean;
+    Workspace : IWorkspace;
+    Doc : IDocument;
+    SchLib : ISch_Lib;
+    LibReader : ILibCompInfoReader;
+    CompInfo : IComponentInfo;
+    Component : ISch_Component;
+    Lbl : ISch_Label;
+    Limit, Total, Modified, AlreadyCompliant, MissingTarget, Failed, NumComps, I, ApplyResult : Integer;
+    Scope : String;
+Begin
+    LibPath := ExtractJsonValue(Params, 'library_path');
+    LibPath := StringReplace(LibPath, '\\', '\', -1);
+    Target := ExtractJsonValue(Params, 'target');
+    If Target = '' Then Target := 'designator';
+    CompName := ExtractJsonValue(Params, 'component_name');
+
+    HasFontId := ExtractJsonValue(Params, 'font_id') <> '';
+    NewFontId := StrToIntDef(ExtractJsonValue(Params, 'font_id'), 0);
+    HasColor := ExtractJsonValue(Params, 'color') <> '';
+    NewColor := StrToIntDef(ExtractJsonValue(Params, 'color'), 0);
+    HasIsHidden := ExtractJsonValue(Params, 'is_hidden') <> '';
+    NewIsHidden := False;
+    FlagStr := ExtractJsonValue(Params, 'is_hidden');
+    If (FlagStr = 'true') Or (FlagStr = 'True') Or (FlagStr = '1') Then NewIsHidden := True;
+    HasOrientation := ExtractJsonValue(Params, 'orientation') <> '';
+    NewOrientation := StrToIntDef(ExtractJsonValue(Params, 'orientation'), 0);
+    HasJustification := ExtractJsonValue(Params, 'justification') <> '';
+    NewJustification := StrToIntDef(ExtractJsonValue(Params, 'justification'), 0);
+
+    FlagStr := ExtractJsonValue(Params, 'only_mismatched');
+    OnlyMismatched := (FlagStr <> 'false') And (FlagStr <> 'False') And (FlagStr <> '0');
+
+    Limit := StrToIntDef(ExtractJsonValue(Params, 'limit'), 5000);
+
+    If (Not HasFontId) And (Not HasColor) And (Not HasIsHidden)
+        And (Not HasOrientation) And (Not HasJustification) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NOTHING_TO_SET',
+            'At least one of font_id / color / is_hidden / orientation / justification must be supplied');
+        Exit;
+    End;
+
+    Workspace := GetWorkspace;
+    If Workspace = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_WORKSPACE', 'No workspace');
+        Exit;
+    End;
+
+    FocusedPath := '';
+    Doc := Workspace.DM_FocusedDocument;
+    If Doc <> Nil Then Try FocusedPath := Doc.DM_FullPath; Except End;
+    If LibPath = '' Then LibPath := FocusedPath;
+    If LibPath = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_LIBRARY',
+            'No library document is active and no library_path was supplied');
+        Exit;
+    End;
+
+    If (FocusedPath = '') Or (UpperCase(FocusedPath) <> UpperCase(LibPath)) Then
+    Begin
+        ResetParameters;
+        AddStringParameter('ObjectKind', 'Document');
+        AddStringParameter('FileName', LibPath);
+        RunProcess('WorkspaceManager:OpenObject');
+    End;
+
+    SchLib := SchServer.GetCurrentSchDocument;
+    If (SchLib = Nil) Or (SchLib.ObjectId <> eSchLib) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_SCHLIB',
+            'Failed to focus library at ' + LibPath);
+        Exit;
+    End;
+
+    Total := 0;
+    Modified := 0;
+    AlreadyCompliant := 0;
+    MissingTarget := 0;
+    Failed := 0;
+
+    SchServer.ProcessControl.PreProcess(SchLib, '');
+    Try
+        If CompName <> '' Then
+        Begin
+            { Single-component mode. }
+            Scope := 'single';
+            Component := SchLib.GetState_SchComponentByLibRef(CompName);
+            If Component = Nil Then
+            Begin
+                Result := BuildErrorResponse(RequestId, 'COMPONENT_NOT_FOUND',
+                    'Component not found in library: ' + CompName);
+                Exit;
+            End;
+            Total := 1;
+            ResolveTargetLabel(Component, Target, Lbl, Found);
+            If Not Found Then
+                Inc(MissingTarget)
+            Else
+            Begin
+                ApplyResult := ApplyLabelFormat(Lbl, HasFontId, NewFontId,
+                    HasColor, NewColor, HasIsHidden, NewIsHidden,
+                    HasOrientation, NewOrientation, HasJustification, NewJustification,
+                    OnlyMismatched);
+                If ApplyResult = 1 Then Inc(Modified)
+                Else If ApplyResult = 0 Then Inc(AlreadyCompliant)
+                Else Inc(Failed);
+            End;
+        End
+        Else
+        Begin
+            { Bulk mode: walk library via CompInfoReader, same enumeration as }
+            { Lib_GetComponents and Lib_AuditStyles.                            }
+            Scope := 'bulk';
+            LibReader := SchServer.CreateLibCompInfoReader(LibPath);
+            If LibReader = Nil Then
+            Begin
+                Result := BuildErrorResponse(RequestId, 'READER_FAILED',
+                    'Failed to create library reader for ' + LibPath);
+                Exit;
+            End;
+            Try
+                LibReader.ReadAllComponentInfo;
+                NumComps := LibReader.NumComponentInfos;
+
+                For I := 0 To NumComps - 1 Do
+                Begin
+                    If Total >= Limit Then Break;
+                    CompInfo := LibReader.ComponentInfos[I];
+                    CompName := '';
+                    Try CompName := CompInfo.CompName; Except End;
+                    If CompName = '' Then Continue;
+                    Component := SchLib.GetState_SchComponentByLibRef(CompName);
+                    If Component = Nil Then Continue;
+                    Inc(Total);
+
+                    ResolveTargetLabel(Component, Target, Lbl, Found);
+                    If Not Found Then
+                    Begin
+                        Inc(MissingTarget);
+                        Continue;
+                    End;
+
+                    ApplyResult := ApplyLabelFormat(Lbl, HasFontId, NewFontId,
+                        HasColor, NewColor, HasIsHidden, NewIsHidden,
+                        HasOrientation, NewOrientation, HasJustification, NewJustification,
+                        OnlyMismatched);
+                    If ApplyResult = 1 Then Inc(Modified)
+                    Else If ApplyResult = 0 Then Inc(AlreadyCompliant)
+                    Else Inc(Failed);
+                End;
+            Finally
+                SchServer.DestroyCompInfoReader(LibReader);
+            End;
+        End;
+    Finally
+        SchServer.ProcessControl.PostProcess(SchLib, 'Edit');
+    End;
+
+    If Modified > 0 Then MarkLibDirty(SchLib);
+
+    Try SchLib.GraphicallyInvalidate; Except End;
+
+    Result := BuildSuccessResponse(RequestId,
+        '{"library_path":"' + EscapeJsonString(LibPath) + '"' +
+        ',"target":"' + EscapeJsonString(Target) + '"' +
+        ',"scope":"' + EscapeJsonString(Scope) + '"' +
+        ',"total":' + IntToStr(Total) +
+        ',"modified":' + IntToStr(Modified) +
+        ',"already_compliant":' + IntToStr(AlreadyCompliant) +
+        ',"missing_target":' + IntToStr(MissingTarget) +
+        ',"failed":' + IntToStr(Failed) +
+        ',"limit":' + IntToStr(Limit) +
+        ',"truncated":' + BoolToJsonStr(Total >= Limit) + '}');
+End;
+
+{..............................................................................}
 { Command Handler - must be at end                                             }
 {..............................................................................}
 
@@ -2361,6 +2659,7 @@ Begin
         'get_pin_list':       Result := Lib_GetPinList(Params, RequestId);
         'copy_component':     Result := Lib_CopyComponent(Params, RequestId);
         'audit_styles':       Result := Lib_AuditStyles(Params, RequestId);
+        'set_label_format':   Result := Lib_SetLabelFormat(Params, RequestId);
     Else
         Result := BuildErrorResponse(RequestId, 'UNKNOWN_ACTION', 'Unknown library action: ' + Action);
     End;

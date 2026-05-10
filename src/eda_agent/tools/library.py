@@ -715,6 +715,94 @@ def register_library_tools(mcp):
         return result or {}
 
     @mcp.tool()
+    async def lib_set_label_format(
+        target: str = "designator",
+        font_id: Optional[int] = None,
+        color: Optional[int] = None,
+        is_hidden: Optional[bool] = None,
+        orientation: Optional[int] = None,
+        justification: Optional[int] = None,
+        component_name: Optional[str] = None,
+        library_path: Optional[str] = None,
+        only_mismatched: bool = True,
+        limit: int = 5000,
+        timeout: Optional[float] = None,
+    ) -> dict[str, Any]:
+        """Bulk or single-component label-style writer for SchLib symbols.
+
+        Sets any subset of {font_id, color, is_hidden, orientation,
+        justification} on a target ISch_Label (designator, comment, or
+        a specific named parameter) for either one component
+        (``component_name`` set) or every component in the library
+        (``component_name`` omitted).
+
+        Symmetric counterpart to lib_audit_styles' filter mode: with
+        ``only_mismatched=True`` (default), components whose target
+        label already matches every supplied field are skipped, so
+        re-running the call after a partial application is idempotent.
+
+        The whole edit batch is wrapped in a single Altium undo step
+        and saves are deferred (`save_all` flushes the .SchLib).
+
+        Args:
+            target: Which label to format. ``"designator"`` (default),
+                ``"comment"``, or ``"parameter:<Name>"`` (e.g.,
+                ``"parameter:Manufacturer"``).
+            font_id: New font ID. Resolve via get_font_id /
+                get_font_spec if you need to convert from
+                {name, size, bold, italic}.
+            color: New BGR-packed color int. Navy ``#000080`` is
+                ``8388608`` (0x800000 in BGR).
+            is_hidden: Hide / show the label.
+            orientation: 0/90/180/270 (Altium's TRotationBy90 enum).
+            justification: Altium label justification enum.
+            component_name: When set, applies only to that one
+                component. Omit for bulk-walk.
+            library_path: .SchLib path. Defaults to focused doc.
+            only_mismatched: When True (default) skip components
+                already matching the target style. Set False to
+                rewrite unconditionally.
+            limit: Cap on processed components in bulk mode.
+            timeout: Per-call bridge poll timeout override.
+
+        Returns:
+            Dict with library_path, target, scope ("single"|"bulk"),
+            total, modified, already_compliant, missing_target,
+            failed, limit, truncated.
+        """
+        if (font_id is None and color is None and is_hidden is None
+                and orientation is None and justification is None):
+            raise InvalidParameterError(
+                "At least one of font_id / color / is_hidden / "
+                "orientation / justification must be supplied"
+            )
+        bridge = get_bridge()
+        params: dict[str, Any] = {
+            "target": target,
+            "limit": str(limit),
+        }
+        if font_id is not None:
+            params["font_id"] = str(font_id)
+        if color is not None:
+            params["color"] = str(color)
+        if is_hidden is not None:
+            params["is_hidden"] = "true" if is_hidden else "false"
+        if orientation is not None:
+            params["orientation"] = str(orientation)
+        if justification is not None:
+            params["justification"] = str(justification)
+        if component_name:
+            params["component_name"] = component_name
+        if library_path:
+            params["library_path"] = library_path
+        if not only_mismatched:
+            params["only_mismatched"] = "false"
+        result = await bridge.send_command_async(
+            "library.set_label_format", params, timeout=timeout,
+        )
+        return result or {}
+
+    @mcp.tool()
     async def lib_batch_set_params(
         assignments: list[dict[str, str]],
         library_path: Optional[str] = None,
