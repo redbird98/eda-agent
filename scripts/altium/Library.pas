@@ -979,7 +979,7 @@ End;
 { accessors. Each access is wrapped in Try/Except since not every property  }
 { is present on every ISch_Label subtype, and DelphiScript fails at runtime }
 { rather than compile time on a missing late-bound property.                 }
-Function BuildLabelStyleJson(Lbl : ISch_GraphicalObject; IncludeText : Boolean) : String;
+Function BuildLabelStyleJson(Lbl : ISch_Label; IncludeText : Boolean) : String;
 Var
     Txt : String;
     FontId, ColorVal, OrientVal, JustVal, LocX, LocY : Integer;
@@ -1026,12 +1026,11 @@ Var
     Component : ISch_Component;
     PinIterator, ParamIterator : ISch_Iterator;
     Pin : ISch_Pin;
-    PinAsObj : ISch_GraphicalObject;
     Param : ISch_Parameter;
     CompNum, I, PinCount : Integer;
     Data, PinList, ParamList, StyleList, ElecStr : String;
     DesignatorJson, CommentJson, Description, AliasName : String;
-    PartCount, PinFontId, PinColor : Integer;
+    PartCount : Integer;
     PinLabelHidden : Boolean;
     First, FirstStyle, FoundInfo : Boolean;
 Begin
@@ -1163,22 +1162,13 @@ Begin
             Else If Pin.Electrical = eElectricHiZ Then ElecStr := 'hiz'
             Else ElecStr := 'passive';
 
-            PinFontId := 0;
-            PinColor := 0;
-            PinLabelHidden := False;
-            { Pin.FontId / Pin.Color are NOT declared on the ISch_Pin       }
-            { interface header that DelphiScript checks at compile time,   }
-            { even though they're inherited from ISch_GraphicalObject.     }
-            { Try/Except can't catch undeclared identifiers (compile error,}
-            { not runtime), so narrow Pin to the base interface where the }
-            { properties are visible to the compiler. }
-            PinAsObj := Pin;
-            Try PinFontId := PinAsObj.FontId; Except End;
-            Try PinColor := PinAsObj.Color; Except End;
             { Pin label visibility: ISch_Pin.ShowName / ShowDesignator are }
             { the real flags; combine into a single label_hidden when both }
             { are off so the LLM can flag "neither pin name nor number is }
-            { drawn".                                                       }
+            { drawn". font_id / color are NOT exposed on ISch_Pin in the   }
+            { Schematic API at all (only on the ISch_Label family), so we }
+            { intentionally omit them from pins[] rather than fake zeros. }
+            PinLabelHidden := False;
             Try PinLabelHidden := (Not Pin.ShowName) And (Not Pin.ShowDesignator); Except End;
 
             PinList := PinList + '{"designator":"' + EscapeJsonString(Pin.Designator) +
@@ -1188,9 +1178,7 @@ Begin
                 ',"y":' + IntToStr(CoordToMils(Pin.Location.Y)) +
                 ',"orientation":' + IntToStr(Pin.Orientation) +
                 ',"hidden":' + BoolToJsonStr(Pin.IsHidden) +
-                ',"label_hidden":' + BoolToJsonStr(PinLabelHidden) +
-                ',"font_id":' + IntToStr(PinFontId) +
-                ',"color":' + IntToStr(PinColor) + '}';
+                ',"label_hidden":' + BoolToJsonStr(PinLabelHidden) + '}';
             Inc(PinCount);
 
             Pin := PinIterator.NextSchObject;

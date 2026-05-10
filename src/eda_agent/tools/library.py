@@ -595,7 +595,9 @@ def register_library_tools(mcp):
                 orientation, justification} - the on-canvas comment /
                 value label.
               - pins: list of {designator, name, electrical_type, x, y,
-                orientation, hidden, label_hidden, font_id, color}.
+                orientation, hidden, label_hidden}. Pin font / color
+                are not exposed by the Altium SDK on ISch_Pin and
+                therefore not surfaced here.
               - parameters: flat dict of name -> value (cheap lookups).
               - parameter_styles: list of {name, value, style:{font_id,
                 color, is_hidden, x, y, orientation, justification}}
