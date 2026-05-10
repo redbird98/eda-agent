@@ -364,43 +364,25 @@ Begin
 End;
 
 {..............................................................................}
-{ PCB_SetRuleProperties - Update metadata AND constraint values of a rule.      }
+{ PCB_SetRuleProperties - Update metadata of a design rule.                     }
+{ Params: name + enabled / priority / scope1 / scope2 / comment.                }
 {                                                                               }
-{ Metadata params: enabled / priority / scope1 / scope2 / comment.              }
-{ Constraint params (dispatched by Rule.RuleKind):                              }
-{   - Clearance (kind=0, IPCB_ClearanceConstraint):                            }
-{       gap_mils                                                                }
-{   - MaxMinWidth (kind=2, IPCB_MaxMinWidthConstraint):                        }
-{       min_width_mils / max_width_mils / favored_width_mils                   }
-{   - ComponentClearance (kind=24, IPCB_ComponentClearanceConstraint):         }
-{       gap_mils / vertical_gap_mils                                            }
-{   - MaxMinHoleSize (kind=42, IPCB_MaxMinHoleSizeConstraint):                 }
-{       min_hole_size_mils / max_hole_size_mils                                 }
-{   - HoleToHoleClearance (kind=52, undocumented; shares IPCB_ClearanceConstraint }
-{       semantics per the descriptor "Hole To Hole Clearance (Gap=...)"):       }
-{       gap_mils                                                                }
-{                                                                               }
-{ Empirically determined kind 52 from the runtime rule list, the published      }
-{ TRuleKind enum stops at 51 (DifferentialPairsRouting), kinds 52-62 exist in  }
-{ modern Altium builds without symbolic constants in the public SDK ref.        }
-{                                                                               }
-{ Constraint values are NOT properties of the base IPCB_Rule, they live on   }
-{ the per-kind constraint subtype, so we cast through a typed local before    }
-{ writing. For unknown kinds, only the metadata fields apply.                   }
+{ Constraint values (gap, width, hole size, ...) are intentionally NOT writable }
+{ here. Repeated attempts to dispatch constraint writes through a typed local  }
+{ cast off PCB_FindRuleByName have crashed the DelphiScript engine at runtime;}
+{ the iterator-return narrowing pattern that works for read-only iteration    }
+{ (ModifyWidthRules.pas) has not been replicated successfully here yet. Until }
+{ a proven write path is found, edit constraint values in Altium's UI         }
+{ (PCB > Rules and Constraints Editor), or recreate the rule with             }
+{ pcb_create_design_rule which dispatches through PCBRuleFactory at creation. }
 {..............................................................................}
 
 Function PCB_SetRuleProperties(Params : String; RequestId : String) : String;
 Var
     Board : IPCB_Board;
     Rule : IPCB_Rule;
-    Iter : IPCB_BoardIterator;
-    RuleClearIter : IPCB_ClearanceConstraint;
-    RuleWidthIter : IPCB_MaxMinWidthConstraint;
-    RuleHoleIter : IPCB_MaxMinHoleSizeConstraint;
-    RuleName, V, GapStr, MinWStr, MaxWStr, FavWStr, MinHStr, MaxHStr : String;
-    UpdatedCount, Kind, ValMils : Integer;
-    L : TLayer;
-    Found : Boolean;
+    RuleName, V : String;
+    UpdatedCount : Integer;
 Begin
     Board := GetPCBBoardAnywhere;
     If Board = Nil Then
@@ -424,12 +406,6 @@ Begin
     End;
 
     UpdatedCount := 0;
-    Kind := 0;
-    Try Kind := Rule.RuleKind; Except End;
-
-    { -- Metadata path: writes against the base IPCB_Rule reference, this    }
-    { has always worked. Wrapped in PreProcess + BeginModify/EndModify       }
-    { exactly like the original handler.                                      }
     PCBServer.PreProcess;
     Try
         PCBServer.SendMessageToRobots(Rule.I_ObjectAddress, c_Broadcast,
@@ -471,145 +447,10 @@ Begin
         PCBServer.PostProcess;
     End;
 
-    { -- Constraint values, dispatched by Rule.RuleKind --                    }
-    {                                                                          }
-    { The cast `RuleWidth := Rule` (typed local := untyped local) doesn't    }
-    { narrow the interface at runtime in DelphiScript; the resulting typed   }
-    { variable behaves like the underlying IPCB_Rule and any attempt to     }
-    { write a constraint-only property crashes the script engine. The       }
-    { proven pattern from Altium's own ModifyWidthRules.pas reference       }
-    { instead declares the typed variable AS the iterator-result type and  }
-    { assigns directly from BoardIterator.FirstPCBObject, the narrowing     }
-    { happens at iterator return.                                            }
-    {                                                                          }
-    { So: for each kind we want to write, re-iterate the board's rule        }
-    { objects with a typed local that matches the constraint interface and   }
-    { match by name. Cost is one extra iteration per call, on a board with   }
-    { ~50 rules that's microseconds.                                          }
-    GapStr := ExtractJsonValue(Params, 'gap_mils');
-    MinWStr := ExtractJsonValue(Params, 'min_width_mils');
-    MaxWStr := ExtractJsonValue(Params, 'max_width_mils');
-    FavWStr := ExtractJsonValue(Params, 'favored_width_mils');
-    MinHStr := ExtractJsonValue(Params, 'min_hole_size_mils');
-    MaxHStr := ExtractJsonValue(Params, 'max_hole_size_mils');
-
-    { Clearance (0), ComponentClearance (24), HoleToHoleClearance (52) all   }
-    { share the Gap property on IPCB_ClearanceConstraint.                     }
-    If (GapStr <> '') And
-       ((Kind = eRule_Clearance) Or (Kind = 24) Or (Kind = 52)) Then
-    Begin
-        Iter := Board.BoardIterator_Create;
-        Iter.AddFilter_ObjectSet(MkSet(eRuleObject));
-        Iter.AddFilter_LayerSet(AllLayers);
-        Iter.AddFilter_Method(eProcessAll);
-        Found := False;
-        Try
-            RuleClearIter := Iter.FirstPCBObject;
-            While (RuleClearIter <> Nil) And (Not Found) Do
-            Begin
-                If RuleClearIter.Name = RuleName Then
-                Begin
-                    Try
-                        RuleClearIter.Gap := MilsToCoord(StrToIntDef(GapStr, 0));
-                        Inc(UpdatedCount);
-                    Except End;
-                    Found := True;
-                End;
-                If Not Found Then RuleClearIter := Iter.NextPCBObject;
-            End;
-        Finally
-            Board.BoardIterator_Destroy(Iter);
-        End;
-    End;
-
-    If (Kind = eRule_MaxMinWidth) And
-       ((MinWStr <> '') Or (MaxWStr <> '') Or (FavWStr <> '')) Then
-    Begin
-        Iter := Board.BoardIterator_Create;
-        Iter.AddFilter_ObjectSet(MkSet(eRuleObject));
-        Iter.AddFilter_LayerSet(AllLayers);
-        Iter.AddFilter_Method(eProcessAll);
-        Found := False;
-        Try
-            RuleWidthIter := Iter.FirstPCBObject;
-            While (RuleWidthIter <> Nil) And (Not Found) Do
-            Begin
-                If (RuleWidthIter.RuleKind = eRule_MaxMinWidth)
-                    And (RuleWidthIter.Name = RuleName) Then
-                Begin
-                    If MinWStr <> '' Then
-                    Begin
-                        ValMils := StrToIntDef(MinWStr, 0);
-                        Try
-                            For L := MinLayer To MaxLayer Do
-                                RuleWidthIter.MinWidth(L) := MilsToCoord(ValMils);
-                            Inc(UpdatedCount);
-                        Except End;
-                    End;
-                    If MaxWStr <> '' Then
-                    Begin
-                        ValMils := StrToIntDef(MaxWStr, 0);
-                        Try
-                            For L := MinLayer To MaxLayer Do
-                                RuleWidthIter.MaxWidth(L) := MilsToCoord(ValMils);
-                            Inc(UpdatedCount);
-                        Except End;
-                    End;
-                    If FavWStr <> '' Then
-                    Begin
-                        ValMils := StrToIntDef(FavWStr, 0);
-                        Try
-                            For L := MinLayer To MaxLayer Do
-                                RuleWidthIter.FavoredWidth(L) := MilsToCoord(ValMils);
-                            Inc(UpdatedCount);
-                        Except End;
-                    End;
-                    Found := True;
-                End;
-                If Not Found Then RuleWidthIter := Iter.NextPCBObject;
-            End;
-        Finally
-            Board.BoardIterator_Destroy(Iter);
-        End;
-    End;
-
-    If (Kind = eRule_MaxMinHoleSize) And
-       ((MinHStr <> '') Or (MaxHStr <> '')) Then
-    Begin
-        Iter := Board.BoardIterator_Create;
-        Iter.AddFilter_ObjectSet(MkSet(eRuleObject));
-        Iter.AddFilter_LayerSet(AllLayers);
-        Iter.AddFilter_Method(eProcessAll);
-        Found := False;
-        Try
-            RuleHoleIter := Iter.FirstPCBObject;
-            While (RuleHoleIter <> Nil) And (Not Found) Do
-            Begin
-                If (RuleHoleIter.RuleKind = eRule_MaxMinHoleSize)
-                    And (RuleHoleIter.Name = RuleName) Then
-                Begin
-                    If MinHStr <> '' Then
-                    Begin
-                        Try RuleHoleIter.MinLimit := MilsToCoord(StrToIntDef(MinHStr, 0)); Inc(UpdatedCount); Except End;
-                    End;
-                    If MaxHStr <> '' Then
-                    Begin
-                        Try RuleHoleIter.MaxLimit := MilsToCoord(StrToIntDef(MaxHStr, 0)); Inc(UpdatedCount); Except End;
-                    End;
-                    Found := True;
-                End;
-                If Not Found Then RuleHoleIter := Iter.NextPCBObject;
-            End;
-        Finally
-            Board.BoardIterator_Destroy(Iter);
-        End;
-    End;
-
     SaveDocByPath(Board.FileName);
 
     Result := BuildSuccessResponse(RequestId,
         '{"name":"' + EscapeJsonString(Rule.Name) + '",'
-        + '"rule_kind":' + IntToStr(Kind) + ','
         + '"properties_updated":' + IntToStr(UpdatedCount) + '}');
 End;
 

@@ -1591,33 +1591,20 @@ def register_pcb_tools(mcp):
         scope1: str | None = None,
         scope2: str | None = None,
         comment: str | None = None,
-        gap_mils: int | None = None,
-        min_width_mils: int | None = None,
-        max_width_mils: int | None = None,
-        favored_width_mils: int | None = None,
-        min_hole_size_mils: int | None = None,
-        max_hole_size_mils: int | None = None,
     ) -> dict[str, Any]:
-        """Update metadata AND constraint values of a named PCB design rule.
+        """Update metadata of a named PCB design rule.
 
-        Metadata fields are always applicable. Constraint fields are
-        dispatched by the rule's underlying RuleKind, only those that
-        match are written:
-
-        - Clearance (kind 0), ComponentClearance (kind 24), and
-            HoleToHoleClearance (kind 52): ``gap_mils``. All three
-            expose the Gap property through IPCB_ClearanceConstraint;
-            ComponentClearance's VerticalGap is NOT writable from
-            this build because IPCB_ComponentClearanceConstraint
-            is not exposed as a DelphiScript symbol.
-        - Width (kind 2): ``min_width_mils`` / ``max_width_mils`` /
-            ``favored_width_mils``.
-        - HoleSize (kind 42): ``min_hole_size_mils`` /
-            ``max_hole_size_mils``.
+        Constraint values (gap, width, hole size, ...) are NOT writable
+        from this tool. Multiple attempts to dispatch constraint writes
+        through DelphiScript locals crashed Altium's script engine; the
+        proven write path is still under investigation. To change a
+        constraint value today, edit the rule in Altium's UI
+        (PCB > Rules and Constraints Editor), or recreate the rule via
+        ``pcb_create_design_rule`` which dispatches through
+        PCBRuleFactory at creation.
 
         Pass only the parameters you want to change; everything else
-        stays untouched. Each successful field write increments
-        ``properties_updated`` in the response.
+        stays untouched.
 
         Args:
             name: Rule name to update.
@@ -1625,15 +1612,9 @@ def register_pcb_tools(mcp):
             priority: Rule priority (lower number = higher priority).
             scope1 / scope2: Rule scope query expressions.
             comment: Free-form comment.
-            gap_mils: Clearance gap. Applies to Clearance,
-                ComponentClearance, and HoleToHoleClearance rules.
-            min_width_mils / max_width_mils / favored_width_mils:
-                Width constraint values (applied to every layer).
-            min_hole_size_mils / max_hole_size_mils: HoleSize
-                constraint limits.
 
         Returns:
-            Dict with name, rule_kind, and properties_updated count.
+            Dict with name and properties_updated count.
         """
         params: dict[str, Any] = {"name": name}
         for key, value in [
@@ -1641,12 +1622,6 @@ def register_pcb_tools(mcp):
             ("scope1", scope1),
             ("scope2", scope2),
             ("comment", comment),
-            ("gap_mils", gap_mils),
-            ("min_width_mils", min_width_mils),
-            ("max_width_mils", max_width_mils),
-            ("favored_width_mils", favored_width_mils),
-            ("min_hole_size_mils", min_hole_size_mils),
-            ("max_hole_size_mils", max_hole_size_mils),
         ]:
             if value is not None:
                 params[key] = str(value)
