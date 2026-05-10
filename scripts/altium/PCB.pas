@@ -393,12 +393,14 @@ Function PCB_SetRuleProperties(Params : String; RequestId : String) : String;
 Var
     Board : IPCB_Board;
     Rule : IPCB_Rule;
-    RuleClear : IPCB_ClearanceConstraint;
-    RuleWidth : IPCB_MaxMinWidthConstraint;
-    RuleHole : IPCB_MaxMinHoleSizeConstraint;
-    RuleName, V : String;
+    Iter : IPCB_BoardIterator;
+    RuleClearIter : IPCB_ClearanceConstraint;
+    RuleWidthIter : IPCB_MaxMinWidthConstraint;
+    RuleHoleIter : IPCB_MaxMinHoleSizeConstraint;
+    RuleName, V, GapStr, MinWStr, MaxWStr, FavWStr, MinHStr, MaxHStr : String;
     UpdatedCount, Kind, ValMils : Integer;
     L : TLayer;
+    Found : Boolean;
 Begin
     Board := GetPCBBoardAnywhere;
     If Board = Nil Then
@@ -425,12 +427,14 @@ Begin
     Kind := 0;
     Try Kind := Rule.RuleKind; Except End;
 
+    { -- Metadata path: writes against the base IPCB_Rule reference, this    }
+    { has always worked. Wrapped in PreProcess + BeginModify/EndModify       }
+    { exactly like the original handler.                                      }
     PCBServer.PreProcess;
     Try
         PCBServer.SendMessageToRobots(Rule.I_ObjectAddress, c_Broadcast,
             PCBM_BeginModify, c_NoEventData);
 
-        { -- Metadata -- }
         V := ExtractJsonValue(Params, 'enabled');
         If V <> '' Then
         Begin
@@ -461,80 +465,144 @@ Begin
             Try Rule.Comment := V; Inc(UpdatedCount); Except End;
         End;
 
-        { -- Constraint values, dispatched by Rule.RuleKind -- }
-
-        { Clearance (kind 0), ComponentClearance (kind 24) and                 }
-        { HoleToHoleClearance (kind 52) all expose a writable Gap property     }
-        { through IPCB_ClearanceConstraint, ComponentClearance also carries    }
-        { VerticalGap, but that interface (IPCB_ComponentClearanceConstraint)  }
-        { is not exposed as a DelphiScript symbol on this Altium build, so we }
-        { only surface Gap here. Kinds 24 and 52 are not in the public         }
-        { TRuleKind enum but cast cleanly to IPCB_ClearanceConstraint.         }
-        If (Kind = eRule_Clearance) Or (Kind = 24) Or (Kind = 52) Then
-        Begin
-            V := ExtractJsonValue(Params, 'gap_mils');
-            If V <> '' Then
-            Begin
-                Try
-                    RuleClear := Rule;
-                    RuleClear.Gap := MilsToCoord(StrToIntDef(V, 0));
-                    Inc(UpdatedCount);
-                Except End;
-            End;
-        End
-        Else If Kind = eRule_MaxMinWidth Then
-        Begin
-            Try RuleWidth := Rule; Except End;
-            V := ExtractJsonValue(Params, 'min_width_mils');
-            If V <> '' Then
-            Begin
-                ValMils := StrToIntDef(V, 0);
-                Try
-                    For L := MinLayer To MaxLayer Do
-                        RuleWidth.MinWidth(L) := MilsToCoord(ValMils);
-                    Inc(UpdatedCount);
-                Except End;
-            End;
-            V := ExtractJsonValue(Params, 'max_width_mils');
-            If V <> '' Then
-            Begin
-                ValMils := StrToIntDef(V, 0);
-                Try
-                    For L := MinLayer To MaxLayer Do
-                        RuleWidth.MaxWidth(L) := MilsToCoord(ValMils);
-                    Inc(UpdatedCount);
-                Except End;
-            End;
-            V := ExtractJsonValue(Params, 'favored_width_mils');
-            If V <> '' Then
-            Begin
-                ValMils := StrToIntDef(V, 0);
-                Try
-                    For L := MinLayer To MaxLayer Do
-                        RuleWidth.FavoredWidth(L) := MilsToCoord(ValMils);
-                    Inc(UpdatedCount);
-                Except End;
-            End;
-        End
-        Else If Kind = eRule_MaxMinHoleSize Then
-        Begin
-            Try RuleHole := Rule; Except End;
-            V := ExtractJsonValue(Params, 'min_hole_size_mils');
-            If V <> '' Then
-            Begin
-                Try RuleHole.MinLimit := MilsToCoord(StrToIntDef(V, 0)); Inc(UpdatedCount); Except End;
-            End;
-            V := ExtractJsonValue(Params, 'max_hole_size_mils');
-            If V <> '' Then
-            Begin
-                Try RuleHole.MaxLimit := MilsToCoord(StrToIntDef(V, 0)); Inc(UpdatedCount); Except End;
-            End;
-        End;
-
         PCBServer.SendMessageToRobots(Rule.I_ObjectAddress, c_Broadcast,
             PCBM_EndModify, c_NoEventData);
     Finally
         PCBServer.PostProcess;
+    End;
+
+    { -- Constraint values, dispatched by Rule.RuleKind --                    }
+    {                                                                          }
+    { The cast `RuleWidth := Rule` (typed local := untyped local) doesn't    }
+    { narrow the interface at runtime in DelphiScript; the resulting typed   }
+    { variable behaves like the underlying IPCB_Rule and any attempt to     }
+    { write a constraint-only property crashes the script engine. The       }
+    { proven pattern from Altium's own ModifyWidthRules.pas reference       }
+    { instead declares the typed variable AS the iterator-result type and  }
+    { assigns directly from BoardIterator.FirstPCBObject, the narrowing     }
+    { happens at iterator return.                                            }
+    {                                                                          }
+    { So: for each kind we want to write, re-iterate the board's rule        }
+    { objects with a typed local that matches the constraint interface and   }
+    { match by name. Cost is one extra iteration per call, on a board with   }
+    { ~50 rules that's microseconds.                                          }
+    GapStr := ExtractJsonValue(Params, 'gap_mils');
+    MinWStr := ExtractJsonValue(Params, 'min_width_mils');
+    MaxWStr := ExtractJsonValue(Params, 'max_width_mils');
+    FavWStr := ExtractJsonValue(Params, 'favored_width_mils');
+    MinHStr := ExtractJsonValue(Params, 'min_hole_size_mils');
+    MaxHStr := ExtractJsonValue(Params, 'max_hole_size_mils');
+
+    { Clearance (0), ComponentClearance (24), HoleToHoleClearance (52) all   }
+    { share the Gap property on IPCB_ClearanceConstraint.                     }
+    If (GapStr <> '') And
+       ((Kind = eRule_Clearance) Or (Kind = 24) Or (Kind = 52)) Then
+    Begin
+        Iter := Board.BoardIterator_Create;
+        Iter.AddFilter_ObjectSet(MkSet(eRuleObject));
+        Iter.AddFilter_LayerSet(AllLayers);
+        Iter.AddFilter_Method(eProcessAll);
+        Found := False;
+        Try
+            RuleClearIter := Iter.FirstPCBObject;
+            While (RuleClearIter <> Nil) And (Not Found) Do
+            Begin
+                If RuleClearIter.Name = RuleName Then
+                Begin
+                    Try
+                        RuleClearIter.Gap := MilsToCoord(StrToIntDef(GapStr, 0));
+                        Inc(UpdatedCount);
+                    Except End;
+                    Found := True;
+                End;
+                If Not Found Then RuleClearIter := Iter.NextPCBObject;
+            End;
+        Finally
+            Board.BoardIterator_Destroy(Iter);
+        End;
+    End;
+
+    If (Kind = eRule_MaxMinWidth) And
+       ((MinWStr <> '') Or (MaxWStr <> '') Or (FavWStr <> '')) Then
+    Begin
+        Iter := Board.BoardIterator_Create;
+        Iter.AddFilter_ObjectSet(MkSet(eRuleObject));
+        Iter.AddFilter_LayerSet(AllLayers);
+        Iter.AddFilter_Method(eProcessAll);
+        Found := False;
+        Try
+            RuleWidthIter := Iter.FirstPCBObject;
+            While (RuleWidthIter <> Nil) And (Not Found) Do
+            Begin
+                If (RuleWidthIter.RuleKind = eRule_MaxMinWidth)
+                    And (RuleWidthIter.Name = RuleName) Then
+                Begin
+                    If MinWStr <> '' Then
+                    Begin
+                        ValMils := StrToIntDef(MinWStr, 0);
+                        Try
+                            For L := MinLayer To MaxLayer Do
+                                RuleWidthIter.MinWidth(L) := MilsToCoord(ValMils);
+                            Inc(UpdatedCount);
+                        Except End;
+                    End;
+                    If MaxWStr <> '' Then
+                    Begin
+                        ValMils := StrToIntDef(MaxWStr, 0);
+                        Try
+                            For L := MinLayer To MaxLayer Do
+                                RuleWidthIter.MaxWidth(L) := MilsToCoord(ValMils);
+                            Inc(UpdatedCount);
+                        Except End;
+                    End;
+                    If FavWStr <> '' Then
+                    Begin
+                        ValMils := StrToIntDef(FavWStr, 0);
+                        Try
+                            For L := MinLayer To MaxLayer Do
+                                RuleWidthIter.FavoredWidth(L) := MilsToCoord(ValMils);
+                            Inc(UpdatedCount);
+                        Except End;
+                    End;
+                    Found := True;
+                End;
+                If Not Found Then RuleWidthIter := Iter.NextPCBObject;
+            End;
+        Finally
+            Board.BoardIterator_Destroy(Iter);
+        End;
+    End;
+
+    If (Kind = eRule_MaxMinHoleSize) And
+       ((MinHStr <> '') Or (MaxHStr <> '')) Then
+    Begin
+        Iter := Board.BoardIterator_Create;
+        Iter.AddFilter_ObjectSet(MkSet(eRuleObject));
+        Iter.AddFilter_LayerSet(AllLayers);
+        Iter.AddFilter_Method(eProcessAll);
+        Found := False;
+        Try
+            RuleHoleIter := Iter.FirstPCBObject;
+            While (RuleHoleIter <> Nil) And (Not Found) Do
+            Begin
+                If (RuleHoleIter.RuleKind = eRule_MaxMinHoleSize)
+                    And (RuleHoleIter.Name = RuleName) Then
+                Begin
+                    If MinHStr <> '' Then
+                    Begin
+                        Try RuleHoleIter.MinLimit := MilsToCoord(StrToIntDef(MinHStr, 0)); Inc(UpdatedCount); Except End;
+                    End;
+                    If MaxHStr <> '' Then
+                    Begin
+                        Try RuleHoleIter.MaxLimit := MilsToCoord(StrToIntDef(MaxHStr, 0)); Inc(UpdatedCount); Except End;
+                    End;
+                    Found := True;
+                End;
+                If Not Found Then RuleHoleIter := Iter.NextPCBObject;
+            End;
+        Finally
+            Board.BoardIterator_Destroy(Iter);
+        End;
     End;
 
     SaveDocByPath(Board.FileName);
