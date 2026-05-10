@@ -2020,9 +2020,9 @@ Begin
     { "different_nets" is the normal setting, same-net tracks touching pads      }
     { of their own net should NOT count as a clearance violation.                  }
     If NetScopeStr = 'different_nets' Then
-        NetScopeVal := eNetScope_DifferentNets
+        NetScopeVal := eNetScope_DifferentNetsOnly
     Else If NetScopeStr = 'same_net' Then
-        NetScopeVal := eNetScope_SameNet
+        NetScopeVal := eNetScope_SameNetOnly
     Else
         NetScopeVal := eNetScope_AnyNet;
 
