@@ -832,7 +832,6 @@ def register_pcb_tools(mcp):
         value: int = 10,
         max_value: Optional[int] = None,
         favored_value: Optional[int] = None,
-        vertical_gap: Optional[int] = None,
         scope: str = "",
         net_scope: str = "different_nets",
     ) -> dict[str, Any]:
@@ -846,27 +845,31 @@ def register_pcb_tools(mcp):
                     in mils; max_value / favored_value optional).
                 ``"via_size"`` - Hole size constraint (value = min hole
                     in mils; max_value optional).
-                ``"component_clearance"`` - Component-to-component gap
-                    (value = horizontal gap; vertical_gap optional).
-            value: Rule's primary value in mils. For width / via_size /
-                component_clearance this is the MIN side. Default 10.
+            value: Rule's primary value in mils. For width / via_size
+                this is the MIN side. Default 10.
             max_value: For width / via_size only. When supplied, sets the
                 MAX side independently of value. When None, falls back to
                 5x value (the legacy default; bug-compatible with old
                 callers).
             favored_value: For width only. Sets the preferred width.
                 Defaults to value when None.
-            vertical_gap: For component_clearance only. Defaults to value
-                when None.
             scope: Optional query expression for Scope1 (e.g.,
                 ``"InNet('GND')"``, ``"All"``).
             net_scope: Which nets the rule applies between. Options:
                 ``"different_nets"`` (default) for Clearance rules;
                 ``"any_net"`` for all-pairs; ``"same_net"`` for same-net
-                only. Ignored for component_clearance.
+                only.
 
         Returns:
             Dictionary with created rule details.
+
+        Note: Creating ComponentClearance, HoleToHoleClearance,
+        BoardOutlineClearance, and other newer rule kinds is not
+        supported on this Altium build because the relevant symbolic
+        constants (eRule_ComponentClearance, ...) are not exposed in
+        DelphiScript. Existing rules of those kinds can be UPDATED via
+        ``pcb_set_rule_properties`` (gap_mils field), which dispatches
+        through Rule.RuleKind without needing the symbol.
         """
         bridge = get_bridge()
         params: dict[str, Any] = {
@@ -879,8 +882,6 @@ def register_pcb_tools(mcp):
             params["max_value"] = str(max_value)
         if favored_value is not None:
             params["favored_value"] = str(favored_value)
-        if vertical_gap is not None:
-            params["vertical_gap"] = str(vertical_gap)
         if scope:
             params["scope"] = scope
         result = await bridge.send_command_async("pcb.create_design_rule", params)
@@ -1596,7 +1597,6 @@ def register_pcb_tools(mcp):
         favored_width_mils: int | None = None,
         min_hole_size_mils: int | None = None,
         max_hole_size_mils: int | None = None,
-        vertical_gap_mils: int | None = None,
     ) -> dict[str, Any]:
         """Update metadata AND constraint values of a named PCB design rule.
 
@@ -1604,14 +1604,16 @@ def register_pcb_tools(mcp):
         dispatched by the rule's underlying RuleKind, only those that
         match are written:
 
-        - Clearance + HoleToHoleClearance (kind 0 and 52):
-            ``gap_mils``.
+        - Clearance (kind 0), ComponentClearance (kind 24), and
+            HoleToHoleClearance (kind 52): ``gap_mils``. All three
+            expose the Gap property through IPCB_ClearanceConstraint;
+            ComponentClearance's VerticalGap is NOT writable from
+            this build because IPCB_ComponentClearanceConstraint
+            is not exposed as a DelphiScript symbol.
         - Width (kind 2): ``min_width_mils`` / ``max_width_mils`` /
             ``favored_width_mils``.
         - HoleSize (kind 42): ``min_hole_size_mils`` /
             ``max_hole_size_mils``.
-        - ComponentClearance (kind 24): ``gap_mils`` /
-            ``vertical_gap_mils``.
 
         Pass only the parameters you want to change; everything else
         stays untouched. Each successful field write increments
@@ -1623,13 +1625,12 @@ def register_pcb_tools(mcp):
             priority: Rule priority (lower number = higher priority).
             scope1 / scope2: Rule scope query expressions.
             comment: Free-form comment.
-            gap_mils: Clearance gap or component clearance horizontal
-                gap, depending on rule kind.
+            gap_mils: Clearance gap. Applies to Clearance,
+                ComponentClearance, and HoleToHoleClearance rules.
             min_width_mils / max_width_mils / favored_width_mils:
                 Width constraint values (applied to every layer).
             min_hole_size_mils / max_hole_size_mils: HoleSize
                 constraint limits.
-            vertical_gap_mils: ComponentClearance vertical gap.
 
         Returns:
             Dict with name, rule_kind, and properties_updated count.
@@ -1646,7 +1647,6 @@ def register_pcb_tools(mcp):
             ("favored_width_mils", favored_width_mils),
             ("min_hole_size_mils", min_hole_size_mils),
             ("max_hole_size_mils", max_hole_size_mils),
-            ("vertical_gap_mils", vertical_gap_mils),
         ]:
             if value is not None:
                 params[key] = str(value)

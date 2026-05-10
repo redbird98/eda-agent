@@ -396,7 +396,6 @@ Var
     RuleClear : IPCB_ClearanceConstraint;
     RuleWidth : IPCB_MaxMinWidthConstraint;
     RuleHole : IPCB_MaxMinHoleSizeConstraint;
-    RuleCompClear : IPCB_ComponentClearanceConstraint;
     RuleName, V : String;
     UpdatedCount, Kind, ValMils : Integer;
     L : TLayer;
@@ -464,11 +463,14 @@ Begin
 
         { -- Constraint values, dispatched by Rule.RuleKind -- }
 
-        { Clearance + HoleToHoleClearance share IPCB_ClearanceConstraint's Gap }
-        { property. kind 52 (HoleToHoleClearance) is not in the public         }
-        { TRuleKind enum but its descriptor uses the same "Gap=..." shape, so  }
-        { the cast and Gap write succeed empirically.                          }
-        If (Kind = eRule_Clearance) Or (Kind = 52) Then
+        { Clearance (kind 0), ComponentClearance (kind 24) and                 }
+        { HoleToHoleClearance (kind 52) all expose a writable Gap property     }
+        { through IPCB_ClearanceConstraint, ComponentClearance also carries    }
+        { VerticalGap, but that interface (IPCB_ComponentClearanceConstraint)  }
+        { is not exposed as a DelphiScript symbol on this Altium build, so we }
+        { only surface Gap here. Kinds 24 and 52 are not in the public         }
+        { TRuleKind enum but cast cleanly to IPCB_ClearanceConstraint.         }
+        If (Kind = eRule_Clearance) Or (Kind = 24) Or (Kind = 52) Then
         Begin
             V := ExtractJsonValue(Params, 'gap_mils');
             If V <> '' Then
@@ -526,20 +528,6 @@ Begin
             If V <> '' Then
             Begin
                 Try RuleHole.MaxLimit := MilsToCoord(StrToIntDef(V, 0)); Inc(UpdatedCount); Except End;
-            End;
-        End
-        Else If Kind = eRule_ComponentClearance Then
-        Begin
-            Try RuleCompClear := Rule; Except End;
-            V := ExtractJsonValue(Params, 'gap_mils');
-            If V <> '' Then
-            Begin
-                Try RuleCompClear.Gap := MilsToCoord(StrToIntDef(V, 0)); Inc(UpdatedCount); Except End;
-            End;
-            V := ExtractJsonValue(Params, 'vertical_gap_mils');
-            If V <> '' Then
-            Begin
-                Try RuleCompClear.VerticalGap := MilsToCoord(StrToIntDef(V, 0)); Inc(UpdatedCount); Except End;
             End;
         End;
 
@@ -2094,10 +2082,9 @@ Var
     RuleClear : IPCB_ClearanceConstraint;
     RuleWidth : IPCB_MaxMinWidthConstraint;
     RuleHole : IPCB_MaxMinHoleSizeConstraint;
-    RuleCompClear : IPCB_ComponentClearanceConstraint;
     RuleTypeStr, RuleName, ValueStr, MaxValueStr, FavoredValueStr : String;
-    ScopeStr, NetScopeStr, VerticalGapStr : String;
-    RuleValue, MaxValue, FavoredValue, VerticalGap, NetScopeVal : Integer;
+    ScopeStr, NetScopeStr : String;
+    RuleValue, MaxValue, FavoredValue, NetScopeVal : Integer;
     HasMaxValue : Boolean;
     L : TLayer;
 Begin
@@ -2113,7 +2100,6 @@ Begin
     ValueStr := ExtractJsonValue(Params, 'value');
     MaxValueStr := ExtractJsonValue(Params, 'max_value');
     FavoredValueStr := ExtractJsonValue(Params, 'favored_value');
-    VerticalGapStr := ExtractJsonValue(Params, 'vertical_gap');
     ScopeStr := ExtractJsonValue(Params, 'scope');
     NetScopeStr := LowerCase(ExtractJsonValue(Params, 'net_scope'));
 
@@ -2147,7 +2133,6 @@ Begin
     HasMaxValue := MaxValueStr <> '';
     MaxValue := StrToIntDef(MaxValueStr, RuleValue * 5);
     FavoredValue := StrToIntDef(FavoredValueStr, RuleValue);
-    VerticalGap := StrToIntDef(VerticalGapStr, RuleValue);
 
     { Constraint values are NOT properties of the base IPCB_Rule interface,    }
     { they live on the per-kind subtypes (IPCB_ClearanceConstraint,            }
@@ -2200,21 +2185,11 @@ Begin
                 RuleHole.Scope1Expression := ScopeStr;
             Rule := RuleHole;
         End
-        Else If RuleTypeStr = 'component_clearance' Then
-        Begin
-            RuleCompClear := PCBServer.PCBRuleFactory(eRule_ComponentClearance);
-            RuleCompClear.Name := RuleName;
-            RuleCompClear.Gap := MilsToCoord(RuleValue);
-            Try RuleCompClear.VerticalGap := MilsToCoord(VerticalGap); Except End;
-            If ScopeStr <> '' Then
-                RuleCompClear.Scope1Expression := ScopeStr;
-            Rule := RuleCompClear;
-        End
         Else
         Begin
             PCBServer.PostProcess;
             Result := BuildErrorResponse(RequestId, 'INVALID_PARAM',
-                'Unknown rule_type: ' + RuleTypeStr + '. Use clearance, width, via_size, or component_clearance');
+                'Unknown rule_type: ' + RuleTypeStr + '. Use clearance, width, or via_size');
             Exit;
         End;
 
