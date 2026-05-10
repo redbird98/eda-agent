@@ -953,9 +953,12 @@ Begin
 End;
 
 { Lib_GetComponentDetails - full inspection of one library component.        }
-{ Returns metadata (name, description, part_count, alias_name) PLUS the      }
-{ pin list (designator, name, electrical_type, x, y, orientation, hidden)    }
-{ and parameter dict (Manufacturer, Manufacturer Part Number, Value, etc.).  }
+{ Returns metadata (name, description, part_count, alias_name) PLUS pins,    }
+{ parameters, and full visual-style records for the designator, the comment, }
+{ and every parameter (font_id, color, is_hidden, x, y, orientation,        }
+{ justification). FontId can be expanded into a {name, size, bold, italic}  }
+{ description by calling get_font_spec; we pass it through as an integer    }
+{ here so the cost stays on the caller when style detail isn't needed.       }
 {                                                                              }
 { Pins/parameters require loading the live ISch_Component, which only the    }
 { SchLib editor can produce, so the target library must be the focused       }
@@ -963,6 +966,55 @@ End;
 { match the focused doc, we open it via WorkspaceManager:OpenObject before   }
 { resolving. Saves are deferred (see MarkLibDirty), so opening doesn't       }
 { disturb in-flight edits on other libs.                                     }
+{                                                                              }
+{ Schema breaks vs the previous version (introduced two commits ago):        }
+{   designator_prefix (str) -> designator (object {text, font_id, color,    }
+{                              is_hidden, x, y, orientation, justification})}
+{   pins[].font_id, color, label_hidden added                                }
+{   comment (object) added                                                   }
+{   parameter_styles (array, parallel to parameters dict) added              }
+
+{ BuildLabelStyleJson reads visual-style props off any ISch_Label-derived    }
+{ object (Designator, Comment, Parameter, NetLabel, ...) using late-bound   }
+{ accessors. Each access is wrapped in Try/Except since not every property  }
+{ is present on every ISch_Label subtype, and DelphiScript fails at runtime }
+{ rather than compile time on a missing late-bound property.                 }
+Function BuildLabelStyleJson(Label : ISch_GraphicalObject; IncludeText : Boolean) : String;
+Var
+    Txt : String;
+    FontId, ColorVal, OrientVal, JustVal, LocX, LocY : Integer;
+    HiddenVal : Boolean;
+Begin
+    Txt := '';
+    FontId := 0;
+    ColorVal := 0;
+    OrientVal := 0;
+    JustVal := 0;
+    LocX := 0;
+    LocY := 0;
+    HiddenVal := False;
+    Try Txt := Label.Text; Except End;
+    Try FontId := Label.FontId; Except End;
+    Try ColorVal := Label.Color; Except End;
+    Try HiddenVal := Label.IsHidden; Except End;
+    Try LocX := CoordToMils(Label.Location.X); Except End;
+    Try LocY := CoordToMils(Label.Location.Y); Except End;
+    Try OrientVal := Label.Orientation; Except End;
+    Try JustVal := Label.Justification; Except End;
+
+    Result := '{';
+    If IncludeText Then
+        Result := Result + '"text":"' + EscapeJsonString(Txt) + '",';
+    Result := Result +
+        '"font_id":' + IntToStr(FontId) +
+        ',"color":' + IntToStr(ColorVal) +
+        ',"is_hidden":' + BoolToJsonStr(HiddenVal) +
+        ',"x":' + IntToStr(LocX) +
+        ',"y":' + IntToStr(LocY) +
+        ',"orientation":' + IntToStr(OrientVal) +
+        ',"justification":' + IntToStr(JustVal) + '}';
+End;
+
 Function Lib_GetComponentDetails(Params : String; RequestId : String) : String;
 Var
     ComponentName, LibPath, FocusedPath : String;
@@ -976,9 +1028,11 @@ Var
     Pin : ISch_Pin;
     Param : ISch_Parameter;
     CompNum, I, PinCount : Integer;
-    Data, PinList, ParamList, ElecStr, Designator, Description, AliasName : String;
-    PartCount : Integer;
-    First, FoundInfo : Boolean;
+    Data, PinList, ParamList, StyleList, ElecStr : String;
+    DesignatorJson, CommentJson, Description, AliasName : String;
+    PartCount, PinFontId, PinColor : Integer;
+    PinLabelHidden : Boolean;
+    First, FirstStyle, FoundInfo : Boolean;
 Begin
     ComponentName := ExtractJsonValue(Params, 'component_name');
     LibPath := ExtractJsonValue(Params, 'library_path');
@@ -1069,12 +1123,23 @@ Begin
         Exit;
     End;
 
-    Designator := '';
-    Try Designator := Component.Designator.Text; Except End;
     If Description = '' Then
         Try Description := Component.ComponentDescription; Except End;
 
-    { Pin list, mirrors Lib_GetPinList iteration shape. }
+    { Designator + Comment full-style records. The sub-objects ARE        }
+    { ISch_Label-derived so they expose Text + FontId + Color + IsHidden  }
+    { + Location + Orientation + Justification.                            }
+    DesignatorJson := '{"text":"","font_id":0,"color":0,"is_hidden":false,"x":0,"y":0,"orientation":0,"justification":0}';
+    Try DesignatorJson := BuildLabelStyleJson(Component.Designator, True); Except End;
+    CommentJson := '{"text":"","font_id":0,"color":0,"is_hidden":false,"x":0,"y":0,"orientation":0,"justification":0}';
+    Try CommentJson := BuildLabelStyleJson(Component.Comment, True); Except End;
+
+    { Pin list. font_id / color come from each pin's own ISch_Pin object  }
+    { (it inherits from ISch_GraphicalObject which carries both); pin     }
+    { name and pin number share that font/color, separate-font handling   }
+    { is not exposed cleanly from DelphiScript. label_hidden is the visual}
+    { hide-pin-label flag, distinct from pin.IsHidden which hides the pin }
+    { from the canvas entirely.                                            }
     PinList := '';
     First := True;
     PinCount := 0;
@@ -1097,13 +1162,27 @@ Begin
             Else If Pin.Electrical = eElectricHiZ Then ElecStr := 'hiz'
             Else ElecStr := 'passive';
 
+            PinFontId := 0;
+            PinColor := 0;
+            PinLabelHidden := False;
+            Try PinFontId := Pin.FontId; Except End;
+            Try PinColor := Pin.Color; Except End;
+            { Pin label visibility: ISch_Pin.ShowName / ShowDesignator are }
+            { the real flags; combine into a single label_hidden when both }
+            { are off so the LLM can flag "neither pin name nor number is }
+            { drawn".                                                       }
+            Try PinLabelHidden := (Not Pin.ShowName) And (Not Pin.ShowDesignator); Except End;
+
             PinList := PinList + '{"designator":"' + EscapeJsonString(Pin.Designator) +
                 '","name":"' + EscapeJsonString(Pin.Name) +
                 '","electrical_type":"' + ElecStr +
                 '","x":' + IntToStr(CoordToMils(Pin.Location.X)) +
                 ',"y":' + IntToStr(CoordToMils(Pin.Location.Y)) +
                 ',"orientation":' + IntToStr(Pin.Orientation) +
-                ',"hidden":' + BoolToJsonStr(Pin.IsHidden) + '}';
+                ',"hidden":' + BoolToJsonStr(Pin.IsHidden) +
+                ',"label_hidden":' + BoolToJsonStr(PinLabelHidden) +
+                ',"font_id":' + IntToStr(PinFontId) +
+                ',"color":' + IntToStr(PinColor) + '}';
             Inc(PinCount);
 
             Pin := PinIterator.NextSchObject;
@@ -1112,9 +1191,13 @@ Begin
         Component.SchIterator_Destroy(PinIterator);
     End;
 
-    { Parameter dict (Manufacturer, MPN, Value, Footprint paths, ...). }
+    { Parameter dict (cheap lookups) plus parameter_styles array (visual). }
+    { We iterate parameters once and build both shapes in lockstep so the  }
+    { kth entry of parameter_styles always matches the kth iteration order.}
     ParamList := '';
+    StyleList := '';
     First := True;
+    FirstStyle := True;
     ParamIterator := Component.SchIterator_Create;
     ParamIterator.AddFilter_ObjectSet(MkSet(eParameter));
     Try
@@ -1125,6 +1208,13 @@ Begin
             First := False;
             ParamList := ParamList + '"' + EscapeJsonString(Param.Name) +
                 '":"' + EscapeJsonString(Param.Text) + '"';
+
+            If Not FirstStyle Then StyleList := StyleList + ',';
+            FirstStyle := False;
+            StyleList := StyleList + '{"name":"' + EscapeJsonString(Param.Name) +
+                '","value":"' + EscapeJsonString(Param.Text) + '","style":' +
+                BuildLabelStyleJson(Param, False) + '}';
+
             Param := ParamIterator.NextSchObject;
         End;
     Finally
@@ -1133,13 +1223,15 @@ Begin
 
     Data := '{"name":"' + EscapeJsonString(ComponentName) + '"';
     Data := Data + ',"library_path":"' + EscapeJsonString(LibPath) + '"';
-    Data := Data + ',"designator_prefix":"' + EscapeJsonString(Designator) + '"';
+    Data := Data + ',"designator":' + DesignatorJson;
+    Data := Data + ',"comment":' + CommentJson;
     Data := Data + ',"description":"' + EscapeJsonString(Description) + '"';
     Data := Data + ',"alias_name":"' + EscapeJsonString(AliasName) + '"';
     Data := Data + ',"part_count":' + IntToStr(PartCount);
     Data := Data + ',"pin_count":' + IntToStr(PinCount);
     Data := Data + ',"pins":[' + PinList + ']';
-    Data := Data + ',"parameters":{' + ParamList + '}}';
+    Data := Data + ',"parameters":{' + ParamList + '}';
+    Data := Data + ',"parameter_styles":[' + StyleList + ']}';
 
     Result := BuildSuccessResponse(RequestId, Data);
 End;

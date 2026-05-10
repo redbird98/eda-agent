@@ -558,12 +558,13 @@ def register_library_tools(mcp):
     ) -> dict[str, Any]:
         """Get full inspection of one library component in a single call.
 
-        Returns metadata (name, alias_name, description, designator_prefix,
-        part_count) PLUS the full pin list and parameter dict in one
-        round-trip. The previous version of this tool returned only
-        three metadata fields, forcing callers to chain
-        ``lib_get_pin_list`` and parameter walks for a basic look at a
-        symbol.
+        Returns metadata, every pin, every parameter (as a flat dict),
+        AND visual-style records for the designator, comment, pins,
+        and each parameter (font_id, color, is_hidden, x, y,
+        orientation, justification). The integer ``font_id`` can be
+        expanded to {name, size, bold, italic} via ``get_font_spec``
+        when style detail is needed; the round-trip default keeps it
+        compact.
 
         If ``library_path`` is provided and isn't already focused, the
         library is opened (focus changes), so the next ``lib_*`` call
@@ -584,11 +585,22 @@ def register_library_tools(mcp):
                 currently focused library is used.
 
         Returns:
-            Dict with name, library_path, designator_prefix,
-            description, alias_name, part_count, pin_count, pins (list
-            of {designator, name, electrical_type, x, y, orientation,
-            hidden}), parameters (dict of name -> value), plus
-            `_datasheet_guidance` + `_datasheet_parts`.
+            Dict with:
+              - name, library_path, description, alias_name,
+                part_count, pin_count
+              - designator: {text, font_id, color, is_hidden, x, y,
+                orientation, justification} - the on-canvas designator
+                label (NOT just the prefix string).
+              - comment: {text, font_id, color, is_hidden, x, y,
+                orientation, justification} - the on-canvas comment /
+                value label.
+              - pins: list of {designator, name, electrical_type, x, y,
+                orientation, hidden, label_hidden, font_id, color}.
+              - parameters: flat dict of name -> value (cheap lookups).
+              - parameter_styles: list of {name, value, style:{font_id,
+                color, is_hidden, x, y, orientation, justification}}
+                in the same order parameters appear on the symbol.
+              - `_datasheet_guidance` + `_datasheet_parts`.
         """
         bridge = get_bridge()
         params: dict[str, Any] = {"component_name": component_name}
