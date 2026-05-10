@@ -2096,12 +2096,14 @@ Var
     Workspace : IWorkspace;
     Doc : IDocument;
     SchLib : ISch_Lib;
-    Iter, PinIter, ParamIter : ISch_Iterator;
+    LibReader : ILibCompInfoReader;
+    CompInfo : IComponentInfo;
+    PinIter, ParamIter : ISch_Iterator;
     Component : ISch_Component;
     Pin : ISch_Pin;
     Param : ISch_Parameter;
     DesigLabel : ISch_Label;
-    Limit, Count, MismatchCount, PinCount : Integer;
+    Limit, Count, MismatchCount, PinCount, NumComps, I : Integer;
     DesigFontId, DesigColor : Integer;
     DesigJson, CommentJson, PinList, StyleList, ElecStr, ResultsJson, Entry, CompName : String;
     PinLabelHidden : Boolean;
@@ -2168,12 +2170,36 @@ Begin
     ResultsJson := '';
     First := True;
 
-    Iter := SchLib.SchIterator_Create;
-    Iter.AddFilter_ObjectSet(MkSet(eSchComponent));
+    { Enumerate via ILibCompInfoReader. The schematic SchIterator with        }
+    { eSchComponent only walks components placed on a regular SchDoc, NOT    }
+    { the symbol entries inside a SchLib. The CompInfoReader gives names    }
+    { in document order; for each name we load the live ISch_Component via }
+    { GetState_SchComponentByLibRef to read its designator/comment/parameter}
+    { style records. This is the same pattern Lib_GetComponents uses.        }
+    LibReader := SchServer.CreateLibCompInfoReader(LibPath);
+    If LibReader = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'READER_FAILED',
+            'Failed to create library reader for ' + LibPath);
+        Exit;
+    End;
+
     Try
-        Component := Iter.FirstSchObject;
-        While (Component <> Nil) And (Count < Limit) Do
+        LibReader.ReadAllComponentInfo;
+        NumComps := LibReader.NumComponentInfos;
+
+        For I := 0 To NumComps - 1 Do
         Begin
+            If Count >= Limit Then Break;
+
+            CompInfo := LibReader.ComponentInfos[I];
+            CompName := '';
+            Try CompName := CompInfo.CompName; Except End;
+            If CompName = '' Then Continue;
+
+            Component := SchLib.GetState_SchComponentByLibRef(CompName);
+            If Component = Nil Then Continue;
+
             { Read designator font_id / color via the typed ISch_Label local. }
             { Component.Designator returns ISch_Designator which IS an        }
             { ISch_Label, so the assignment + late-bound property reads       }
@@ -2196,8 +2222,6 @@ Begin
             { style. Without filters, every component is emitted.            }
             If (Not FilterApplied) Or Mismatched Then
             Begin
-                CompName := '';
-                Try CompName := Component.LibReference; Except End;
 
                 DesigJson := '{"text":"","font_id":0,"color":0,"is_hidden":false,"x":0,"y":0,"orientation":0,"justification":0}';
                 If DesigLabel <> Nil Then
@@ -2292,11 +2316,9 @@ Begin
                 If Mismatched Then Inc(MismatchCount);
                 Inc(Count);
             End;
-
-            Component := Iter.NextSchObject;
         End;
     Finally
-        SchLib.SchIterator_Destroy(Iter);
+        SchServer.DestroyCompInfoReader(LibReader);
     End;
 
     Result := BuildSuccessResponse(RequestId,
