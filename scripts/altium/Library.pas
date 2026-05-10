@@ -2065,6 +2065,251 @@ Begin
 End;
 
 {..............................................................................}
+{ Lib_AuditStyles - bulk visual-style audit across every component in a       }
+{ library. Walks SchLib.SchIterator with eSchComponent filter (live           }
+{ components, no per-name GetState_SchComponentByLibRef lookup), and emits    }
+{ the designator's full style record per component. Comment / parameter_     }
+{ styles / pins are opt-in via flags so the default response stays compact.  }
+{                                                                              }
+{ Filter mode: when expect_designator_font_id and/or expect_designator_color }
+{ are supplied, only components whose designator does NOT match the expected }
+{ value go in the output. Without filters, every component is returned.       }
+{                                                                              }
+{ Params:                                                                     }
+{   library_path                  - .SchLib path. Defaults to focused doc.   }
+{   with_comment=true             - include comment style record per comp.  }
+{   with_parameters=true          - include parameter_styles array per comp.}
+{   with_pins=true                - include pins array per comp.             }
+{   expect_designator_font_id=N   - filter: trim matches.                    }
+{   expect_designator_color=N     - filter: trim matches.                    }
+{   limit=5000                    - cap on emitted entries.                  }
+{                                                                              }
+{ Returns: {library_path, count, mismatch_count, limit, truncated,           }
+{          filter_applied, components:[...]}.                                 }
+Function Lib_AuditStyles(Params : String; RequestId : String) : String;
+Var
+    LibPath, FocusedPath, FlagStr : String;
+    ExpFontIdStr, ExpColorStr : String;
+    HasExpFontId, HasExpColor, FilterApplied : Boolean;
+    WithComment, WithParameters, WithPins : Boolean;
+    ExpFontId, ExpColor : Integer;
+    Workspace : IWorkspace;
+    Doc : IDocument;
+    SchLib : ISch_Lib;
+    Iter, PinIter, ParamIter : ISch_Iterator;
+    Component : ISch_Component;
+    Pin : ISch_Pin;
+    Param : ISch_Parameter;
+    DesigLabel : ISch_Label;
+    Limit, Count, MismatchCount, PinCount : Integer;
+    DesigFontId, DesigColor : Integer;
+    DesigJson, CommentJson, PinList, StyleList, ElecStr, ResultsJson, Entry, CompName : String;
+    PinLabelHidden : Boolean;
+    First, FirstPin, FirstStyle, Mismatched : Boolean;
+Begin
+    LibPath := ExtractJsonValue(Params, 'library_path');
+    LibPath := StringReplace(LibPath, '\\', '\', -1);
+
+    FlagStr := ExtractJsonValue(Params, 'with_comment');
+    WithComment := (FlagStr = 'true') Or (FlagStr = 'True') Or (FlagStr = '1');
+    FlagStr := ExtractJsonValue(Params, 'with_parameters');
+    WithParameters := (FlagStr = 'true') Or (FlagStr = 'True') Or (FlagStr = '1');
+    FlagStr := ExtractJsonValue(Params, 'with_pins');
+    WithPins := (FlagStr = 'true') Or (FlagStr = 'True') Or (FlagStr = '1');
+
+    Limit := StrToIntDef(ExtractJsonValue(Params, 'limit'), 5000);
+
+    ExpFontIdStr := ExtractJsonValue(Params, 'expect_designator_font_id');
+    ExpColorStr := ExtractJsonValue(Params, 'expect_designator_color');
+    HasExpFontId := ExpFontIdStr <> '';
+    HasExpColor := ExpColorStr <> '';
+    ExpFontId := StrToIntDef(ExpFontIdStr, 0);
+    ExpColor := StrToIntDef(ExpColorStr, 0);
+    FilterApplied := HasExpFontId Or HasExpColor;
+
+    Workspace := GetWorkspace;
+    If Workspace = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_WORKSPACE', 'No workspace');
+        Exit;
+    End;
+
+    FocusedPath := '';
+    Doc := Workspace.DM_FocusedDocument;
+    If Doc <> Nil Then
+        Try FocusedPath := Doc.DM_FullPath; Except End;
+
+    If LibPath = '' Then LibPath := FocusedPath;
+    If LibPath = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_LIBRARY',
+            'No library document is active and no library_path was supplied');
+        Exit;
+    End;
+
+    If (FocusedPath = '') Or (UpperCase(FocusedPath) <> UpperCase(LibPath)) Then
+    Begin
+        ResetParameters;
+        AddStringParameter('ObjectKind', 'Document');
+        AddStringParameter('FileName', LibPath);
+        RunProcess('WorkspaceManager:OpenObject');
+    End;
+
+    SchLib := SchServer.GetCurrentSchDocument;
+    If (SchLib = Nil) Or (SchLib.ObjectId <> eSchLib) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_SCHLIB',
+            'Failed to focus library at ' + LibPath);
+        Exit;
+    End;
+
+    Count := 0;
+    MismatchCount := 0;
+    ResultsJson := '';
+    First := True;
+
+    Iter := SchLib.SchIterator_Create;
+    Iter.AddFilter_ObjectSet(MkSet(eSchComponent));
+    Try
+        Component := Iter.FirstSchObject;
+        While (Component <> Nil) And (Count < Limit) Do
+        Begin
+            { Read designator font_id / color via the typed ISch_Label local. }
+            { Component.Designator returns ISch_Designator which IS an        }
+            { ISch_Label, so the assignment + late-bound property reads       }
+            { resolve cleanly at compile time.                                  }
+            DesigLabel := Nil;
+            DesigFontId := 0;
+            DesigColor := 0;
+            Try DesigLabel := Component.Designator; Except End;
+            If DesigLabel <> Nil Then
+            Begin
+                Try DesigFontId := DesigLabel.FontId; Except End;
+                Try DesigColor := DesigLabel.Color; Except End;
+            End;
+
+            Mismatched := False;
+            If HasExpFontId And (DesigFontId <> ExpFontId) Then Mismatched := True;
+            If HasExpColor And (DesigColor <> ExpColor) Then Mismatched := True;
+
+            { Skip when filter is on and the component matches the expected }
+            { style. Without filters, every component is emitted.            }
+            If (Not FilterApplied) Or Mismatched Then
+            Begin
+                CompName := '';
+                Try CompName := Component.LibReference; Except End;
+
+                DesigJson := '{"text":"","font_id":0,"color":0,"is_hidden":false,"x":0,"y":0,"orientation":0,"justification":0}';
+                If DesigLabel <> Nil Then
+                    Try DesigJson := BuildLabelStyleJson(DesigLabel, True); Except End;
+
+                Entry := '{"name":"' + EscapeJsonString(CompName) +
+                    '","designator":' + DesigJson +
+                    ',"mismatched":' + BoolToJsonStr(Mismatched);
+
+                If WithComment Then
+                Begin
+                    CommentJson := '{"text":"","font_id":0,"color":0,"is_hidden":false,"x":0,"y":0,"orientation":0,"justification":0}';
+                    Try CommentJson := BuildLabelStyleJson(Component.Comment, True); Except End;
+                    Entry := Entry + ',"comment":' + CommentJson;
+                End;
+
+                If WithPins Then
+                Begin
+                    PinList := '';
+                    FirstPin := True;
+                    PinCount := 0;
+                    PinIter := Component.SchIterator_Create;
+                    PinIter.AddFilter_ObjectSet(MkSet(ePin));
+                    Try
+                        Pin := PinIter.FirstSchObject;
+                        While Pin <> Nil Do
+                        Begin
+                            If Not FirstPin Then PinList := PinList + ',';
+                            FirstPin := False;
+
+                            If Pin.Electrical = eElectricInput Then ElecStr := 'input'
+                            Else If Pin.Electrical = eElectricOutput Then ElecStr := 'output'
+                            Else If Pin.Electrical = eElectricIO Then ElecStr := 'bidirectional'
+                            Else If Pin.Electrical = eElectricPassive Then ElecStr := 'passive'
+                            Else If Pin.Electrical = eElectricPower Then ElecStr := 'power'
+                            Else If Pin.Electrical = eElectricOpenCollector Then ElecStr := 'open_collector'
+                            Else If Pin.Electrical = eElectricOpenEmitter Then ElecStr := 'open_emitter'
+                            Else If Pin.Electrical = eElectricHiZ Then ElecStr := 'hiz'
+                            Else ElecStr := 'passive';
+
+                            PinLabelHidden := False;
+                            Try PinLabelHidden := (Not Pin.ShowName) And (Not Pin.ShowDesignator); Except End;
+
+                            PinList := PinList + '{"designator":"' + EscapeJsonString(Pin.Designator) +
+                                '","name":"' + EscapeJsonString(Pin.Name) +
+                                '","electrical_type":"' + ElecStr +
+                                '","x":' + IntToStr(CoordToMils(Pin.Location.X)) +
+                                ',"y":' + IntToStr(CoordToMils(Pin.Location.Y)) +
+                                ',"orientation":' + IntToStr(Pin.Orientation) +
+                                ',"hidden":' + BoolToJsonStr(Pin.IsHidden) +
+                                ',"label_hidden":' + BoolToJsonStr(PinLabelHidden) + '}';
+                            Inc(PinCount);
+
+                            Pin := PinIter.NextSchObject;
+                        End;
+                    Finally
+                        Component.SchIterator_Destroy(PinIter);
+                    End;
+                    Entry := Entry + ',"pin_count":' + IntToStr(PinCount) +
+                        ',"pins":[' + PinList + ']';
+                End;
+
+                If WithParameters Then
+                Begin
+                    StyleList := '';
+                    FirstStyle := True;
+                    ParamIter := Component.SchIterator_Create;
+                    ParamIter.AddFilter_ObjectSet(MkSet(eParameter));
+                    Try
+                        Param := ParamIter.FirstSchObject;
+                        While Param <> Nil Do
+                        Begin
+                            If Not FirstStyle Then StyleList := StyleList + ',';
+                            FirstStyle := False;
+                            StyleList := StyleList + '{"name":"' + EscapeJsonString(Param.Name) +
+                                '","value":"' + EscapeJsonString(Param.Text) +
+                                '","style":' + BuildLabelStyleJson(Param, False) + '}';
+                            Param := ParamIter.NextSchObject;
+                        End;
+                    Finally
+                        Component.SchIterator_Destroy(ParamIter);
+                    End;
+                    Entry := Entry + ',"parameter_styles":[' + StyleList + ']';
+                End;
+
+                Entry := Entry + '}';
+
+                If Not First Then ResultsJson := ResultsJson + ',';
+                First := False;
+                ResultsJson := ResultsJson + Entry;
+
+                If Mismatched Then Inc(MismatchCount);
+                Inc(Count);
+            End;
+
+            Component := Iter.NextSchObject;
+        End;
+    Finally
+        SchLib.SchIterator_Destroy(Iter);
+    End;
+
+    Result := BuildSuccessResponse(RequestId,
+        '{"library_path":"' + EscapeJsonString(LibPath) + '"' +
+        ',"count":' + IntToStr(Count) +
+        ',"mismatch_count":' + IntToStr(MismatchCount) +
+        ',"limit":' + IntToStr(Limit) +
+        ',"truncated":' + BoolToJsonStr(Count >= Limit) +
+        ',"filter_applied":' + BoolToJsonStr(FilterApplied) +
+        ',"components":[' + ResultsJson + ']}');
+End;
+
+{..............................................................................}
 { Command Handler - must be at end                                             }
 {..............................................................................}
 
@@ -2093,6 +2338,7 @@ Begin
         'set_component_description': Result := Lib_SetComponentDescription(Params, RequestId);
         'get_pin_list':       Result := Lib_GetPinList(Params, RequestId);
         'copy_component':     Result := Lib_CopyComponent(Params, RequestId);
+        'audit_styles':       Result := Lib_AuditStyles(Params, RequestId);
     Else
         Result := BuildErrorResponse(RequestId, 'UNKNOWN_ACTION', 'Unknown library action: ' + Action);
     End;

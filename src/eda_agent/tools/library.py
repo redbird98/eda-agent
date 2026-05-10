@@ -644,6 +644,77 @@ def register_library_tools(mcp):
         return result
 
     @mcp.tool()
+    async def lib_audit_styles(
+        library_path: Optional[str] = None,
+        with_comment: bool = False,
+        with_parameters: bool = False,
+        with_pins: bool = False,
+        expect_designator_font_id: Optional[int] = None,
+        expect_designator_color: Optional[int] = None,
+        limit: int = 5000,
+        timeout: Optional[float] = None,
+    ) -> dict[str, Any]:
+        """Bulk visual-style audit across every component in a library.
+
+        Walks the focused .SchLib (or one specified by ``library_path``)
+        component-by-component and emits each component's designator
+        style record. Comment / parameter_styles / pins are opt-in via
+        the ``with_*`` flags so the default response stays compact:
+        designator alone is ~120 bytes per component, so a 2000-symbol
+        library is ~240 KB without filters.
+
+        Filter mode: pass ``expect_designator_font_id`` and/or
+        ``expect_designator_color`` and the response only contains
+        components whose designator does NOT match the expected style.
+        That makes the audit case (find every symbol that doesn't use
+        Times New Roman 10pt navy) a single round-trip with bounded
+        output.
+
+        ``timeout`` overrides the bridge default. A 2000-symbol audit
+        with no opt-in flags finishes well under the 10s default; pass
+        a larger value if you flip on ``with_parameters`` and the lib
+        has heavy parameter dicts.
+
+        Args:
+            library_path: .SchLib path. Defaults to focused doc.
+            with_comment: Include comment style record per component.
+            with_parameters: Include parameter_styles array per component.
+            with_pins: Include pins array per component.
+            expect_designator_font_id: Filter; trim components where
+                designator.font_id equals this value.
+            expect_designator_color: Filter; trim components where
+                designator.color equals this BGR int (e.g. 8388608 for
+                navy / 0x000080 in BGR-packed form).
+            limit: Cap on emitted entries. Default 5000.
+            timeout: Per-call bridge poll timeout override (seconds).
+
+        Returns:
+            Dict with library_path, count (emitted), mismatch_count
+            (subset that failed the filter), limit, truncated,
+            filter_applied, and components: list of
+            {name, designator:{...}, mismatched, comment?:{...},
+             pins?:[...], parameter_styles?:[...]}.
+        """
+        bridge = get_bridge()
+        params: dict[str, Any] = {"limit": str(limit)}
+        if library_path:
+            params["library_path"] = library_path
+        if with_comment:
+            params["with_comment"] = "true"
+        if with_parameters:
+            params["with_parameters"] = "true"
+        if with_pins:
+            params["with_pins"] = "true"
+        if expect_designator_font_id is not None:
+            params["expect_designator_font_id"] = str(expect_designator_font_id)
+        if expect_designator_color is not None:
+            params["expect_designator_color"] = str(expect_designator_color)
+        result = await bridge.send_command_async(
+            "library.audit_styles", params, timeout=timeout,
+        )
+        return result or {}
+
+    @mcp.tool()
     async def lib_batch_set_params(
         assignments: list[dict[str, str]],
         library_path: Optional[str] = None,
