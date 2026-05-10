@@ -364,23 +364,42 @@ Begin
 End;
 
 {..............................................................................}
-{ PCB_SetRuleProperties - Update metadata of a design rule.                     }
-{ Params: name + enabled / priority / scope1 / scope2 / comment.                }
+{ PCB_SetRuleProperties - Update metadata AND constraint values of a rule.      }
 {                                                                               }
-{ Constraint setters (gap_mils, min_width_mils, etc.) live on the per-kind     }
-{ subtypes, see the docstring on PCB_GetRuleProperties for why we don't       }
-{ touch them here. To change a constraint value: edit the rule in the Altium   }
-{ UI (PCB > Rules and Constraints Editor), or recreate the rule via            }
-{ PCB_CreateDesignRule which takes a value parameter and dispatches to the     }
-{ right subtype factory + setter internally.                                    }
+{ Metadata params: enabled / priority / scope1 / scope2 / comment.              }
+{ Constraint params (dispatched by Rule.RuleKind):                              }
+{   - Clearance (kind=0, IPCB_ClearanceConstraint):                            }
+{       gap_mils                                                                }
+{   - MaxMinWidth (kind=2, IPCB_MaxMinWidthConstraint):                        }
+{       min_width_mils / max_width_mils / favored_width_mils                   }
+{   - ComponentClearance (kind=24, IPCB_ComponentClearanceConstraint):         }
+{       gap_mils / vertical_gap_mils                                            }
+{   - MaxMinHoleSize (kind=42, IPCB_MaxMinHoleSizeConstraint):                 }
+{       min_hole_size_mils / max_hole_size_mils                                 }
+{   - HoleToHoleClearance (kind=52, undocumented; shares IPCB_ClearanceConstraint }
+{       semantics per the descriptor "Hole To Hole Clearance (Gap=...)"):       }
+{       gap_mils                                                                }
+{                                                                               }
+{ Empirically determined kind 52 from the runtime rule list, the published      }
+{ TRuleKind enum stops at 51 (DifferentialPairsRouting), kinds 52-62 exist in  }
+{ modern Altium builds without symbolic constants in the public SDK ref.        }
+{                                                                               }
+{ Constraint values are NOT properties of the base IPCB_Rule, they live on   }
+{ the per-kind constraint subtype, so we cast through a typed local before    }
+{ writing. For unknown kinds, only the metadata fields apply.                   }
 {..............................................................................}
 
 Function PCB_SetRuleProperties(Params : String; RequestId : String) : String;
 Var
     Board : IPCB_Board;
     Rule : IPCB_Rule;
+    RuleClear : IPCB_ClearanceConstraint;
+    RuleWidth : IPCB_MaxMinWidthConstraint;
+    RuleHole : IPCB_MaxMinHoleSizeConstraint;
+    RuleCompClear : IPCB_ComponentClearanceConstraint;
     RuleName, V : String;
-    UpdatedCount : Integer;
+    UpdatedCount, Kind, ValMils : Integer;
+    L : TLayer;
 Begin
     Board := GetPCBBoardAnywhere;
     If Board = Nil Then
@@ -404,39 +423,106 @@ Begin
     End;
 
     UpdatedCount := 0;
+    Kind := 0;
+    Try Kind := Rule.RuleKind; Except End;
+
     PCBServer.PreProcess;
     Try
         PCBServer.SendMessageToRobots(Rule.I_ObjectAddress, c_Broadcast,
             PCBM_BeginModify, c_NoEventData);
 
+        { -- Metadata -- }
         V := ExtractJsonValue(Params, 'enabled');
         If V <> '' Then
-        Begin
             Try Rule.Enabled := (V = 'true') Or (V = 'True') Or (V = '1'); Inc(UpdatedCount); Except End;
-        End;
 
         V := ExtractJsonValue(Params, 'priority');
         If V <> '' Then
-        Begin
             Try Rule.Priority := StrToIntDef(V, Rule.Priority); Inc(UpdatedCount); Except End;
-        End;
 
         V := ExtractJsonValue(Params, 'scope1');
         If V <> '' Then
-        Begin
             Try Rule.Scope1Expression := V; Inc(UpdatedCount); Except End;
-        End;
 
         V := ExtractJsonValue(Params, 'scope2');
         If V <> '' Then
-        Begin
             Try Rule.Scope2Expression := V; Inc(UpdatedCount); Except End;
-        End;
 
         V := ExtractJsonValue(Params, 'comment');
         If V <> '' Then
-        Begin
             Try Rule.Comment := V; Inc(UpdatedCount); Except End;
+
+        { -- Constraint values, dispatched by Rule.RuleKind -- }
+
+        { Clearance + HoleToHoleClearance share IPCB_ClearanceConstraint's Gap }
+        { property. kind 52 (HoleToHoleClearance) is not in the public         }
+        { TRuleKind enum but its descriptor uses the same "Gap=..." shape, so  }
+        { the cast and Gap write succeed empirically.                          }
+        If (Kind = eRule_Clearance) Or (Kind = 52) Then
+        Begin
+            V := ExtractJsonValue(Params, 'gap_mils');
+            If V <> '' Then
+            Begin
+                Try
+                    RuleClear := Rule;
+                    RuleClear.Gap := MilsToCoord(StrToIntDef(V, 0));
+                    Inc(UpdatedCount);
+                Except End;
+            End;
+        End
+        Else If Kind = eRule_MaxMinWidth Then
+        Begin
+            Try RuleWidth := Rule; Except End;
+            V := ExtractJsonValue(Params, 'min_width_mils');
+            If V <> '' Then
+            Begin
+                ValMils := StrToIntDef(V, 0);
+                Try
+                    For L := MinLayer To MaxLayer Do
+                        RuleWidth.MinWidth(L) := MilsToCoord(ValMils);
+                    Inc(UpdatedCount);
+                Except End;
+            End;
+            V := ExtractJsonValue(Params, 'max_width_mils');
+            If V <> '' Then
+            Begin
+                ValMils := StrToIntDef(V, 0);
+                Try
+                    For L := MinLayer To MaxLayer Do
+                        RuleWidth.MaxWidth(L) := MilsToCoord(ValMils);
+                    Inc(UpdatedCount);
+                Except End;
+            End;
+            V := ExtractJsonValue(Params, 'favored_width_mils');
+            If V <> '' Then
+            Begin
+                ValMils := StrToIntDef(V, 0);
+                Try
+                    For L := MinLayer To MaxLayer Do
+                        RuleWidth.FavoredWidth(L) := MilsToCoord(ValMils);
+                    Inc(UpdatedCount);
+                Except End;
+            End;
+        End
+        Else If Kind = eRule_MaxMinHoleSize Then
+        Begin
+            Try RuleHole := Rule; Except End;
+            V := ExtractJsonValue(Params, 'min_hole_size_mils');
+            If V <> '' Then
+                Try RuleHole.MinLimit := MilsToCoord(StrToIntDef(V, 0)); Inc(UpdatedCount); Except End;
+            V := ExtractJsonValue(Params, 'max_hole_size_mils');
+            If V <> '' Then
+                Try RuleHole.MaxLimit := MilsToCoord(StrToIntDef(V, 0)); Inc(UpdatedCount); Except End;
+        End
+        Else If Kind = eRule_ComponentClearance Then
+        Begin
+            Try RuleCompClear := Rule; Except End;
+            V := ExtractJsonValue(Params, 'gap_mils');
+            If V <> '' Then
+                Try RuleCompClear.Gap := MilsToCoord(StrToIntDef(V, 0)); Inc(UpdatedCount); Except End;
+            V := ExtractJsonValue(Params, 'vertical_gap_mils');
+            If V <> '' Then
+                Try RuleCompClear.VerticalGap := MilsToCoord(StrToIntDef(V, 0)); Inc(UpdatedCount); Except End;
         End;
 
         PCBServer.SendMessageToRobots(Rule.I_ObjectAddress, c_Broadcast,
@@ -449,6 +535,7 @@ Begin
 
     Result := BuildSuccessResponse(RequestId,
         '{"name":"' + EscapeJsonString(Rule.Name) + '",'
+        + '"rule_kind":' + IntToStr(Kind) + ','
         + '"properties_updated":' + IntToStr(UpdatedCount) + '}');
 End;
 
@@ -1989,8 +2076,11 @@ Var
     RuleClear : IPCB_ClearanceConstraint;
     RuleWidth : IPCB_MaxMinWidthConstraint;
     RuleHole : IPCB_MaxMinHoleSizeConstraint;
-    RuleTypeStr, RuleName, ValueStr, ScopeStr, NetScopeStr : String;
-    RuleValue, NetScopeVal : Integer;
+    RuleCompClear : IPCB_ComponentClearanceConstraint;
+    RuleTypeStr, RuleName, ValueStr, MaxValueStr, FavoredValueStr : String;
+    ScopeStr, NetScopeStr, VerticalGapStr : String;
+    RuleValue, MaxValue, FavoredValue, VerticalGap, NetScopeVal : Integer;
+    HasMaxValue : Boolean;
     L : TLayer;
 Begin
     Board := GetPCBBoardAnywhere;
@@ -2003,6 +2093,9 @@ Begin
     RuleTypeStr := ExtractJsonValue(Params, 'rule_type');
     RuleName := ExtractJsonValue(Params, 'name');
     ValueStr := ExtractJsonValue(Params, 'value');
+    MaxValueStr := ExtractJsonValue(Params, 'max_value');
+    FavoredValueStr := ExtractJsonValue(Params, 'favored_value');
+    VerticalGapStr := ExtractJsonValue(Params, 'vertical_gap');
     ScopeStr := ExtractJsonValue(Params, 'scope');
     NetScopeStr := LowerCase(ExtractJsonValue(Params, 'net_scope'));
 
@@ -2027,6 +2120,16 @@ Begin
         NetScopeVal := eNetScope_AnyNet;
 
     RuleValue := StrToIntDef(ValueStr, 10);
+
+    { Independent max / favored values: when omitted, fall back to the legacy }
+    { 5x-min default for width/via_size so existing callers keep working. The }
+    { previous handler forced max = value * 5 unconditionally, which silently }
+    { clamped any Width rule's max to 25 mil when value was 5 mil and broke   }
+    { wider power-trace use cases.                                              }
+    HasMaxValue := MaxValueStr <> '';
+    MaxValue := StrToIntDef(MaxValueStr, RuleValue * 5);
+    FavoredValue := StrToIntDef(FavoredValueStr, RuleValue);
+    VerticalGap := StrToIntDef(VerticalGapStr, RuleValue);
 
     { Constraint values are NOT properties of the base IPCB_Rule interface,    }
     { they live on the per-kind subtypes (IPCB_ClearanceConstraint,            }
@@ -2060,8 +2163,8 @@ Begin
             For L := MinLayer To MaxLayer Do
             Begin
                 RuleWidth.MinWidth(L) := MilsToCoord(RuleValue);
-                RuleWidth.MaxWidth(L) := MilsToCoord(RuleValue * 5);
-                RuleWidth.FavoredWidth(L) := MilsToCoord(RuleValue);
+                RuleWidth.MaxWidth(L) := MilsToCoord(MaxValue);
+                RuleWidth.FavoredWidth(L) := MilsToCoord(FavoredValue);
             End;
             If ScopeStr <> '' Then
                 RuleWidth.Scope1Expression := ScopeStr;
@@ -2074,16 +2177,26 @@ Begin
             RuleHole.NetScope := NetScopeVal;
             RuleHole.LayerKind := eRuleLayerKind_SameLayer;
             RuleHole.MinLimit := MilsToCoord(RuleValue);
-            RuleHole.MaxLimit := MilsToCoord(RuleValue * 5);
+            RuleHole.MaxLimit := MilsToCoord(MaxValue);
             If ScopeStr <> '' Then
                 RuleHole.Scope1Expression := ScopeStr;
             Rule := RuleHole;
+        End
+        Else If RuleTypeStr = 'component_clearance' Then
+        Begin
+            RuleCompClear := PCBServer.PCBRuleFactory(eRule_ComponentClearance);
+            RuleCompClear.Name := RuleName;
+            RuleCompClear.Gap := MilsToCoord(RuleValue);
+            Try RuleCompClear.VerticalGap := MilsToCoord(VerticalGap); Except End;
+            If ScopeStr <> '' Then
+                RuleCompClear.Scope1Expression := ScopeStr;
+            Rule := RuleCompClear;
         End
         Else
         Begin
             PCBServer.PostProcess;
             Result := BuildErrorResponse(RequestId, 'INVALID_PARAM',
-                'Unknown rule_type: ' + RuleTypeStr + '. Use clearance, width, or via_size');
+                'Unknown rule_type: ' + RuleTypeStr + '. Use clearance, width, via_size, or component_clearance');
             Exit;
         End;
 
