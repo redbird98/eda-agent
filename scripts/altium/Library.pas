@@ -1026,6 +1026,7 @@ Var
     Component : ISch_Component;
     PinIterator, ParamIterator : ISch_Iterator;
     Pin : ISch_Pin;
+    PinAsObj : ISch_GraphicalObject;
     Param : ISch_Parameter;
     CompNum, I, PinCount : Integer;
     Data, PinList, ParamList, StyleList, ElecStr : String;
@@ -1165,8 +1166,15 @@ Begin
             PinFontId := 0;
             PinColor := 0;
             PinLabelHidden := False;
-            Try PinFontId := Pin.FontId; Except End;
-            Try PinColor := Pin.Color; Except End;
+            { Pin.FontId / Pin.Color are NOT declared on the ISch_Pin       }
+            { interface header that DelphiScript checks at compile time,   }
+            { even though they're inherited from ISch_GraphicalObject.     }
+            { Try/Except can't catch undeclared identifiers (compile error,}
+            { not runtime), so narrow Pin to the base interface where the }
+            { properties are visible to the compiler. }
+            PinAsObj := Pin;
+            Try PinFontId := PinAsObj.FontId; Except End;
+            Try PinColor := PinAsObj.Color; Except End;
             { Pin label visibility: ISch_Pin.ShowName / ShowDesignator are }
             { the real flags; combine into a single label_hidden when both }
             { are off so the LLM can flag "neither pin name nor number is }
