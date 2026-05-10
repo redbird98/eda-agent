@@ -341,8 +341,29 @@ def register_project_tools(mcp):
     async def get_component_info(
         designator: str,
         project_path: Optional[str] = None,
+        with_pin_nets: bool = True,
+        with_parameters: bool = True,
+        timeout: Optional[float] = None,
     ) -> dict[str, Any]:
         """Get full information about a single component.
+
+        Performance note: pin nets are the only field that needs a
+        project compile, and a stale-cache compile on a multi-sheet
+        hierarchical project can take 30-60s. When you only need the
+        component's value, footprint, library reference, sheet, or
+        pin numbers/names (no nets), pass ``with_pin_nets=False`` and
+        the call drops to sub-second by skipping ``Project.DM_Compile``
+        entirely. Use the default ``with_pin_nets=True`` only when you
+        actually need to know what each pin is wired to.
+
+        ``with_parameters=False`` further skips the parameter iterator
+        (Manufacturer / MPN / Value / Footprint paths). Marginal win
+        compared to skipping the compile, but useful for the cheapest
+        possible "is this designator placed?" probe.
+
+        ``timeout`` overrides the bridge's default poll timeout. The
+        compile-bound full-fat call can legitimately need 60-90s on
+        large projects, raise this when you keep `with_pin_nets=True`.
 
         DATASHEET DISCIPLINE: Before making any claim about this
         component's pin function, voltage rating, timing, or electrical
@@ -352,24 +373,40 @@ def register_project_tools(mcp):
         `_datasheet_guidance` in the response carries the rule and a
         suggested search query.
 
-        Compiles the project and returns the component's designator, comment,
-        footprint, library reference, all parameters, and every pin with its
-        net assignment, all in one call.
+        Returns the component's designator, comment, footprint, library
+        reference, parameters (when with_parameters=True), and every pin
+        with name/number (and net assignment when with_pin_nets=True).
 
         Args:
             designator: Component designator (e.g., "U1", "R8", "C3")
             project_path: Optional project path. If None, uses active project.
+            with_pin_nets: When True (default) compile the project and
+                emit the flattened net for each pin. Set to False to
+                skip the compile and get a sub-second metadata-only
+                response.
+            with_parameters: When True (default) include the parameter
+                dict. Set to False for the cheapest possible probe.
+            timeout: Optional bridge poll-timeout override (seconds).
+                Use a higher value (e.g., 90) when keeping with_pin_nets
+                True on large hierarchical projects.
 
         Returns:
-            Dictionary with designator, comment, footprint, lib_ref, sheet,
-            parameters dict, and pins array, plus `_datasheet_guidance` +
-            `_datasheet_parts`.
+            Dictionary with designator, comment, footprint, lib_ref,
+            sheet, pins array (each with pin/name and, when requested,
+            net), and (when requested) parameters dict, plus
+            `_datasheet_guidance` + `_datasheet_parts`.
         """
         bridge = get_bridge()
         params: dict[str, Any] = {"designator": designator}
         if project_path:
             params["project_path"] = project_path
-        result = await bridge.send_command_async("project.get_component_info", params)
+        if not with_pin_nets:
+            params["with_pin_nets"] = "false"
+        if not with_parameters:
+            params["with_parameters"] = "false"
+        result = await bridge.send_command_async(
+            "project.get_component_info", params, timeout=timeout,
+        )
         if isinstance(result, dict):
             mfr = str(
                 result.get("parameters", {}).get("Manufacturer")

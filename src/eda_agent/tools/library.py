@@ -495,8 +495,17 @@ def register_library_tools(mcp):
     async def lib_search(
         query: str,
         search_type: str = "all",
+        library_path: Optional[str] = None,
+        limit: int = 100,
     ) -> dict[str, Any]:
-        """Search installed libraries for components.
+        """Search open SchLib documents for components.
+
+        Case-insensitive substring match. Walks every .SchLib that is
+        a member of any open project, plus every standalone .SchLib in
+        the workspace's free-documents area. Each library is read via
+        ``CreateLibCompInfoReader`` so the search is fast even with
+        many libraries open: it only loads symbols when ``search_type``
+        is ``"parameters"``.
 
         DATASHEET DISCIPLINE: Matches carry `_datasheet_guidance`.
         Before recommending any matched part as a replacement or
@@ -504,17 +513,33 @@ def register_library_tools(mcp):
         recommend based on symbol metadata alone.
 
         Args:
-            query: Search query string
-            search_type: What to search ("all", "name", "description", "parameters")
+            query: Substring to match against component name / alias /
+                description (case-insensitive).
+            search_type: ``"all"`` (default, matches name / alias /
+                description), ``"name"``, ``"description"``, or
+                ``"parameters"`` (slow, also walks each candidate's
+                parameter dict via the live symbol).
+            library_path: Optional path to a single .SchLib to restrict
+                the search to. When omitted, searches every open
+                library.
+            limit: Cap on returned matches (default 100).
 
         Returns:
-            Dict with matched components plus `_datasheet_guidance` +
+            Dict with ``query``, ``search_type``, ``count``, ``limit``,
+            ``truncated`` (True when count == limit), and ``results`` —
+            a list of {name, alias_name, description, library_path,
+            part_count} per match — plus `_datasheet_guidance` +
             `_datasheet_parts`.
         """
         bridge = get_bridge()
-        result = await bridge.send_command_async(
-            "library.search", {"query": query, "search_type": search_type}
-        )
+        params: dict[str, Any] = {
+            "query": query,
+            "search_type": search_type,
+            "limit": str(limit),
+        }
+        if library_path:
+            params["library_path"] = library_path
+        result = await bridge.send_command_async("library.search", params)
         if isinstance(result, list):
             result = {"results": result}
         if isinstance(result, dict):
@@ -529,9 +554,21 @@ def register_library_tools(mcp):
     @mcp.tool()
     async def lib_get_component_details(
         component_name: str,
-        library_path: str,
+        library_path: Optional[str] = None,
     ) -> dict[str, Any]:
-        """Get detailed information about a library component.
+        """Get full inspection of one library component in a single call.
+
+        Returns metadata (name, alias_name, description, designator_prefix,
+        part_count) PLUS the full pin list and parameter dict in one
+        round-trip. The previous version of this tool returned only
+        three metadata fields, forcing callers to chain
+        ``lib_get_pin_list`` and parameter walks for a basic look at a
+        symbol.
+
+        If ``library_path`` is provided and isn't already focused, the
+        library is opened (focus changes), so the next ``lib_*`` call
+        operates on it without an explicit open. Saves are deferred,
+        opening doesn't write anything to disk.
 
         DATASHEET DISCIPLINE: This response is the highest-density
         device-fact surface in the library API (pins, parameters,
@@ -541,21 +578,24 @@ def register_library_tools(mcp):
         the PDF and cite a section/page before stating any pin or
         rating.
 
-        NOTE: Uses the focused library document, not library_path. Open the
-        target library in Altium before calling.
-
         Args:
-            component_name: Name of the component
-            library_path: Path to the library (currently ignored, see note)
+            component_name: Component LibRef as it appears in the .SchLib.
+            library_path: Optional .SchLib full path. When omitted the
+                currently focused library is used.
 
         Returns:
-            Dictionary with full component details including pins and
-            parameters, plus `_datasheet_guidance` + `_datasheet_parts`.
+            Dict with name, library_path, designator_prefix,
+            description, alias_name, part_count, pin_count, pins (list
+            of {designator, name, electrical_type, x, y, orientation,
+            hidden}), parameters (dict of name -> value), plus
+            `_datasheet_guidance` + `_datasheet_parts`.
         """
         bridge = get_bridge()
+        params: dict[str, Any] = {"component_name": component_name}
+        if library_path:
+            params["library_path"] = library_path
         result = await bridge.send_command_async(
-            "library.get_component_details",
-            {"component_name": component_name, "library_path": library_path},
+            "library.get_component_details", params,
         )
         if isinstance(result, dict):
             mfr = ""

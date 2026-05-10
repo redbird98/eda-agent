@@ -654,16 +654,33 @@ End;
 { Get full info for a single component (params + nets in one call)           }
 {..............................................................................}
 
+{ Proj_GetComponentInfo - one-shot inspection of a single component.         }
+{                                                                              }
+{ Pin nets are the ONLY field that needs a project compile, and a stale-     }
+{ cache compile on a multi-sheet hierarchical project can take 30-60s.       }
+{ Two opt-out flags let the caller skip the slow paths when the question     }
+{ doesn't need them:                                                          }
+{                                                                              }
+{   with_pin_nets=false  - skip SmartCompile, do not emit Pin.DM_FlattenedNet }
+{                          on each pin. Pin number/name still come back. The }
+{                          "looking up the part's value/footprint" case      }
+{                          becomes sub-second.                                }
+{   with_parameters=false - skip the parameter iterator on the live          }
+{                          component. Useful when only header metadata and  }
+{                          pins are needed.                                  }
+{                                                                              }
+{ Defaults are true for backward compatibility, so existing callers keep    }
+{ getting the full payload.                                                   }
 Function Proj_GetComponentInfo(Params : String; RequestId : String) : String;
 Var
-    ProjectPath, Designator : String;
+    ProjectPath, Designator, FlagStr : String;
     Workspace : IWorkspace;
     Project : IProject;
     Doc : IDocument;
     Comp : IComponent;
     Pin : IPin;
     I, J, K, DocCount : Integer;
-    UsePhysical : Boolean;
+    UsePhysical, WithPinNets, WithParameters : Boolean;
     Data, PinList, ParamList : String;
     FirstPin, FirstParam : Boolean;
     Found : Boolean;
@@ -671,6 +688,11 @@ Begin
     ProjectPath := ExtractJsonValue(Params, 'project_path');
     ProjectPath := StringReplace(ProjectPath, '\\', '\', -1);
     Designator := ExtractJsonValue(Params, 'designator');
+
+    FlagStr := ExtractJsonValue(Params, 'with_pin_nets');
+    WithPinNets := (FlagStr <> 'false') And (FlagStr <> 'False') And (FlagStr <> '0');
+    FlagStr := ExtractJsonValue(Params, 'with_parameters');
+    WithParameters := (FlagStr <> 'false') And (FlagStr <> 'False') And (FlagStr <> '0');
 
     If Designator = '' Then Begin Result := BuildErrorResponse(RequestId, 'MISSING_PARAMS', 'designator is required'); Exit; End;
 
@@ -681,15 +703,35 @@ Begin
     Else Project := Workspace.DM_FocusedProject;
     If Project = Nil Then Begin Result := BuildErrorResponse(RequestId, 'NO_PROJECT', 'No project found'); Exit; End;
 
+    { Compile is only needed for Pin.DM_FlattenedNetName. force_recompile   }
+    { stays honoured even when nets are skipped, callers using it have an  }
+    { explicit reason to refresh the cache.                                 }
     ForceRecompileIfRequested(Project, Params);
-    SmartCompile(Project);
+    If WithPinNets Then SmartCompile(Project);
     Found := False;
 
-    GetCompiledDocs(Project, DocCount, UsePhysical);
+    { Physical-doc enumeration relies on the post-compile state. When we   }
+    { skipped the compile, walk logical docs instead, that's where the     }
+    { source-side metadata (designator, footprint, params, pin names)      }
+    { lives anyway.                                                         }
+    If WithPinNets Then
+        GetCompiledDocs(Project, DocCount, UsePhysical)
+    Else
+    Begin
+        DocCount := 0;
+        UsePhysical := False;
+        Try DocCount := Project.DM_LogicalDocumentCount; Except End;
+    End;
     For I := 0 To DocCount - 1 Do
     Begin
         If Found Then Break;
-        Doc := GetCompiledDoc(Project, I, UsePhysical);
+        If WithPinNets Then
+            Doc := GetCompiledDoc(Project, I, UsePhysical)
+        Else
+        Begin
+            Doc := Nil;
+            Try Doc := Project.DM_LogicalDocuments(I); Except End;
+        End;
         If Doc = Nil Then Continue;
 
         For J := 0 To Doc.DM_ComponentCount - 1 Do
@@ -700,7 +742,9 @@ Begin
 
             Found := True;
 
-            // Build pin list with nets
+            { Pin list. Net assignment skipped when WithPinNets is false,    }
+            { the field is omitted entirely so callers can tell "we didn't  }
+            { ask" from "no net assigned".                                   }
             PinList := '';
             FirstPin := True;
             For K := 0 To Comp.DM_PinCount - 1 Do
@@ -710,22 +754,29 @@ Begin
                 If Not FirstPin Then PinList := PinList + ',';
                 FirstPin := False;
                 PinList := PinList + '{"pin":"' + EscapeJsonString(Pin.DM_PinNumber) +
-                    '","name":"' + EscapeJsonString(Pin.DM_PinName) +
-                    '","net":"' + EscapeJsonString(Pin.DM_FlattenedNetName) + '"}';
+                    '","name":"' + EscapeJsonString(Pin.DM_PinName) + '"';
+                If WithPinNets Then
+                    PinList := PinList + ',"net":"' + EscapeJsonString(Pin.DM_FlattenedNetName) + '"';
+                PinList := PinList + '}';
             End;
 
-            // Build parameter list
+            { Parameter dict. Skipped when WithParameters is false, that   }
+            { iterator is moderate cost but unnecessary for "look up the  }
+            { footprint" / "look up the value" callers.                    }
             ParamList := '';
             FirstParam := True;
-            Try
-                For K := 0 To Comp.DM_ParameterCount - 1 Do
-                Begin
-                    If Not FirstParam Then ParamList := ParamList + ',';
-                    FirstParam := False;
-                    ParamList := ParamList + '"' + EscapeJsonString(Comp.DM_Parameters(K).DM_Name) +
-                        '":"' + EscapeJsonString(Comp.DM_Parameters(K).DM_Value) + '"';
+            If WithParameters Then
+            Begin
+                Try
+                    For K := 0 To Comp.DM_ParameterCount - 1 Do
+                    Begin
+                        If Not FirstParam Then ParamList := ParamList + ',';
+                        FirstParam := False;
+                        ParamList := ParamList + '"' + EscapeJsonString(Comp.DM_Parameters(K).DM_Name) +
+                            '":"' + EscapeJsonString(Comp.DM_Parameters(K).DM_Value) + '"';
+                    End;
+                Except
                 End;
-            Except
             End;
 
             Data := '{"designator":"' + EscapeJsonString(Designator) + '"';
@@ -733,7 +784,8 @@ Begin
             Data := Data + ',"footprint":"' + EscapeJsonString(Comp.DM_Footprint) + '"';
             Data := Data + ',"lib_ref":"' + EscapeJsonString(Comp.DM_LibraryReference) + '"';
             Data := Data + ',"sheet":"' + EscapeJsonString(Doc.DM_FileName) + '"';
-            Data := Data + ',"parameters":{' + ParamList + '}';
+            If WithParameters Then
+                Data := Data + ',"parameters":{' + ParamList + '}';
             Data := Data + ',"pins":[' + PinList + ']}';
 
             Result := BuildSuccessResponse(RequestId, Data);
