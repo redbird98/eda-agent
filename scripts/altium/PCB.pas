@@ -434,23 +434,33 @@ Begin
         { -- Metadata -- }
         V := ExtractJsonValue(Params, 'enabled');
         If V <> '' Then
+        Begin
             Try Rule.Enabled := (V = 'true') Or (V = 'True') Or (V = '1'); Inc(UpdatedCount); Except End;
+        End;
 
         V := ExtractJsonValue(Params, 'priority');
         If V <> '' Then
+        Begin
             Try Rule.Priority := StrToIntDef(V, Rule.Priority); Inc(UpdatedCount); Except End;
+        End;
 
         V := ExtractJsonValue(Params, 'scope1');
         If V <> '' Then
+        Begin
             Try Rule.Scope1Expression := V; Inc(UpdatedCount); Except End;
+        End;
 
         V := ExtractJsonValue(Params, 'scope2');
         If V <> '' Then
+        Begin
             Try Rule.Scope2Expression := V; Inc(UpdatedCount); Except End;
+        End;
 
         V := ExtractJsonValue(Params, 'comment');
         If V <> '' Then
+        Begin
             Try Rule.Comment := V; Inc(UpdatedCount); Except End;
+        End;
 
         { -- Constraint values, dispatched by Rule.RuleKind -- }
 
@@ -509,20 +519,28 @@ Begin
             Try RuleHole := Rule; Except End;
             V := ExtractJsonValue(Params, 'min_hole_size_mils');
             If V <> '' Then
+            Begin
                 Try RuleHole.MinLimit := MilsToCoord(StrToIntDef(V, 0)); Inc(UpdatedCount); Except End;
+            End;
             V := ExtractJsonValue(Params, 'max_hole_size_mils');
             If V <> '' Then
+            Begin
                 Try RuleHole.MaxLimit := MilsToCoord(StrToIntDef(V, 0)); Inc(UpdatedCount); Except End;
+            End;
         End
         Else If Kind = eRule_ComponentClearance Then
         Begin
             Try RuleCompClear := Rule; Except End;
             V := ExtractJsonValue(Params, 'gap_mils');
             If V <> '' Then
+            Begin
                 Try RuleCompClear.Gap := MilsToCoord(StrToIntDef(V, 0)); Inc(UpdatedCount); Except End;
+            End;
             V := ExtractJsonValue(Params, 'vertical_gap_mils');
             If V <> '' Then
+            Begin
                 Try RuleCompClear.VerticalGap := MilsToCoord(StrToIntDef(V, 0)); Inc(UpdatedCount); Except End;
+            End;
         End;
 
         PCBServer.SendMessageToRobots(Rule.I_ObjectAddress, c_Broadcast,
