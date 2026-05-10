@@ -979,7 +979,7 @@ End;
 { accessors. Each access is wrapped in Try/Except since not every property  }
 { is present on every ISch_Label subtype, and DelphiScript fails at runtime }
 { rather than compile time on a missing late-bound property.                 }
-Function BuildLabelStyleJson(Label : ISch_GraphicalObject; IncludeText : Boolean) : String;
+Function BuildLabelStyleJson(Lbl : ISch_GraphicalObject; IncludeText : Boolean) : String;
 Var
     Txt : String;
     FontId, ColorVal, OrientVal, JustVal, LocX, LocY : Integer;
@@ -993,14 +993,14 @@ Begin
     LocX := 0;
     LocY := 0;
     HiddenVal := False;
-    Try Txt := Label.Text; Except End;
-    Try FontId := Label.FontId; Except End;
-    Try ColorVal := Label.Color; Except End;
-    Try HiddenVal := Label.IsHidden; Except End;
-    Try LocX := CoordToMils(Label.Location.X); Except End;
-    Try LocY := CoordToMils(Label.Location.Y); Except End;
-    Try OrientVal := Label.Orientation; Except End;
-    Try JustVal := Label.Justification; Except End;
+    Try Txt := Lbl.Text; Except End;
+    Try FontId := Lbl.FontId; Except End;
+    Try ColorVal := Lbl.Color; Except End;
+    Try HiddenVal := Lbl.IsHidden; Except End;
+    Try LocX := CoordToMils(Lbl.Location.X); Except End;
+    Try LocY := CoordToMils(Lbl.Location.Y); Except End;
+    Try OrientVal := Lbl.Orientation; Except End;
+    Try JustVal := Lbl.Justification; Except End;
 
     Result := '{';
     If IncludeText Then
