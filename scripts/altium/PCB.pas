@@ -2140,9 +2140,10 @@ Var
     RuleClear : IPCB_ClearanceConstraint;
     RuleWidth : IPCB_MaxMinWidthConstraint;
     RuleHole : IPCB_MaxMinHoleSizeConstraint;
+    RuleDiff : IPCB_DifferentialPairsRoutingRule;
     RuleTypeStr, RuleName, ValueStr, MaxValueStr, FavoredValueStr : String;
-    ScopeStr, NetScopeStr : String;
-    RuleValue, MaxValue, FavoredValue, NetScopeVal : Integer;
+    ScopeStr, NetScopeStr, MaxUncoupStr : String;
+    RuleValue, MaxValue, FavoredValue, MaxUncoupledLength, NetScopeVal : Integer;
     HasMaxValue : Boolean;
     L : TLayer;
 Begin
@@ -2158,6 +2159,7 @@ Begin
     ValueStr := ExtractJsonValue(Params, 'value');
     MaxValueStr := ExtractJsonValue(Params, 'max_value');
     FavoredValueStr := ExtractJsonValue(Params, 'favored_value');
+    MaxUncoupStr := ExtractJsonValue(Params, 'max_uncoupled_length');
     ScopeStr := ExtractJsonValue(Params, 'scope');
     NetScopeStr := LowerCase(ExtractJsonValue(Params, 'net_scope'));
 
@@ -2191,6 +2193,7 @@ Begin
     HasMaxValue := MaxValueStr <> '';
     MaxValue := StrToIntDef(MaxValueStr, RuleValue * 5);
     FavoredValue := StrToIntDef(FavoredValueStr, RuleValue);
+    MaxUncoupledLength := StrToIntDef(MaxUncoupStr, 1000);
 
     { Constraint values are NOT properties of the base IPCB_Rule interface,    }
     { they live on the per-kind subtypes (IPCB_ClearanceConstraint,            }
@@ -2243,11 +2246,35 @@ Begin
                 RuleHole.Scope1Expression := ScopeStr;
             Rule := RuleHole;
         End
+        Else If RuleTypeStr = 'differential_pairs' Then
+        Begin
+            { IPCB_DifferentialPairsRoutingRule exposes MinGap / MaxGap /     }
+            { PreferedGap (note spelling) as layer-indexed properties, and    }
+            { MaxUncoupledLength as a single scalar. value -> MinGap, max_   }
+            { value -> MaxGap, favored_value -> PreferedGap. The width       }
+            { constraints shown in the rule's descriptor come from a         }
+            { separate Width rule scoped to the diff pair, not from this    }
+            { interface; create that separately if needed.                    }
+            RuleDiff := PCBServer.PCBRuleFactory(eRule_DifferentialPairsRouting);
+            RuleDiff.Name := RuleName;
+            RuleDiff.NetScope := NetScopeVal;
+            RuleDiff.LayerKind := eRuleLayerKind_SameLayer;
+            For L := MinLayer To MaxLayer Do
+            Begin
+                RuleDiff.MinGap(L) := MilsToCoord(RuleValue);
+                RuleDiff.MaxGap(L) := MilsToCoord(MaxValue);
+                RuleDiff.PreferedGap(L) := MilsToCoord(FavoredValue);
+            End;
+            Try RuleDiff.MaxUncoupledLength := MilsToCoord(MaxUncoupledLength); Except End;
+            If ScopeStr <> '' Then
+                RuleDiff.Scope1Expression := ScopeStr;
+            Rule := RuleDiff;
+        End
         Else
         Begin
             PCBServer.PostProcess;
             Result := BuildErrorResponse(RequestId, 'INVALID_PARAM',
-                'Unknown rule_type: ' + RuleTypeStr + '. Use clearance, width, or via_size');
+                'Unknown rule_type: ' + RuleTypeStr + '. Use clearance, width, via_size, or differential_pairs');
             Exit;
         End;
 

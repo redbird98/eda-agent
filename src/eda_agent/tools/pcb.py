@@ -832,6 +832,7 @@ def register_pcb_tools(mcp):
         value: int = 10,
         max_value: Optional[int] = None,
         favored_value: Optional[int] = None,
+        max_uncoupled_length: Optional[int] = None,
         scope: str = "",
         net_scope: str = "different_nets",
     ) -> dict[str, Any]:
@@ -845,20 +846,35 @@ def register_pcb_tools(mcp):
                     in mils; max_value / favored_value optional).
                 ``"via_size"`` - Hole size constraint (value = min hole
                     in mils; max_value optional).
-            value: Rule's primary value in mils. For width / via_size
-                this is the MIN side. Default 10.
-            max_value: For width / via_size only. When supplied, sets the
-                MAX side independently of value. When None, falls back to
-                5x value (the legacy default; bug-compatible with old
-                callers).
-            favored_value: For width only. Sets the preferred width.
-                Defaults to value when None.
-            scope: Optional query expression for Scope1 (e.g.,
-                ``"InNet('GND')"``, ``"All"``).
+                ``"differential_pairs"`` - Differential-pair routing rule
+                    (value = min gap, max_value = max gap,
+                    favored_value = preferred gap, max_uncoupled_length =
+                    max uncoupled length in mils).
+            value: Rule's primary value in mils. For width / via_size /
+                differential_pairs this is the MIN side. Default 10.
+            max_value: For width / via_size / differential_pairs. When
+                supplied, sets the MAX side independently of value. When
+                None, falls back to 5x value (legacy default).
+            favored_value: For width / differential_pairs. Sets the
+                preferred value. Defaults to value when None.
+            max_uncoupled_length: For differential_pairs only.
+                MaxUncoupledLength in mils (single scalar, not per-layer).
+                Defaults to 1000 mils when None.
+            scope: Optional query expression for Scope1. Pick the
+                predicate that matches the rule kind:
+                  - net-based rules (clearance, width, via_size):
+                    ``"InNet('GND')"``, ``"InNetClass('Power')"``,
+                    ``"All"``.
+                  - differential_pairs: ``"InDifferentialPair('USB')"``,
+                    ``"InDifferentialPairClass('HighSpeed')"``,
+                    ``"IsDifferentialPair"`` (matches any diff pair),
+                    or ``"All"``.
+                Mixing predicates across kinds (e.g., ``InNet`` on a
+                differential_pairs rule) creates a rule that never matches.
             net_scope: Which nets the rule applies between. Options:
                 ``"different_nets"`` (default) for Clearance rules;
                 ``"any_net"`` for all-pairs; ``"same_net"`` for same-net
-                only.
+                only. Has no effect on differential_pairs.
 
         Returns:
             Dictionary with created rule details.
@@ -882,6 +898,8 @@ def register_pcb_tools(mcp):
             params["max_value"] = str(max_value)
         if favored_value is not None:
             params["favored_value"] = str(favored_value)
+        if max_uncoupled_length is not None:
+            params["max_uncoupled_length"] = str(max_uncoupled_length)
         if scope:
             params["scope"] = scope
         result = await bridge.send_command_async("pcb.create_design_rule", params)
