@@ -7,6 +7,35 @@
 {..............................................................................}
 
 {..............................................................................}
+{ Helper: Move an IPCB_Component to a new position via the inherited           }
+{ IPCB_GraphicalObject.MoveToXY API.                                           }
+{                                                                              }
+{ DO NOT write `Comp.X := value` or `Comp.Y := value` on IPCB_Component.       }
+{ The Altium PCB API reference does not declare X or Y on IPCB_Component's    }
+{ property surface (IPCB_GraphicalObject only exposes Location as a            }
+{ TLocation record getter and MoveToXY/MoveByXY as the writable setters).      }
+{ DelphiScript still compiles `Comp.x := ...` because of IDispatch late       }
+{ binding, but at runtime the dispatch falls through to a stub that crashes   }
+{ the script engine with "Could not convert variant of type (OleStr) into     }
+{ type (Double)". Use these helpers anywhere a component needs to move.        }
+
+Procedure SetCompX(Comp : IPCB_Component; NewX : TCoord);
+Var
+    Loc : TLocation;
+Begin
+    Loc := Comp.GetState_Location;
+    Comp.MoveToXY(NewX, Loc.Y);
+End;
+
+Procedure SetCompY(Comp : IPCB_Component; NewY : TCoord);
+Var
+    Loc : TLocation;
+Begin
+    Loc := Comp.GetState_Location;
+    Comp.MoveToXY(Loc.X, NewY);
+End;
+
+{..............................................................................}
 { Helper: Find a net object by name on the given board.                       }
 { Returns Nil if not found.                                                   }
 {..............................................................................}
@@ -749,8 +778,9 @@ Function PCB_MoveComponent(Params : String; RequestId : String) : String;
 Var
     Board : IPCB_Board;
     Comp : IPCB_Component;
+    Loc : TLocation;
     DesStr, XStr, YStr, RotStr : String;
-    NewX, NewY : Integer;
+    NewX, NewY, FinalX, FinalY : Integer;
     NewRot : Double;
     HasX, HasY, HasRot : Boolean;
 Begin
@@ -788,14 +818,24 @@ Begin
     If HasY Then NewY := StrToIntDef(YStr, 0);
     If HasRot Then NewRot := StrToFloatDef(RotStr, 0);
 
-    // Modify the component
+    { IPCB_Component's property surface does NOT expose X / Y as writable     }
+    { properties (despite many sibling interfaces doing so), the writable    }
+    { setter is the inherited IPCB_GraphicalObject.MoveToXY(X, Y) procedure.  }
+    { Assigning to Comp.x / Comp.y was silently routed through DelphiScript's }
+    { IDispatch fallback and crashed the engine with a runtime "Could not    }
+    { convert variant of type (OleStr) into type (Double)" error. For        }
+    { partial updates we read the current Location and substitute only the   }
+    { supplied axis.                                                          }
+    Loc := Comp.GetState_Location;
+    If HasX Then FinalX := MilsToCoord(NewX) Else FinalX := Loc.X;
+    If HasY Then FinalY := MilsToCoord(NewY) Else FinalY := Loc.Y;
+
     PCBServer.PreProcess;
     Try
         PCBServer.SendMessageToRobots(Comp.I_ObjectAddress, c_Broadcast,
             PCBM_BeginModify, c_NoEventData);
 
-        If HasX Then Comp.x := MilsToCoord(NewX);
-        If HasY Then Comp.y := MilsToCoord(NewY);
+        If HasX Or HasY Then Comp.MoveToXY(FinalX, FinalY);
         If HasRot Then Comp.Rotation := NewRot;
 
         PCBServer.SendMessageToRobots(Comp.I_ObjectAddress, c_Broadcast,
@@ -806,10 +846,11 @@ Begin
 
     SaveDocByPath(Board.FileName);
 
+    Loc := Comp.GetState_Location;
     Result := BuildSuccessResponse(RequestId,
         '{"designator":"' + EscapeJsonString(DesStr) + '",'
-        + '"x":' + IntToStr(CoordToMils(Comp.x)) + ','
-        + '"y":' + IntToStr(CoordToMils(Comp.y)) + ','
+        + '"x":' + IntToStr(CoordToMils(Loc.X)) + ','
+        + '"y":' + IntToStr(CoordToMils(Loc.Y)) + ','
         + '"rotation":' + FloatToJsonStr(Comp.Rotation) + '}');
 End;
 
@@ -825,11 +866,12 @@ Function PCB_BatchMoveComponents(Params : String; RequestId : String) : String;
 Var
     Board : IPCB_Board;
     Comp : IPCB_Component;
+    Loc : TLocation;
     MovesStr, MoveStr, Remaining : String;
     PipePos, CommaPos, Applied, Failed, I : Integer;
     FieldVals : Array[0..3] Of String;
     Desig, XStr, YStr, RotStr : String;
-    NewX, NewY : Integer;
+    NewX, NewY, FinalX, FinalY : Integer;
     NewRot : Double;
     HasX, HasY, HasRot : Boolean;
 Begin
@@ -913,11 +955,17 @@ Begin
             If HasY Then NewY := StrToIntDef(YStr, 0);
             If HasRot Then NewRot := StrToFloatDef(RotStr, 0);
 
+            { See PCB_MoveComponent for why Comp.x / Comp.y assignment is    }
+            { wrong: IPCB_Component does not expose X/Y as writable           }
+            { properties, the right setter is the inherited MoveToXY method.}
+            Loc := Comp.GetState_Location;
+            If HasX Then FinalX := MilsToCoord(NewX) Else FinalX := Loc.X;
+            If HasY Then FinalY := MilsToCoord(NewY) Else FinalY := Loc.Y;
+
             PCBServer.SendMessageToRobots(Comp.I_ObjectAddress, c_Broadcast,
                 PCBM_BeginModify, c_NoEventData);
 
-            If HasX Then Comp.x := MilsToCoord(NewX);
-            If HasY Then Comp.y := MilsToCoord(NewY);
+            If HasX Or HasY Then Comp.MoveToXY(FinalX, FinalY);
             If HasRot Then Comp.Rotation := NewRot;
 
             PCBServer.SendMessageToRobots(Comp.I_ObjectAddress, c_Broadcast,
@@ -2588,17 +2636,17 @@ Begin
                 PCBM_BeginModify, c_NoEventData);
 
             If AlignStr = 'left' Then
-                Comps[I].x := MilsToCoord(MinX)
+                SetCompX(Comps[I], MilsToCoord(MinX))
             Else If AlignStr = 'right' Then
-                Comps[I].x := MilsToCoord(MaxX)
+                SetCompX(Comps[I], MilsToCoord(MaxX))
             Else If AlignStr = 'top' Then
-                Comps[I].y := MilsToCoord(MaxY)
+                SetCompY(Comps[I], MilsToCoord(MaxY))
             Else If AlignStr = 'bottom' Then
-                Comps[I].y := MilsToCoord(MinY)
+                SetCompY(Comps[I], MilsToCoord(MinY))
             Else If AlignStr = 'center_x' Then
-                Comps[I].x := MilsToCoord(CenterX)
+                SetCompX(Comps[I], MilsToCoord(CenterX))
             Else If AlignStr = 'center_y' Then
-                Comps[I].y := MilsToCoord(CenterY);
+                SetCompY(Comps[I], MilsToCoord(CenterY));
 
             PCBServer.SendMessageToRobots(Comps[I].I_ObjectAddress, c_Broadcast,
                 PCBM_EndModify, c_NoEventData);
@@ -2728,8 +2776,7 @@ Begin
         PCBServer.SendMessageToRobots(Comp.I_ObjectAddress, c_Broadcast,
             PCBM_BeginModify, c_NoEventData);
 
-        Comp.x := MilsToCoord(NewX);
-        Comp.y := MilsToCoord(NewY);
+        Comp.MoveToXY(MilsToCoord(NewX), MilsToCoord(NewY));
 
         PCBServer.SendMessageToRobots(Comp.I_ObjectAddress, c_Broadcast,
             PCBM_EndModify, c_NoEventData);
@@ -4316,9 +4363,9 @@ Begin
             PCBServer.SendMessageToRobots(Comp.I_ObjectAddress, c_Broadcast,
                 PCBM_BeginModify, c_NoEventData);
             If AxisX Then
-                Comp.x := MilsToCoord(NewPos)
+                SetCompX(Comp, MilsToCoord(NewPos))
             Else
-                Comp.y := MilsToCoord(NewPos);
+                SetCompY(Comp, MilsToCoord(NewPos));
             PCBServer.SendMessageToRobots(Comp.I_ObjectAddress, c_Broadcast,
                 PCBM_EndModify, c_NoEventData);
         End;
