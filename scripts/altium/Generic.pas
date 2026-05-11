@@ -1765,8 +1765,8 @@ Begin
         ',"y2":' + IntToStr(Y2) +
         ',"dx":' + IntToStr(DX) +
         ',"dy":' + IntToStr(DY) +
-        ',"distance_mils":' + FloatToStr(Distance) +
-        ',"distance_mm":' + FloatToStr(Distance * 0.0254) + '}');
+        ',"distance_mils":' + FloatToJsonStr(Distance) +
+        ',"distance_mm":' + FloatToJsonStr(Distance * 0.0254) + '}');
 End;
 
 {..............................................................................}

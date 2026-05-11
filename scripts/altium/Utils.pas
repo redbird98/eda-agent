@@ -30,22 +30,52 @@ Begin
     Else Result := 'false';
 End;
 
+Function FloatToJsonStr(Value : Double) : String;
+Var
+    OldSep : Char;
+Begin
+    { Locale-agnostic float -> string. Delphi FloatToStr respects the global }
+    { DecimalSeparator, so on a system with comma-as-decimal it produces     }
+    { '90,0' which is invalid JSON. Force '.' for the duration of the call. }
+    OldSep := DecimalSeparator;
+    DecimalSeparator := '.';
+    Try
+        Result := FloatToStr(Value);
+    Finally
+        DecimalSeparator := OldSep;
+    End;
+End;
+
 Function StrToBool(S : String) : Boolean;
 Begin
     Result := (LowerCase(S) = 'true') Or (S = '1');
 End;
 
 Function StrToFloatDef(S : String; Default : Double) : Double;
+Var
+    OldSep : Char;
 Begin
+    { Locale-agnostic float parsing. JSON always uses '.' as the decimal      }
+    { separator regardless of the user's Windows regional settings, but Delphi}
+    { StrToFloat respects the global DecimalSeparator, so on a system with    }
+    { comma-as-decimal (much of Europe) parsing "90.0" silently fails and     }
+    { the default value comes back instead. Temporarily force '.' for the    }
+    { duration of the parse, then restore whatever the system set.            }
     If (S = '') Or (S = 'null') Then
-        Result := Default
-    Else
     Begin
+        Result := Default;
+        Exit;
+    End;
+    OldSep := DecimalSeparator;
+    DecimalSeparator := '.';
+    Try
         Try
             Result := StrToFloat(S);
         Except
             Result := Default;
         End;
+    Finally
+        DecimalSeparator := OldSep;
     End;
 End;
 

@@ -726,7 +726,7 @@ Begin
             + '"comment":"' + EscapeJsonString(CommentStr) + '",'
             + '"x":' + IntToStr(CoordToMils(Comp.x)) + ','
             + '"y":' + IntToStr(CoordToMils(Comp.y)) + ','
-            + '"rotation":' + FloatToStr(Comp.Rotation) + ','
+            + '"rotation":' + FloatToJsonStr(Comp.Rotation) + ','
             + '"layer":"' + EscapeJsonString(LayerStr) + '",'
             + '"footprint":"' + EscapeJsonString(Footprint) + '",'
             + '"source_designator":"' + EscapeJsonString(SrcDesignator) + '",'
@@ -810,7 +810,7 @@ Begin
         '{"designator":"' + EscapeJsonString(DesStr) + '",'
         + '"x":' + IntToStr(CoordToMils(Comp.x)) + ','
         + '"y":' + IntToStr(CoordToMils(Comp.y)) + ','
-        + '"rotation":' + FloatToStr(Comp.Rotation) + '}');
+        + '"rotation":' + FloatToJsonStr(Comp.Rotation) + '}');
 End;
 
 {..............................................................................}
@@ -1047,7 +1047,7 @@ Begin
         If Not First Then JsonItems := JsonItems + ',';
         First := False;
         JsonItems := JsonItems + '{"net":"' + EscapeJsonString(NetNames[I]) + '",'
-            + '"length_mils":' + FloatToStr(NetLengths[I]) + '}';
+            + '"length_mils":' + FloatToJsonStr(NetLengths[I]) + '}';
     End;
 
     Result := BuildSuccessResponse(RequestId,
@@ -1117,10 +1117,10 @@ Begin
 
         JsonItems := JsonItems + '{"name":"' + EscapeJsonString(LayerName) + '",'
             + '"order":' + IntToStr(Count + 1) + ','
-            + '"copper_thickness_mils":' + FloatToStr(CopperThickMils) + ','
+            + '"copper_thickness_mils":' + FloatToJsonStr(CopperThickMils) + ','
             + '"dielectric_type":"' + EscapeJsonString(DielectricType) + '",'
-            + '"dielectric_height_mils":' + FloatToStr(DielectricHeightMils) + ','
-            + '"dielectric_constant":' + FloatToStr(DielectricConst) + '}';
+            + '"dielectric_height_mils":' + FloatToJsonStr(DielectricHeightMils) + ','
+            + '"dielectric_constant":' + FloatToJsonStr(DielectricConst) + '}';
         Inc(Count);
         LayerObj := LayerStack.NextLayer(LayerObj);
     End;
@@ -1407,8 +1407,8 @@ Begin
             JsonItems := JsonItems + ','
                 + '"cx":' + IntToStr(CoordToMils(Outline.Segments[I].cx)) + ','
                 + '"cy":' + IntToStr(CoordToMils(Outline.Segments[I].cy)) + ','
-                + '"angle1":' + FloatToStr(Outline.Segments[I].Angle1) + ','
-                + '"angle2":' + FloatToStr(Outline.Segments[I].Angle2);
+                + '"angle1":' + FloatToJsonStr(Outline.Segments[I].Angle1) + ','
+                + '"angle2":' + FloatToJsonStr(Outline.Segments[I].Angle2);
         End;
 
         JsonItems := JsonItems + '}';
@@ -1914,8 +1914,8 @@ Begin
         + '"x_center":' + IntToStr(ArcXC) + ','
         + '"y_center":' + IntToStr(ArcYC) + ','
         + '"radius":' + IntToStr(ArcRad) + ','
-        + '"start_angle":' + FloatToStr(ArcSA) + ','
-        + '"end_angle":' + FloatToStr(ArcEA) + ','
+        + '"start_angle":' + FloatToJsonStr(ArcSA) + ','
+        + '"end_angle":' + FloatToJsonStr(ArcEA) + ','
         + '"width":' + IntToStr(ArcWidth) + ','
         + '"layer":"' + EscapeJsonString(GetLayerString(Arc.Layer)) + '"}');
 End;
@@ -2001,7 +2001,7 @@ Begin
         + '"x":' + IntToStr(TX) + ','
         + '"y":' + IntToStr(TY) + ','
         + '"height":' + IntToStr(THeight) + ','
-        + '"rotation":' + FloatToStr(TRot) + ','
+        + '"rotation":' + FloatToJsonStr(TRot) + ','
         + '"layer":"' + EscapeJsonString(GetLayerString(TextObj.Layer)) + '"}');
 End;
 
@@ -2143,7 +2143,7 @@ Var
     RuleDiff : IPCB_DifferentialPairsRoutingRule;
     RuleTypeStr, RuleName, ValueStr, MaxValueStr, FavoredValueStr : String;
     ScopeStr, NetScopeStr, MaxUncoupStr : String;
-    RuleValue, MaxValue, FavoredValue, MaxUncoupledLength, NetScopeVal : Integer;
+    RuleValue, MaxValue, FavoredValue, MaxUncoupVal, NetScopeVal : Integer;
     HasMaxValue : Boolean;
     L : TLayer;
 Begin
@@ -2193,7 +2193,7 @@ Begin
     HasMaxValue := MaxValueStr <> '';
     MaxValue := StrToIntDef(MaxValueStr, RuleValue * 5);
     FavoredValue := StrToIntDef(FavoredValueStr, RuleValue);
-    MaxUncoupledLength := StrToIntDef(MaxUncoupStr, 1000);
+    MaxUncoupVal := StrToIntDef(MaxUncoupStr, 1000);
 
     { Constraint values are NOT properties of the base IPCB_Rule interface,    }
     { they live on the per-kind subtypes (IPCB_ClearanceConstraint,            }
@@ -2249,12 +2249,13 @@ Begin
         Else If RuleTypeStr = 'differential_pairs' Then
         Begin
             { IPCB_DifferentialPairsRoutingRule exposes MinGap / MaxGap /     }
-            { PreferedGap (note spelling) as layer-indexed properties, and    }
-            { MaxUncoupledLength as a single scalar. value -> MinGap, max_   }
-            { value -> MaxGap, favored_value -> PreferedGap. The width       }
-            { constraints shown in the rule's descriptor come from a         }
+            { PreferedGap (note SDK spelling: one 'r') as layer-indexed      }
+            { properties, and MaxUncoupledLength as a single scalar. value ->}
+            { MinGap, max_value -> MaxGap, favored_value -> PreferedGap. The }
+            { width constraints shown in the rule's descriptor come from a   }
             { separate Width rule scoped to the diff pair, not from this    }
-            { interface; create that separately if needed.                    }
+            { interface; create that separately with rule_type='width' if   }
+            { needed.                                                          }
             RuleDiff := PCBServer.PCBRuleFactory(eRule_DifferentialPairsRouting);
             RuleDiff.Name := RuleName;
             RuleDiff.NetScope := NetScopeVal;
@@ -2265,7 +2266,7 @@ Begin
                 RuleDiff.MaxGap(L) := MilsToCoord(MaxValue);
                 RuleDiff.PreferedGap(L) := MilsToCoord(FavoredValue);
             End;
-            Try RuleDiff.MaxUncoupledLength := MilsToCoord(MaxUncoupledLength); Except End;
+            RuleDiff.MaxUncoupledLength := MilsToCoord(MaxUncoupVal);
             If ScopeStr <> '' Then
                 RuleDiff.Scope1Expression := ScopeStr;
             Rule := RuleDiff;
@@ -2426,7 +2427,7 @@ Begin
             + '"hole_size":' + IntToStr(CoordToMils(Pad.HoleSize)) + ','
             + '"top_x_size":' + IntToStr(CoordToMils(Pad.TopXSize)) + ','
             + '"top_y_size":' + IntToStr(CoordToMils(Pad.TopYSize)) + ','
-            + '"rotation":' + FloatToStr(Pad.Rotation) + '}';
+            + '"rotation":' + FloatToJsonStr(Pad.Rotation) + '}';
         Inc(Count);
         Pad := GrpIter.NextPCBObject;
     End;
@@ -2986,7 +2987,7 @@ Begin
     Result := BuildSuccessResponse(RequestId,
         '{"deleted":true,'
         + '"object_type":"' + EscapeJsonString(ObjTypeStr) + '",'
-        + '"distance_mils":' + FloatToStr(BestDist) + '}');
+        + '"distance_mils":' + FloatToJsonStr(BestDist) + '}');
 End;
 
 {..............................................................................}
@@ -3088,7 +3089,7 @@ Begin
             + '"top_x_size":' + IntToStr(CoordToMils(Pad.TopXSize)) + ','
             + '"top_y_size":' + IntToStr(CoordToMils(Pad.TopYSize)) + ','
             + '"hole_size":' + IntToStr(CoordToMils(Pad.HoleSize)) + ','
-            + '"rotation":' + FloatToStr(Pad.Rotation) + ','
+            + '"rotation":' + FloatToJsonStr(Pad.Rotation) + ','
             + '"is_smd":' + BoolToJsonStr(Pad.IsSurfaceMount) + ','
             + '"solder_mask_expansion":' + IntToStr(SolderMask) + ','
             + '"paste_mask_expansion":' + IntToStr(PasteMask) + '}';
@@ -3749,10 +3750,10 @@ Begin
         + '"text_count":' + IntToStr(TextCount) + ','
         + '"polygon_count":' + IntToStr(PolyCount) + ','
         + '"unrouted_connections":' + IntToStr(ConnCount) + ','
-        + '"total_trace_length_mils":' + FloatToStr(TotalTraceLen) + ','
-        + '"board_width_mils":' + FloatToStr(BoardWidth) + ','
-        + '"board_height_mils":' + FloatToStr(BoardHeight) + ','
-        + '"board_area_sq_mils":' + FloatToStr(BoardArea) + ','
+        + '"total_trace_length_mils":' + FloatToJsonStr(TotalTraceLen) + ','
+        + '"board_width_mils":' + FloatToJsonStr(BoardWidth) + ','
+        + '"board_height_mils":' + FloatToJsonStr(BoardHeight) + ','
+        + '"board_area_sq_mils":' + FloatToJsonStr(BoardArea) + ','
         + '"layer_count":' + IntToStr(LayerCount) + ','
         + '"board_name":"' + EscapeJsonString(ExtractFileName(Board.FileName)) + '"}');
 End;
@@ -3802,7 +3803,7 @@ Begin
             + '"comment":"' + EscapeJsonString(Comment) + '",'
             + '"x":' + IntToStr(CoordToMils(Comp.x)) + ','
             + '"y":' + IntToStr(CoordToMils(Comp.y)) + ','
-            + '"rotation":' + FloatToStr(Comp.Rotation) + ','
+            + '"rotation":' + FloatToJsonStr(Comp.Rotation) + ','
             + '"layer":"' + EscapeJsonString(LayerStr) + '",';
         If Comp.Layer = eTopLayer Then
             JsonItems := JsonItems + '"side":"Top"}'
