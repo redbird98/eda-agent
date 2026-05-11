@@ -1587,41 +1587,66 @@ def register_pcb_tools(mcp):
     async def pcb_set_rule_properties(
         name: str,
         enabled: bool | None = None,
-        priority: int | None = None,
         scope1: str | None = None,
         scope2: str | None = None,
         comment: str | None = None,
+        gap_mils: int | None = None,
+        min_width_mils: int | None = None,
+        max_width_mils: int | None = None,
+        favored_width_mils: int | None = None,
+        min_hole_size_mils: int | None = None,
+        max_hole_size_mils: int | None = None,
     ) -> dict[str, Any]:
-        """Update metadata of a named PCB design rule.
+        """Update metadata AND constraint values of a named PCB design rule.
 
-        Constraint values (gap, width, hole size, ...) are NOT writable
-        from this tool. Multiple attempts to dispatch constraint writes
-        through DelphiScript locals crashed Altium's script engine; the
-        proven write path is still under investigation. To change a
-        constraint value today, edit the rule in Altium's UI
-        (PCB > Rules and Constraints Editor), or recreate the rule via
-        ``pcb_create_design_rule`` which dispatches through
-        PCBRuleFactory at creation.
+        Metadata fields always apply. Constraint fields are dispatched
+        by the rule's underlying RuleKind:
+
+        - Clearance (kind 0), ComponentClearance (kind 24), and
+          HoleToHoleClearance (kind 52): ``gap_mils``. All three share
+          the Gap property on IPCB_ClearanceConstraint.
+        - Width (kind 2): ``min_width_mils`` / ``max_width_mils`` /
+          ``favored_width_mils`` (applied to every layer).
+        - HoleSize (kind 42): ``min_hole_size_mils`` / ``max_hole_size_mils``.
 
         Pass only the parameters you want to change; everything else
-        stays untouched.
+        stays untouched. Each successful field write increments
+        ``properties_updated`` in the response.
+
+        NOTE: Priority is NOT writable from this tool. ``IPCB_Rule.Priority``
+        is a read-only function in the PCB scripting API
+        (``Function Priority : TRulePrecedence``), not a property; there
+        is no ``SetState_Priority`` or ``SetPriority`` method either.
+        Assigning to it crashes the DelphiScript engine. To reorder rule
+        priorities, drag them in Altium's UI (PCB > Rules and Constraints
+        Editor; rules earlier in a category have higher priority).
 
         Args:
             name: Rule name to update.
             enabled: Whether DRC enforces the rule.
-            priority: Rule priority (lower number = higher priority).
             scope1 / scope2: Rule scope query expressions.
             comment: Free-form comment.
+            gap_mils: Clearance gap. Applies to Clearance,
+                ComponentClearance, and HoleToHoleClearance rules.
+            min_width_mils / max_width_mils / favored_width_mils:
+                Width constraint values (applied to every layer).
+            min_hole_size_mils / max_hole_size_mils: HoleSize
+                constraint limits.
 
         Returns:
-            Dict with name and properties_updated count.
+            Dict with name, rule_kind, and properties_updated count.
         """
         params: dict[str, Any] = {"name": name}
         for key, value in [
-            ("priority", priority),
             ("scope1", scope1),
             ("scope2", scope2),
             ("comment", comment),
+            ("gap_mils", gap_mils),
+            ("min_width_mils", min_width_mils),
+            ("max_width_mils", max_width_mils),
+            ("favored_width_mils", favored_width_mils),
+            ("min_hole_size_mils", min_hole_size_mils),
+            ("max_hole_size_mils", max_hole_size_mils),
         ]:
             if value is not None:
                 params[key] = str(value)
