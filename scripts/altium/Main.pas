@@ -13,7 +13,7 @@ Const
     // returns, mismatch means Altium is running a stale compiled script
     // (DelphiScript caches compiled units until the script project is
     // reopened or Altium is restarted).
-    SCRIPT_VERSION = '2026.05.11.6';
+    SCRIPT_VERSION = '2026.05.11.8';
 
     // Wire protocol version. Bumped whenever the request/response JSON shape
     // changes incompatibly. Python and Pascal must agree; mismatch returns
@@ -295,8 +295,14 @@ Var
     I : Integer;
     Path : String;
 Begin
-    Result := PCBServer.GetCurrentPCBBoard;
-    If Result <> Nil Then Exit;
+    Result := Nil;
+
+    { Note: an earlier implementation tried PCBServer.GetCurrentPCBBoard as a }
+    { fast path for the focused-PCB case. Some Altium builds flag that symbol }
+    { as "Undeclared identifier: GetCurrentPCBBoard" in the script IDE, even }
+    { though the SDK reference documents it as part of IPCB_ServerInterface.  }
+    { The iterator-based walk below covers every case the fast path covered, }
+    { so dropping the symbol reference avoids the parse-time IDE error.       }
 
     Workspace := GetWorkspace;
     If Workspace = Nil Then Exit;

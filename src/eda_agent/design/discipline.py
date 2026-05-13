@@ -136,6 +136,59 @@ these rules before producing a plan; they bound your choices.
   one pin and no port is "floating" and ERC will flag it. Power and ground
   nets with `is_power` / `is_ground` set are exempt because the power
   port carries the connection.
+
+## PCB placement discipline (post-ECO, layout phase)
+
+Once parts are on the PCB, moving them is a separate concern from the
+DesignPlan executor above. The same agent often drives both phases.
+Apply these rules whenever calling `pcb_move_component` /
+`pcb_move_components`.
+
+1. **Plan the whole cluster before moving anything.** Call
+   `pcb_get_components` once and read the full layout state: each
+   component's current (x, y, rotation, layer, footprint) and its
+   `bbox` (axis-aligned bounding rectangle in mils). Sketch the target
+   positions on paper or in text BEFORE issuing any move. A move tool
+   call is for *applying* a placement decision, not for *exploring*
+   one.
+
+2. **Check every proposed move against existing components.** Call
+   `pcb_check_placement_collision(designator, x, y, rotation?)` for
+   each part you intend to move. The tool returns `clear: true` when
+   the proposed bbox doesn't overlap any other component on the same
+   side, or `clear: false` with a `colliding` list. Adjust the (x, y)
+   until clear, THEN issue the move. Set `margin_mils` to require
+   extra clearance.
+
+3. **Place by functional cluster, not in arbitrary order.** Pick a
+   functional group (power input + filtering, an IC + its decoupling,
+   a connector + its ESD diodes), pick an anchor component, place it,
+   place its supporting parts around it, verify clearance per move,
+   then move on to the next cluster. This naturally avoids "I moved
+   the IC to (X,Y) and now there's nowhere for its caps" thrash.
+
+4. **Respect already-placed components.** Treat anything the user
+   placed by hand as fixed unless told otherwise. Don't move
+   pre-existing parts to make room; find space around them. If a
+   layout genuinely can't fit, surface that to the user rather than
+   shuffling their existing work.
+
+5. **Prefer bulk-batch moves when you've planned a whole cluster.**
+   `pcb_move_components` accepts a list of moves in one IPC call.
+   Use it once per cluster after you've collision-checked every move
+   individually. Don't loop `pcb_move_component` if you have N
+   pre-computed positions.
+
+6. **Mils, not millimetres, in the move tools.** Coordinates in
+   `pcb_move_component(s)` and `pcb_check_placement_collision` are
+   mils unless explicitly documented otherwise. Bounding boxes
+   returned by `pcb_get_components` are also mils.
+
+7. **Bottom-side components don't collide with top-side ones.** The
+   collision check applies same-side AABB only. If you flip a
+   component to bottom and place it under a top-side IC, that's a
+   legal solid-geometry overlap (different layers). Use DRC if you
+   need actual clearance rules enforced.
 """
 
 

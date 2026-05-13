@@ -217,6 +217,63 @@ def register_pcb_tools(mcp):
         return result
 
     @mcp.tool()
+    async def pcb_check_placement_collision(
+        designator: str,
+        x: int,
+        y: int,
+        rotation: Optional[float] = None,
+        margin_mils: int = 0,
+    ) -> dict[str, Any]:
+        """Dry-run check whether moving a component to (x, y[, rotation])
+        would overlap any other placed component on the same side.
+
+        DOES NOT actually move the component. Computes the predicted
+        axis-aligned bounding box at the proposed pose, then AABB-tests
+        against every other component's current bounding rect. Use this
+        BEFORE every `pcb_move_component` / `pcb_move_components` call
+        when placing parts on a board that already has placed parts.
+
+        Args:
+            designator: Component to test (must exist on the board).
+            x: Proposed X position in mils (component reference point).
+            y: Proposed Y position in mils.
+            rotation: Proposed rotation in degrees. When None the target's
+                current rotation is used. Quarter-turn deltas (~+/-90 from
+                current) swap the AABB dimensions; other angles use the
+                current-orientation bbox as an approximation.
+            margin_mils: Extra clearance to require around the target.
+                Default 0 (touching bounding boxes count as collision).
+
+        Returns:
+            Dict with:
+              - designator: target.
+              - proposed: {x, y, rotation, bbox:{x1,y1,x2,y2}, margin_mils}.
+              - clear: True if no collisions, False otherwise.
+              - colliding_count: number of collisions.
+              - colliding: list of {designator, bbox:{...}} per collider.
+
+        Caveats:
+            - AABB only; rotated non-square footprints will report an
+              inflated bbox.
+            - Same-side check is automatic; the target's bbox is compared
+              only against components on the same layer (Top vs Bottom).
+            - Does not detect courtyard violations or pad-to-pad clearances,
+              only solid-box overlap. Use DRC for actual clearance rules.
+        """
+        bridge = get_bridge()
+        params: dict[str, Any] = {
+            "designator": designator,
+            "x": str(int(x)),
+            "y": str(int(y)),
+            "margin_mils": str(int(margin_mils)),
+        }
+        if rotation is not None:
+            params["rotation"] = str(rotation)
+        return await bridge.send_command_async(
+            "pcb.check_placement_collision", params,
+        )
+
+    @mcp.tool()
     async def pcb_get_trace_lengths(
         net: str = "",
     ) -> dict[str, Any]:

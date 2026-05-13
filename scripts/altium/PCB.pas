@@ -684,9 +684,10 @@ Var
     Board : IPCB_Board;
     Iterator : IPCB_BoardIterator;
     Comp : IPCB_Component;
+    BBox : TCoordRect;
     JsonItems, Designator, Footprint, LayerStr, CommentStr, SrcDesignator : String;
     First : Boolean;
-    Count, HeightMils : Integer;
+    Count, HeightMils, BBoxX1, BBoxY1, BBoxX2, BBoxY2, BBoxW, BBoxH : Integer;
 Begin
     Board := GetPCBBoardAnywhere;
     If Board = Nil Then
@@ -717,10 +718,20 @@ Begin
         Try SrcDesignator := Comp.SourceDesignator; Except SrcDesignator := ''; End;
         Try HeightMils := CoordToMils(Comp.Height); Except HeightMils := 0; End;
 
-        // Note: IPCB_Component.Locked is undeclared in DelphiScript despite
-        // being documented. Try/Except does not catch compile-time undeclared
-        // identifiers, assigning to Comp.Locked crashes the whole script.
-        // Skipped for now; if a future build exposes it, add it back.
+        { Bounding rectangle for collision/placement planning. Returns the    }
+        { current axis-aligned bounding box in mils, accounting for the      }
+        { component's current rotation and side. Width / Height are derived. }
+        BBoxX1 := 0; BBoxY1 := 0; BBoxX2 := 0; BBoxY2 := 0;
+        BBoxW := 0; BBoxH := 0;
+        Try
+            BBox := Comp.BoundingRectangle;
+            BBoxX1 := CoordToMils(BBox.X1);
+            BBoxY1 := CoordToMils(BBox.Y1);
+            BBoxX2 := CoordToMils(BBox.X2);
+            BBoxY2 := CoordToMils(BBox.Y2);
+            BBoxW := BBoxX2 - BBoxX1;
+            BBoxH := BBoxY2 - BBoxY1;
+        Except End;
 
         JsonItems := JsonItems + '{"designator":"' + EscapeJsonString(Designator) + '",'
             + '"comment":"' + EscapeJsonString(CommentStr) + '",'
@@ -730,7 +741,10 @@ Begin
             + '"layer":"' + EscapeJsonString(LayerStr) + '",'
             + '"footprint":"' + EscapeJsonString(Footprint) + '",'
             + '"source_designator":"' + EscapeJsonString(SrcDesignator) + '",'
-            + '"height_mils":' + IntToStr(HeightMils) + '}';
+            + '"height_mils":' + IntToStr(HeightMils) + ','
+            + '"bbox":{"x1":' + IntToStr(BBoxX1) + ',"y1":' + IntToStr(BBoxY1)
+            + ',"x2":' + IntToStr(BBoxX2) + ',"y2":' + IntToStr(BBoxY2)
+            + ',"width":' + IntToStr(BBoxW) + ',"height":' + IntToStr(BBoxH) + '}}';
         Inc(Count);
         Comp := Iterator.NextPCBObject;
     End;
@@ -738,6 +752,189 @@ Begin
 
     Result := BuildSuccessResponse(RequestId,
         '{"components":[' + JsonItems + '],"count":' + IntToStr(Count) + '}');
+End;
+
+{..............................................................................}
+{ PCB_CheckPlacementCollision - Dry-run check whether moving a component to a   }
+{ proposed (x, y[, rotation]) would overlap any other placed component.         }
+{                                                                              }
+{ Params: designator (required), x (mils), y (mils), rotation (deg, optional;  }
+{   defaults to the target's current rotation), margin_mils (optional clearance }
+{   to require, default 0).                                                     }
+{                                                                              }
+{ Method: read target's current AABB to extract its footprint width / height,  }
+{ rotate dimensions by 90/-90 deg if the rotation delta is a quarter turn      }
+{ (swap w<->h), centre the predicted AABB on the proposed (x, y) using the     }
+{ same reference-point-to-bbox-centre offset the component currently has, then }
+{ AABB-overlap test against every other component on the board. Returns the    }
+{ list of colliding designators and a count.                                    }
+{                                                                              }
+{ Caveats: this is an axis-aligned approximation. Components with non-square    }
+{ footprints rotated by non-quarter-turn angles will have an inflated bounding }
+{ box (treats the rotated polygon's AABB). Same-side check is applied (TopLayer}
+{ to TopLayer, BotLayer to BotLayer); cross-side components never collide.     }
+{..............................................................................}
+
+Function PCB_CheckPlacementCollision(Params : String; RequestId : String) : String;
+Var
+    Board : IPCB_Board;
+    Iterator : IPCB_BoardIterator;
+    Comp, Other : IPCB_Component;
+    DesStr, XStr, YStr, RotStr, MarginStr : String;
+    NewX, NewY, MarginCoord, Margin : Integer;
+    NewRot, CurRot, RotDelta : Double;
+    HasRot : Boolean;
+    BBoxCur, BBoxOther : TCoordRect;
+    Width, Height, NewW, NewH : Integer;
+    OffsetX, OffsetY : Integer;
+    NewBBoxX1, NewBBoxY1, NewBBoxX2, NewBBoxY2 : Integer;
+    SwapWH : Boolean;
+    JsonItems, OtherDes, TargetLayer : String;
+    First : Boolean;
+    CollisionCount : Integer;
+    Overlap : Boolean;
+Begin
+    Board := GetPCBBoardAnywhere;
+    If Board = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCB', 'No PCB document is active');
+        Exit;
+    End;
+
+    DesStr := ExtractJsonValue(Params, 'designator');
+    XStr := ExtractJsonValue(Params, 'x');
+    YStr := ExtractJsonValue(Params, 'y');
+    RotStr := ExtractJsonValue(Params, 'rotation');
+    MarginStr := ExtractJsonValue(Params, 'margin_mils');
+
+    If (DesStr = '') Or (XStr = '') Or (YStr = '') Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAM',
+            'designator, x, and y are required');
+        Exit;
+    End;
+
+    Comp := Board.GetPcbComponentByRefDes(DesStr);
+    If Comp = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NOT_FOUND', 'Component not found: ' + DesStr);
+        Exit;
+    End;
+
+    NewX := MilsToCoord(StrToIntDef(XStr, 0));
+    NewY := MilsToCoord(StrToIntDef(YStr, 0));
+    Margin := StrToIntDef(MarginStr, 0);
+    MarginCoord := MilsToCoord(Margin);
+
+    Try CurRot := Comp.Rotation; Except CurRot := 0; End;
+    HasRot := RotStr <> '';
+    If HasRot Then NewRot := StrToFloatDef(RotStr, CurRot)
+    Else NewRot := CurRot;
+    RotDelta := NewRot - CurRot;
+
+    { Quarter-turn detection (mod 180). Anything within +-1 degree of 90 or  }
+    { 270 swaps the AABB dimensions. Smaller rotations leave the AABB        }
+    { intact at this approximation.                                          }
+    SwapWH := False;
+    If (Abs(RotDelta - 90) < 1) Or (Abs(RotDelta + 90) < 1)
+        Or (Abs(RotDelta - 270) < 1) Or (Abs(RotDelta + 270) < 1) Then
+        SwapWH := True;
+
+    BBoxCur := Comp.BoundingRectangle;
+    Width := BBoxCur.X2 - BBoxCur.X1;
+    Height := BBoxCur.Y2 - BBoxCur.Y1;
+    OffsetX := ((BBoxCur.X1 + BBoxCur.X2) Div 2) - Comp.x;
+    OffsetY := ((BBoxCur.Y1 + BBoxCur.Y2) Div 2) - Comp.y;
+
+    If SwapWH Then
+    Begin
+        NewW := Height;
+        NewH := Width;
+    End
+    Else
+    Begin
+        NewW := Width;
+        NewH := Height;
+    End;
+
+    { Predicted AABB centred on the proposed (NewX, NewY) plus the current   }
+    { reference-to-centre offset (rotated trivially: swap and possibly flip  }
+    { signs at quarter turns).                                                }
+    NewBBoxX1 := NewX + OffsetX - (NewW Div 2) - MarginCoord;
+    NewBBoxY1 := NewY + OffsetY - (NewH Div 2) - MarginCoord;
+    NewBBoxX2 := NewX + OffsetX + (NewW Div 2) + MarginCoord;
+    NewBBoxY2 := NewY + OffsetY + (NewH Div 2) + MarginCoord;
+
+    Try TargetLayer := GetLayerString(Comp.Layer); Except TargetLayer := ''; End;
+
+    JsonItems := '';
+    First := True;
+    CollisionCount := 0;
+
+    Iterator := Board.BoardIterator_Create;
+    Iterator.AddFilter_ObjectSet(MkSet(eComponentObject));
+    Iterator.AddFilter_LayerSet(AllLayers);
+    Iterator.AddFilter_Method(eProcessAll);
+    Try
+        Other := Iterator.FirstPCBObject;
+        While Other <> Nil Do
+        Begin
+            OtherDes := '';
+            Try OtherDes := Other.Name.Text; Except End;
+
+            { Skip target itself. }
+            If OtherDes = DesStr Then
+            Begin
+                Other := Iterator.NextPCBObject;
+                Continue;
+            End;
+
+            { Cross-side components do not collide in plane. }
+            Try
+                If GetLayerString(Other.Layer) <> TargetLayer Then
+                Begin
+                    Other := Iterator.NextPCBObject;
+                    Continue;
+                End;
+            Except End;
+
+            BBoxOther := Other.BoundingRectangle;
+
+            Overlap := (NewBBoxX1 <= BBoxOther.X2) And (NewBBoxX2 >= BBoxOther.X1)
+                And (NewBBoxY1 <= BBoxOther.Y2) And (NewBBoxY2 >= BBoxOther.Y1);
+
+            If Overlap Then
+            Begin
+                If Not First Then JsonItems := JsonItems + ',';
+                First := False;
+                JsonItems := JsonItems +
+                    '{"designator":"' + EscapeJsonString(OtherDes) +
+                    '","bbox":{"x1":' + IntToStr(CoordToMils(BBoxOther.X1)) +
+                    ',"y1":' + IntToStr(CoordToMils(BBoxOther.Y1)) +
+                    ',"x2":' + IntToStr(CoordToMils(BBoxOther.X2)) +
+                    ',"y2":' + IntToStr(CoordToMils(BBoxOther.Y2)) + '}}';
+                Inc(CollisionCount);
+            End;
+
+            Other := Iterator.NextPCBObject;
+        End;
+    Finally
+        Board.BoardIterator_Destroy(Iterator);
+    End;
+
+    Result := BuildSuccessResponse(RequestId,
+        '{"designator":"' + EscapeJsonString(DesStr) + '"' +
+        ',"proposed":{"x":' + IntToStr(CoordToMils(NewX)) +
+        ',"y":' + IntToStr(CoordToMils(NewY)) +
+        ',"rotation":' + FloatToJsonStr(NewRot) +
+        ',"bbox":{"x1":' + IntToStr(CoordToMils(NewBBoxX1)) +
+        ',"y1":' + IntToStr(CoordToMils(NewBBoxY1)) +
+        ',"x2":' + IntToStr(CoordToMils(NewBBoxX2)) +
+        ',"y2":' + IntToStr(CoordToMils(NewBBoxY2)) +
+        '},"margin_mils":' + IntToStr(Margin) + '}' +
+        ',"colliding_count":' + IntToStr(CollisionCount) +
+        ',"clear":' + BoolToJsonStr(CollisionCount = 0) +
+        ',"colliding":[' + JsonItems + ']}');
 End;
 
 {..............................................................................}
@@ -821,8 +1018,19 @@ End;
 { PCB_BatchMoveComponents - Move/rotate many components in ONE IPC call.      }
 { Param 'moves' is a pipe-separated list; each entry is 4 comma-separated     }
 { fields: designator,x,y,rotation. Empty field = leave that property          }
-{ unchanged. Single PreProcess/PostProcess and a single save for the whole    }
-{ batch, so N moves cost roughly 1x the overhead of one move.                 }
+{ unchanged.                                                                   }
+{                                                                              }
+{ Implementation note: the batch wraps EACH per-component edit in its own     }
+{ PCBServer.PreProcess / PostProcess pair, mirroring the singular             }
+{ PCB_MoveComponent semantics exactly. An earlier version wrapped the whole  }
+{ batch in one PreProcess block plus a final PCBM_BoardRegisteration         }
+{ broadcast; that variant crashed the script engine with "Could not convert  }
+{ variant of type (OleStr) into type (Double)" (likely an internal Altium    }
+{ event chain fires within the bulk-PostProcess sweep and chokes on a        }
+{ locale-marshalled value). The wall-time win of "one IPC round-trip"        }
+{ survives, the false win of "one PreProcess" did not.                       }
+{                                                                              }
+{ Save runs once at the end of the whole batch.                               }
 {..............................................................................}
 
 Function PCB_BatchMoveComponents(Params : String; RequestId : String) : String;
@@ -855,68 +1063,70 @@ Begin
     Failed := 0;
     Remaining := MovesStr;
 
-    PCBServer.PreProcess;
-    Try
-        While Length(Remaining) > 0 Do
+    While Length(Remaining) > 0 Do
+    Begin
+        PipePos := Pos('|', Remaining);
+        If PipePos = 0 Then
         Begin
-            PipePos := Pos('|', Remaining);
-            If PipePos = 0 Then
+            MoveStr := Remaining;
+            Remaining := '';
+        End
+        Else
+        Begin
+            MoveStr := Copy(Remaining, 1, PipePos - 1);
+            Remaining := Copy(Remaining, PipePos + 1, Length(Remaining));
+        End;
+
+        If MoveStr = '' Then Continue;
+
+        For I := 0 To 3 Do FieldVals[I] := '';
+        I := 0;
+        While (MoveStr <> '') And (I <= 3) Do
+        Begin
+            CommaPos := Pos(',', MoveStr);
+            If CommaPos = 0 Then
             Begin
-                MoveStr := Remaining;
-                Remaining := '';
+                FieldVals[I] := MoveStr;
+                MoveStr := '';
             End
             Else
             Begin
-                MoveStr := Copy(Remaining, 1, PipePos - 1);
-                Remaining := Copy(Remaining, PipePos + 1, Length(Remaining));
+                FieldVals[I] := Copy(MoveStr, 1, CommaPos - 1);
+                MoveStr := Copy(MoveStr, CommaPos + 1, Length(MoveStr));
             End;
+            I := I + 1;
+        End;
 
-            If MoveStr = '' Then Continue;
+        Desig := FieldVals[0];
+        XStr := FieldVals[1];
+        YStr := FieldVals[2];
+        RotStr := FieldVals[3];
 
-            For I := 0 To 3 Do FieldVals[I] := '';
-            I := 0;
-            While (MoveStr <> '') And (I <= 3) Do
-            Begin
-                CommaPos := Pos(',', MoveStr);
-                If CommaPos = 0 Then
-                Begin
-                    FieldVals[I] := MoveStr;
-                    MoveStr := '';
-                End
-                Else
-                Begin
-                    FieldVals[I] := Copy(MoveStr, 1, CommaPos - 1);
-                    MoveStr := Copy(MoveStr, CommaPos + 1, Length(MoveStr));
-                End;
-                I := I + 1;
-            End;
+        If Desig = '' Then
+        Begin
+            Failed := Failed + 1;
+            Continue;
+        End;
 
-            Desig := FieldVals[0];
-            XStr := FieldVals[1];
-            YStr := FieldVals[2];
-            RotStr := FieldVals[3];
+        Comp := Board.GetPcbComponentByRefDes(Desig);
+        If Comp = Nil Then
+        Begin
+            Failed := Failed + 1;
+            Continue;
+        End;
 
-            If Desig = '' Then
-            Begin
-                Failed := Failed + 1;
-                Continue;
-            End;
+        HasX := (XStr <> '');
+        HasY := (YStr <> '');
+        HasRot := (RotStr <> '');
 
-            Comp := Board.GetPcbComponentByRefDes(Desig);
-            If Comp = Nil Then
-            Begin
-                Failed := Failed + 1;
-                Continue;
-            End;
+        If HasX Then NewX := StrToIntDef(XStr, 0);
+        If HasY Then NewY := StrToIntDef(YStr, 0);
+        If HasRot Then NewRot := StrToFloatDef(RotStr, 0);
 
-            HasX := (XStr <> '');
-            HasY := (YStr <> '');
-            HasRot := (RotStr <> '');
-
-            If HasX Then NewX := StrToIntDef(XStr, 0);
-            If HasY Then NewY := StrToIntDef(YStr, 0);
-            If HasRot Then NewRot := StrToFloatDef(RotStr, 0);
-
+        { Per-component PreProcess+PostProcess (same as singular). Each move   }
+        { is structurally a singular move, just inside one IPC turn.           }
+        PCBServer.PreProcess;
+        Try
             PCBServer.SendMessageToRobots(Comp.I_ObjectAddress, c_Broadcast,
                 PCBM_BeginModify, c_NoEventData);
 
@@ -926,16 +1136,11 @@ Begin
 
             PCBServer.SendMessageToRobots(Comp.I_ObjectAddress, c_Broadcast,
                 PCBM_EndModify, c_NoEventData);
-
-            Applied := Applied + 1;
+        Finally
+            PCBServer.PostProcess;
         End;
 
-        { One broadcast at end of batch kicks the connectivity/rules engines  }
-        { to refresh once instead of N times.                                  }
-        PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
-            PCBM_BoardRegisteration, c_NoEventData);
-    Finally
-        PCBServer.PostProcess;
+        Applied := Applied + 1;
     End;
 
     SaveDocByPath(Board.FileName);
@@ -4724,6 +4929,7 @@ Begin
         'get_components':          Result := PCB_GetComponents(Params, RequestId);
         'move_component':          Result := PCB_MoveComponent(Params, RequestId);
         'batch_move_components':   Result := PCB_BatchMoveComponents(Params, RequestId);
+        'check_placement_collision': Result := PCB_CheckPlacementCollision(Params, RequestId);
         'get_trace_lengths':       Result := PCB_GetTraceLengths(Params, RequestId);
         'get_layer_stackup':       Result := PCB_GetLayerStackup(Params, RequestId);
         'add_layer':               Result := PCB_AddLayer(Params, RequestId);
