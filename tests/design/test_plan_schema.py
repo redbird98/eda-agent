@@ -229,3 +229,34 @@ def test_bom_line_round_trip() -> None:
 def test_open_questions_default_empty() -> None:
     plan = _valid_minimal_plan()
     assert plan.open_questions == []
+
+
+def test_part_manufacturer_and_mpn_default_to_none() -> None:
+    """Slice 4 schema extension: manufacturer + mpn are optional, None by default.
+
+    The executor stamps these onto the placed symbol so downstream BOM
+    extraction sees a populated column. Both must round-trip cleanly through
+    JSON and accept None without ValidationError.
+    """
+    p = Part(refdes="U1", lib_ref="LM7805", sheet="main")
+    assert p.manufacturer is None
+    assert p.mpn is None
+
+    explicit = Part(
+        refdes="U2",
+        lib_ref="LM7805",
+        sheet="main",
+        manufacturer="Texas Instruments",
+        mpn="LM7805CT",
+    )
+    assert explicit.manufacturer == "Texas Instruments"
+    assert explicit.mpn == "LM7805CT"
+
+    rehydrated = Part.model_validate_json(explicit.model_dump_json())
+    assert rehydrated.manufacturer == "Texas Instruments"
+    assert rehydrated.mpn == "LM7805CT"
+
+    # Round-trip with None values still produces None on the other side.
+    bare = Part.model_validate_json(p.model_dump_json())
+    assert bare.manufacturer is None
+    assert bare.mpn is None

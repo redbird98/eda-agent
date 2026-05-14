@@ -83,31 +83,157 @@ these rules before producing a plan; they bound your choices.
 11. **Zones are optional** placement guidance for the executor. Use them
     to cluster decoupling near its IC, separate analog from digital, etc.
 
-## Recommended workflow
+12. **Atomic-parts contract.** When `status='existing'`, the planner
+    must populate `mpn`, `footprint`, and `datasheet_url` on the Part
+    from the inventory snapshot (which exposes those fields for every
+    component when retrieved via `design.snapshot_inventory`). This
+    matches the KiCad Atomic / Digi-Key Library / atopile / JITX
+    standard: every existing symbol carries MPN + footprint + datasheet
+    URL bound at the part level so the resulting BOM is complete and
+    the PCB has a footprint on every component without human cleanup.
+    Missing any of these fields emits an `atomic_parts` warning during
+    `design.validate` and produces a BOM with blank MPN / Mfr columns.
+    If the inventory snapshot itself is missing one of these fields on
+    a component, surface that in `open_questions` rather than silently
+    shipping an incomplete Part.
 
-1. Call `design.get_discipline` once to read this doc + the schema.
-2. Call `design.snapshot_inventory(library_paths=[...])` with the user's
-   standard SchLib paths to learn what parts exist.
-3. Construct a DesignPlan from the spec. Iterate the JSON locally until you
-   are happy with it.
-4. Call `design.validate_plan(plan_json=...)` to confirm the executor
-   will accept it (schema + cross-check). Cheap, no Altium round-trip.
-5. Hand the plan to `design.execute_plan(plan_json=..., project_path=...)`.
-   The executor opens or creates the project, creates SchDocs for each
-   sheet, places every existing-lib part on a grid, drops a net label or
-   power port at every plan-defined pin endpoint, and saves.
-6. Read `design.execute_plan`'s return value. If `failures` is non-empty,
-   classify and address before validating; pin-not-found and place-failed
-   issues are usually plan/inventory problems, not Altium errors.
-7. Run `design.validate(project_path=...)` to read ERC + unconnected-pins
-   + compile messages as a structured ValidationReport.
-8. If `passed: false`, read the report's errors. The errors are LLM-friendly:
-   each one has a category (`erc` / `compile` / `unconnected_pin`), severity,
-   target refdes/pin/sheet when known, and the original message text.
-   Revise the plan to address them (extra net labels, missing decoupling,
-   wrong pin numbers, etc.) then loop back to step 4.
-9. Cap the revise loop at 3 rounds editorially. After 3 rounds without a
-   pass, escalate to the user with the latest report rather than thrashing.
+13. **IC schematic symbols: functional pin layout, NOT package order.**
+    When authoring a schematic symbol for an IC via
+    `lib_create_symbol` + `lib_add_pins`, NEVER lay the pins out in
+    physical package order. Pins go ONLY on the LEFT and RIGHT sides
+    of the body — never top or bottom. Group by function:
+    - Inputs on the LEFT (pins pointing left):
+      power inputs (VIN / VCC / V+), signal inputs (IN+ / IN- /
+      VSENSE / FB), control inputs (EN / SS / SHDN / RESET).
+    - Outputs on the RIGHT (pins pointing right):
+      power outputs (PH / SW / VREG / VREF), signal outputs (OUT /
+      COMP / drive), status outputs (PG / FAULT / NIRQ).
+    - Ground (GND / V-) on the LEFT or RIGHT — conventionally
+      bottom-LEFT (below the inputs) or bottom-RIGHT, never
+      bottom-edge of the body.
+    - Bidirectional / paired pins (BOOT-PH, OSC, REF, BST) on
+      whichever side keeps the wiring natural for the typical
+      application — BOOT next to PH on the right makes the
+      bootstrap cap obvious; OSC pair on one side.
+
+    The pin's package number goes into the `designator` field; the
+    package pinout is for the PCB footprint, not the schematic. A
+    sequential package-order symbol forces every reader to mentally
+    re-route the schematic. For passives (2-3 pin parts), the rule
+    relaxes — there's only one or two sensible layouts. The rule
+    applies to anything with 4+ pins.
+
+## Autonomous design workflow
+
+The agent is the planner. There is no hardcoded topology library, no
+closed-form solver per converter family, and no curated parts pool. For
+each new spec the agent reads the manufacturer datasheet, transcribes
+the typical-application circuit and computes values from the
+datasheet's own formulas, then assembles a DesignPlan. The system
+primitives below are deliberately generic — they apply equally to a
+buck, an LDO, an MCU board, an audio amp, or a sensor frontend.
+
+1. **Read the spec carefully.** Extract Vin/Vout/Iout/freq/ripple
+   constraints, intended use, environment (industrial / consumer /
+   automotive), and any explicit part-family preferences. If the spec
+   is ambiguous, record the assumption in `open_questions`.
+
+2. **Read this discipline + schema:** `design.get_discipline`.
+
+3. **Read the user's library inventory:**
+   `design.snapshot_inventory(library_paths=[...])`. The inventory
+   exposes mpn / manufacturer / footprint / datasheet for every
+   component. Prefer existing parts.
+
+4. **Pick a candidate IC** for any active block in the design:
+   - If the inventory has a suitable part, use it.
+   - Otherwise propose a real MPN from a manufacturer search (TI,
+     Analog Devices, MPS, Diodes, Richtek, ST, Microchip, Infineon,
+     etc.) and mark the Part `status="needs_creation"` until the user
+     adds it to a library OR you author it via `lib_*` tools.
+
+5. **Fetch the datasheet** via WebFetch. Cite the datasheet URL on the
+   Part (`datasheet_url`). Extract from the datasheet:
+   - The **Typical Application Circuit** figure — the canonical
+     topology the manufacturer recommends. Transcribe its parts list
+     and connectivity literally; do not invent variations.
+   - The **Pin Functions** table — exact pin numbers, names, and
+     functional roles.
+   - The **Application / Design Procedure** section — formulas for
+     external component values (L, Cin, Cout, feedback divider,
+     compensation, etc.). Compute the values yourself from those
+     formulas; do not import a Python solver. Round to E12 / E96 /
+     E6 standard values from the result.
+   - The **Layout Guidelines** section — which nets are sensitive
+     (feedback, compensation), which are noisy (switch node), which
+     carry high current (input loop, output current). These map
+     directly to `Net.role` tags (see step 7).
+
+6. **Assemble the DesignPlan** from the datasheet transcription:
+   - One `Part` per device shown in the typical-application figure.
+     Populate `manufacturer` + `mpn` + `footprint` + `datasheet_url`
+     on every existing-status Part (atomic-parts contract). Use the
+     `value` field for capacitance / inductance / resistance.
+   - One `Net` per electrical connection shown in the typical-app
+     circuit, with all participating pins listed.
+   - Set `is_power` / `is_ground` on rails so the executor uses power
+     ports.
+
+7. **Tag nets with role** (`Net.role`) when the datasheet's layout
+   guidelines call out the net's electrical character. This is how
+   the downstream PCB pass applies the right rule per net WITHOUT
+   the agent or the layout code knowing what topology was generated.
+   Common tags and the rule a generic PCB pass should infer from each:
+   - `switch` — short and wide; small loop area; keep away from
+     `feedback` / `analog_sensitive`. (SMPS SW node, gate-drive
+     traces, MOSFET drain on a Class-D amp.)
+   - `feedback` — sensitive; route on a quiet layer; keep away from
+     `switch`. (FB pin trace, error-amp inputs.)
+   - `high_current` — wide trace or copper pour. (VIN rail to bulk
+     cap, VOUT rail to load, motor-drive output.)
+   - `analog_sensitive` — quiet layer, far from digital / SMPS.
+     (Op-amp inputs, ADC analog inputs, sensor signals.)
+   - `control` — moderate width, no special handling. (Enable pins,
+     GPIO, mode-select.)
+   - `differential` — matched pair, length-controlled. (USB D+/D-,
+     LVDS, Ethernet, CAN.)
+   - `clock` — length-matched, shielded if high speed. (Crystal,
+     SPI clock, DDR clock.)
+   - Role is free-form; if a datasheet calls out a net category that
+     doesn't fit one of these, invent a clear new tag and document
+     it on the net in `open_questions`.
+
+8. **`design.validate_plan(plan_json=...)`** — schema + cross-check.
+   Cheap, no Altium round-trip.
+
+9. **`design.execute_plan(plan_json=..., project_path=...)`** — opens
+   / creates the project, places parts, drops labels / power ports
+   at each pin endpoint, stamps Manufacturer / MPN / Value / Footprint
+   on every placed symbol, saves.
+
+10. **Read `design.execute_plan`'s return.** Failures with
+    `pin_not_found` or `place_failed` are usually inventory / plan
+    mismatches (wrong pin number on the symbol, missing part). Fix
+    those before validating.
+
+11. **`design.audit_schematic(project_path=...)`** — visual / layout
+    audit BEFORE ERC. Three violation classes, each with enough geometry
+    to compute a corrective move:
+    - `overlaps`: pairs of components whose bboxes intersect → push apart.
+    - `wire_crossings`: wires cutting through component bodies (not just
+      landing on pins) → re-route around.
+    - `stacked_ports`: 3+ power-port glyphs of the same net inside a
+      small radius → consolidate or redistribute.
+    Feed violations back into layout adjustments before ERC; messy layout
+    manufactures spurious ERC noise downstream.
+
+12. **`design.validate(project_path=...)`** — ERC + unconnected pins +
+    atomic-parts warnings, structured ValidationReport.
+
+13. **Iterate.** If `passed: false`, read the report's errors
+    (`category` / `severity` / `refdes` / `pin` / `sheet` / `text`),
+    revise the plan, loop back to step 8. Cap at 3 rounds; escalate
+    with the latest report rather than thrashing.
 
 ## Notes
 

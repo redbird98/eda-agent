@@ -130,6 +130,57 @@ def _ingest_messages(report: ValidationReport, raw: Any) -> None:
         )
 
 
+def _check_atomic_parts(plan: Any) -> list[Issue]:
+    """Atomic-parts contract check.
+
+    Returns a list of ``warning`` Issues, one per status='existing' Part
+    that is missing any of mpn / footprint / datasheet_url. The contract
+    follows the KiCad Atomic / Digi-Key Library / atopile convention:
+    every existing symbol must carry MPN + footprint + datasheet URL
+    bound at the part level so the BOM and PCB come out complete on the
+    first pass.
+
+    Accepts a ``DesignPlan`` (typed) or anything with a ``parts``
+    iterable whose items expose ``validate_atomic()``. The duck-typing
+    keeps the validator import-cheap; ``plan.py`` already owns the
+    per-part rule.
+    """
+    issues: list[Issue] = []
+    if plan is None:
+        return issues
+    parts = getattr(plan, "parts", None) or []
+    for part in parts:
+        validator = getattr(part, "validate_atomic", None)
+        if not callable(validator):
+            continue
+        problems = validator()
+        if not problems:
+            continue
+        refdes = getattr(part, "refdes", None)
+        sheet = getattr(part, "sheet", None)
+        # Collapse the per-field issues into a single Issue text. The
+        # planner gets a clearer signal from "R1 has no mpn / footprint
+        # / datasheet_url" than three near-identical warnings.
+        missing = [p.split(" has no ", 1)[1] for p in problems if " has no " in p]
+        if missing:
+            text = (
+                f"{refdes} has no {' / '.join(missing)}, will produce an "
+                "incomplete BOM"
+            )
+        else:
+            text = "; ".join(problems)
+        issues.append(
+            Issue(
+                category="atomic_parts",
+                severity="warning",
+                text=text,
+                refdes=refdes,
+                sheet=sheet,
+            )
+        )
+    return issues
+
+
 def _ingest_unconnected_pins(report: ValidationReport, raw: Any) -> None:
     if not isinstance(raw, dict):
         return
@@ -161,6 +212,7 @@ def validate(
     *,
     bridge: Optional[Any] = None,
     skip_erc: bool = False,
+    plan: Optional[Any] = None,
 ) -> ValidationReport:
     """Run the validation pipeline.
 
@@ -171,6 +223,10 @@ def validate(
         skip_erc: If True, only read existing messages (no run_erc). Used
             by tests; in production the run_erc + read pattern is the
             intended flow.
+        plan: Optional DesignPlan. When supplied, the atomic-parts
+            contract check runs against its parts and emits a warning
+            for every status='existing' part missing mpn / footprint /
+            datasheet_url.
 
     Returns:
         ValidationReport with passed=True iff there are zero error-level
@@ -203,6 +259,13 @@ def validate(
         _ingest_unconnected_pins(report, unconnected)
     except Exception as exc:
         report.notes.append(f"get_unconnected_pins failed: {exc}")
+
+    # Atomic-parts contract: pure-Python, no Altium round-trip. Adds
+    # warnings rather than errors, so a complete-electrically design
+    # with a sloppy BOM still 'passes' overall, with a clear flag list.
+    if plan is not None:
+        for issue in _check_atomic_parts(plan):
+            _bucket(report, issue)
 
     report.passed = len(report.errors) == 0
     return report

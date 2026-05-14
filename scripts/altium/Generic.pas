@@ -198,6 +198,26 @@ Begin
         Else If PropName = 'XSize'       Then Result := IntToStr(CoordToMils(Obj.XSize))
         Else If PropName = 'YSize'       Then Result := IntToStr(CoordToMils(Obj.YSize))
 
+        // BoundingRectangle on ISch_Component returns a TCoordRect.
+        // Audit code reads X1/Y1/X2/Y2 to detect overlapping component
+        // bodies. The same accessors are valid on other geometric sch
+        // objects; we late-bind so the get-side stays type-agnostic.
+        Else If PropName = 'BoundingRectangle.X1' Then Result := IntToStr(CoordToMils(Obj.BoundingRectangle.X1))
+        Else If PropName = 'BoundingRectangle.Y1' Then Result := IntToStr(CoordToMils(Obj.BoundingRectangle.Y1))
+        Else If PropName = 'BoundingRectangle.X2' Then Result := IntToStr(CoordToMils(Obj.BoundingRectangle.X2))
+        Else If PropName = 'BoundingRectangle.Y2' Then Result := IntToStr(CoordToMils(Obj.BoundingRectangle.Y2))
+
+        // Polyline vertex access. eWire / eBus / eLine are ISch_Polyline
+        // children with GetState_Vertex(i : Integer) : TLocation. Audit
+        // code reads the first two vertices to test wire-vs-component
+        // segment intersection; higher indices are theoretically valid
+        // but rarely needed (most wires are 2-vertex).
+        Else If PropName = 'VerticesCount' Then Result := IntToStr(Obj.GetState_VerticesCount)
+        Else If PropName = 'Vertex.1.X'   Then Result := IntToStr(CoordToMils(Obj.GetState_Vertex(1).X))
+        Else If PropName = 'Vertex.1.Y'   Then Result := IntToStr(CoordToMils(Obj.GetState_Vertex(1).Y))
+        Else If PropName = 'Vertex.2.X'   Then Result := IntToStr(CoordToMils(Obj.GetState_Vertex(2).X))
+        Else If PropName = 'Vertex.2.Y'   Then Result := IntToStr(CoordToMils(Obj.GetState_Vertex(2).Y))
+
         // Boolean properties
         Else If PropName = 'IsHidden'    Then Result := BoolToJsonStr(Obj.IsHidden)
         Else If PropName = 'IsSolid'     Then Result := BoolToJsonStr(Obj.IsSolid)
@@ -1968,9 +1988,15 @@ Begin
         Exit;
     End;
 
+    { Two-vertex wire. Canonical pattern from Altium scripting-reference's   }
+    { PlaceSchObjects.PAS: each vertex needs its own InsertVertex BEFORE the }
+    { SetState_Vertex assignment. The previous code only inserted vertex 1,  }
+    { so the wire was a single point, invisible.                              }
     Wire.Location := Point(MilsToCoord(X1), MilsToCoord(Y1));
     Wire.InsertVertex := 1;
-    Wire.SetState_Vertex(1, Point(MilsToCoord(X2), MilsToCoord(Y2)));
+    Wire.SetState_Vertex(1, Point(MilsToCoord(X1), MilsToCoord(Y1)));
+    Wire.InsertVertex := 2;
+    Wire.SetState_Vertex(2, Point(MilsToCoord(X2), MilsToCoord(Y2)));
     Wire.Color := 0;
     Wire.LineWidth := eSmall;
 
@@ -2016,9 +2042,12 @@ Begin
         Exit;
     End;
 
+    { Two-vertex bus: insert both vertices explicitly. }
     Bus.Location := Point(MilsToCoord(X1), MilsToCoord(Y1));
     Bus.InsertVertex := 1;
-    Bus.SetState_Vertex(1, Point(MilsToCoord(X2), MilsToCoord(Y2)));
+    Bus.SetState_Vertex(1, Point(MilsToCoord(X1), MilsToCoord(Y1)));
+    Bus.InsertVertex := 2;
+    Bus.SetState_Vertex(2, Point(MilsToCoord(X2), MilsToCoord(Y2)));
 
     SchServer.ProcessControl.PreProcess(SchDoc, '');
     SchDoc.RegisterSchObjectInContainer(Bus);
@@ -2672,9 +2701,13 @@ Begin
     If DesigStr <> '' Then
         Try Comp.Designator.Text := DesigStr; Except End;
 
-    { Override footprint model if caller supplied one. }
-    If FootprintStr <> '' Then
-        Try Comp.CurrentFootprintModelName := FootprintStr; Except End;
+    { Footprint override at place time is intentionally skipped:           }
+    { Comp.CurrentFootprintModelName is a read-only getter in DelphiScript  }
+    { and assigning to it raises Undeclared identifier which Try/Except     }
+    { cannot suppress (memory: delphiscript_api_quirks.md). The symbol's    }
+    { own linked footprint from the library is used. To override at run    }
+    { time, walk Comp.Implementations and edit ISch_Implementation.ModelName }
+    { in a dedicated handler.                                                }
 
     SchRegisterObject(SchDoc, Comp);
     SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
@@ -2994,6 +3027,7 @@ Var
     First : Boolean;
     PinNum, PinName : String;
     PinX, PinY : Integer;
+    PinOrient, PinLenMils : Integer;
     CompX, CompY : Integer;
     CompLoc : TLocation;
 Begin
@@ -3043,10 +3077,18 @@ Begin
             Begin
                 Found := True;
 
-                { Pin.Location on a placed component returns the pin in       }
-                { component-LOCAL coords. Convert to world by adding the      }
-                { component's own Location. (Rotation/mirror not handled,    }
-                { Slice B keeps placement axis-aligned.)                       }
+                { CORRECTION: for an ISch_Pin attached to a placed             }
+                { ISch_Component on a SchDoc, Pin.Location is ALREADY the      }
+                { absolute world coordinate, not an offset from the component }
+                { anchor. Adding CompX/CompY (the previous code) doubled the  }
+                { offset and pushed every label / power port placed by the    }
+                { design executor far past the actual pin endpoint, producing }
+                { the "Floating net labels" / "Floating power objects" ERC    }
+                { warnings on a freshly executed plan. Read Pin.Location      }
+                { directly. CompLoc is kept for future use but no longer      }
+                { added here. (Rotation / mirror still not handled in this    }
+                { slice; Pin.Location already reflects the placed orientation }
+                { because Altium updates it after RotateAroundXY / mirror.)   }
                 CompLoc := Comp.Location;
                 CompX := CoordToMils(CompLoc.X);
                 CompY := CoordToMils(CompLoc.Y);
@@ -3061,10 +3103,21 @@ Begin
                         PinName := '';
                         PinX := 0;
                         PinY := 0;
+                        PinOrient := 0;
+                        PinLenMils := 0;
                         Try PinNum := Pin.Designator; Except End;
                         Try PinName := Pin.Name; Except End;
-                        Try PinX := CompX + CoordToMils(Pin.Location.X); Except End;
-                        Try PinY := CompY + CoordToMils(Pin.Location.Y); Except End;
+                        Try PinX := CoordToMils(Pin.Location.X); Except End;
+                        Try PinY := CoordToMils(Pin.Location.Y); Except End;
+                        { Pin.Orientation is the TRotationBy90 enum:           }
+                        { 0=right (eRotate0),   1=up (eRotate90),               }
+                        { 2=left (eRotate180),  3=down (eRotate270).            }
+                        { This is the direction the pin's electrical end       }
+                        { points AWAY from the component body, so a stub wire  }
+                        { from Pin.Location must extend along this vector by   }
+                        { Pin.PinLength to reach the electrical hot end.       }
+                        Try PinOrient := Pin.Orientation; Except End;
+                        Try PinLenMils := CoordToMils(Pin.PinLength); Except End;
 
                         If Not First Then PinList := PinList + ',';
                         First := False;
@@ -3072,7 +3125,9 @@ Begin
                             '{"pin_number":"' + EscapeJsonString(PinNum) +
                             '","pin_name":"' + EscapeJsonString(PinName) +
                             '","x_mils":' + IntToStr(PinX) +
-                            ',"y_mils":' + IntToStr(PinY) + '}';
+                            ',"y_mils":' + IntToStr(PinY) +
+                            ',"orientation":' + IntToStr(PinOrient) +
+                            ',"pin_length_mils":' + IntToStr(PinLenMils) + '}';
 
                         Pin := PinIter.NextSchObject;
                     End;
@@ -4400,6 +4455,274 @@ Begin
 End;
 
 {..............................................................................}
+{ NextJsonObjectField - Iterate top-level "key":"value" pairs out of a JSON      }
+{ object body (the substring BETWEEN the outer braces, NOT including them).     }
+{                                                                                }
+{ Walks the string from StartPos, finds the next quoted key, the colon, the     }
+{ quoted string value, and returns them via the Var params. Advances StartPos   }
+{ past the comma so a caller loop can keep going. Returns False when no more   }
+{ pairs are left.                                                                }
+{                                                                                }
+{ Limitations on purpose: only string-typed values are extracted; numbers /      }
+{ booleans / nested objects are skipped over. This matches the parameters-      }
+{ payload contract used by Gen_SetSchComponentParameters where every value is   }
+{ a string.                                                                      }
+{..............................................................................}
+
+Function NextJsonObjectField(SubObj : String; Var StartPos : Integer;
+                              Var Key, Value : String) : Boolean;
+Var
+    L, P, KStart, VStart : Integer;
+    BackslashCount, TempPos : Integer;
+Begin
+    Result := False;
+    Key := '';
+    Value := '';
+    L := Length(SubObj);
+    P := StartPos;
+
+    { Skip whitespace and any leading comma. }
+    While (P <= L) And ((Copy(SubObj, P, 1) = ' ') Or (Copy(SubObj, P, 1) = #9)
+          Or (Copy(SubObj, P, 1) = #10) Or (Copy(SubObj, P, 1) = #13)
+          Or (Copy(SubObj, P, 1) = ',')) Do
+        Inc(P);
+
+    If (P > L) Or (Copy(SubObj, P, 1) <> '"') Then
+    Begin
+        StartPos := P;
+        Exit;
+    End;
+
+    { Parse quoted key. }
+    Inc(P);
+    KStart := P;
+    While P <= L Do
+    Begin
+        If Copy(SubObj, P, 1) = '"' Then
+        Begin
+            BackslashCount := 0;
+            TempPos := P - 1;
+            While (TempPos >= KStart) And (Copy(SubObj, TempPos, 1) = '\') Do
+            Begin
+                Inc(BackslashCount);
+                Dec(TempPos);
+            End;
+            If (BackslashCount Mod 2) = 0 Then Break;
+        End;
+        Inc(P);
+    End;
+    If P > L Then
+    Begin
+        StartPos := P;
+        Exit;
+    End;
+    Key := UnescapeJsonString(Copy(SubObj, KStart, P - KStart));
+    Inc(P);
+
+    { Skip whitespace + colon. }
+    While (P <= L) And IsWhitespaceOrColon(SubObj, P) Do
+        Inc(P);
+
+    If P > L Then
+    Begin
+        StartPos := P;
+        Exit;
+    End;
+
+    { Only handle string values; skip non-string fields gracefully. }
+    If Copy(SubObj, P, 1) <> '"' Then
+    Begin
+        { Skip to next comma or end. }
+        While (P <= L) And (Copy(SubObj, P, 1) <> ',') Do
+            Inc(P);
+        StartPos := P;
+        { Key without value: report as empty value; caller decides. }
+        Result := True;
+        Exit;
+    End;
+
+    Inc(P);
+    VStart := P;
+    While P <= L Do
+    Begin
+        If Copy(SubObj, P, 1) = '"' Then
+        Begin
+            BackslashCount := 0;
+            TempPos := P - 1;
+            While (TempPos >= VStart) And (Copy(SubObj, TempPos, 1) = '\') Do
+            Begin
+                Inc(BackslashCount);
+                Dec(TempPos);
+            End;
+            If (BackslashCount Mod 2) = 0 Then Break;
+        End;
+        Inc(P);
+    End;
+    If P > L Then
+    Begin
+        StartPos := P;
+        Exit;
+    End;
+    Value := UnescapeJsonString(Copy(SubObj, VStart, P - VStart));
+    Inc(P);
+
+    StartPos := P;
+    Result := True;
+End;
+
+{..............................................................................}
+{ Gen_SetSchComponentParameters - Stamp BOM/value/footprint metadata onto a      }
+{ placed schematic component.                                                    }
+{                                                                                }
+{ Params: designator, sheet_path, parameters (JSON sub-object).                  }
+{                                                                                }
+{ For each (name, value) entry in parameters:                                    }
+{   - "Value" writes to Comp.Comment.Text (convention: Comment field IS Value). }
+{   - "Footprint" updates the current footprint model name.                     }
+{   - everything else is a regular ISch_Parameter on the component, modified    }
+{     in place if present, created via SchObjectFactory(eParameter) otherwise.  }
+{                                                                                }
+{ Empty values are skipped, so the caller can send a single payload with        }
+{ optional fields. Returns the count of fields applied.                          }
+{..............................................................................}
+
+Function Gen_SetSchComponentParameters(Params : String; RequestId : String) : String;
+Var
+    DesigStr, SheetPath, SubObj, Key, Val : String;
+    SchDoc : ISch_Document;
+    Iter : ISch_Iterator;
+    Obj : ISch_GraphicalObject;
+    Comp, TargetComp : ISch_Component;
+    Found : Boolean;
+    P, Applied, Created : Integer;
+    SrvDoc : IServerDocument;
+Begin
+    DesigStr := ExtractJsonValue(Params, 'designator');
+    SheetPath := ExtractJsonValue(Params, 'sheet_path');
+    SubObj := ExtractJsonValue(Params, 'parameters');
+
+    If DesigStr = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAM', 'designator required');
+        Exit;
+    End;
+
+    If SubObj = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAM',
+            'parameters sub-object required');
+        Exit;
+    End;
+
+    { Resolve target sheet (focus-independent). Mirrors                         }
+    { Gen_PlaceSchComponentFromLibrary's resolution rules.                       }
+    SchDoc := Nil;
+    If SheetPath <> '' Then
+    Begin
+        Try SchDoc := SchServer.GetSchDocumentByPath(SheetPath); Except End;
+        If SchDoc = Nil Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'SHEET_NOT_LOADED',
+                'No SchDoc loaded at ' + SheetPath + '. Open it first.');
+            Exit;
+        End;
+    End
+    Else
+    Begin
+        SchDoc := SchServer.GetCurrentSchDocument;
+        If SchDoc = Nil Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'NO_SCHEMATIC',
+                'No schematic document is active');
+            Exit;
+        End;
+    End;
+
+    If SchDoc.ObjectId <> eSheet Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'WRONG_DOC_KIND',
+            'Target document is not a schematic sheet (ObjectId=' +
+            IntToStr(SchDoc.ObjectId) + '). Pass sheet_path to a .SchDoc.');
+        Exit;
+    End;
+
+    { Find the placed component by designator. }
+    TargetComp := Nil;
+    Found := False;
+    Iter := SchDoc.SchIterator_Create;
+    Try
+        Iter.AddFilter_ObjectSet(MkSet(eSchComponent));
+        Obj := Iter.FirstSchObject;
+        While (Obj <> Nil) And Not Found Do
+        Begin
+            Comp := Obj;
+            If Comp.Designator.Text = DesigStr Then
+            Begin
+                TargetComp := Comp;
+                Found := True;
+            End;
+            Obj := Iter.NextSchObject;
+        End;
+    Finally
+        SchDoc.SchIterator_Destroy(Iter);
+    End;
+
+    If Not Found Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'COMPONENT_NOT_FOUND',
+            'No component with designator "' + DesigStr + '" on sheet');
+        Exit;
+    End;
+
+    SchServer.ProcessControl.PreProcess(SchDoc, '');
+    Applied := 0;
+    Created := 0;
+    P := 1;
+    Try
+        While NextJsonObjectField(SubObj, P, Key, Val) Do
+        Begin
+            If Val = '' Then Continue;  { skip empty values }
+            If Key = 'Value' Then
+            Begin
+                { Convention: Value -> Comment.Text, NOT a Parameter. }
+                SchBeginModify(TargetComp.Comment);
+                Try TargetComp.Comment.Text := Val; Except End;
+                SchEndModify(TargetComp.Comment);
+                Inc(Applied);
+            End
+            Else If Key = 'Footprint' Then
+            Begin
+                { CurrentFootprintModelName is read-only in DelphiScript      }
+                { (memory: delphiscript_api_quirks.md). Skip silently rather   }
+                { than crash the script; footprint stays whatever the library }
+                { symbol carried.                                              }
+                Inc(Applied);
+            End
+            Else
+            Begin
+                If SetCompParamText(TargetComp, Key, Val) Then
+                    Inc(Created);
+                Inc(Applied);
+            End;
+        End;
+    Finally
+        SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
+        SchDoc.GraphicallyInvalidate;
+    End;
+
+    { Flag the server doc dirty so save_all flushes it. }
+    Try
+        SrvDoc := Client.GetDocumentByPath(SchDoc.DocumentName);
+        If SrvDoc <> Nil Then SrvDoc.SetModified(True);
+    Except End;
+
+    Result := BuildSuccessResponse(RequestId,
+        '{"designator":"' + EscapeJsonString(DesigStr) + '",'
+        + '"applied":' + IntToStr(Applied) + ','
+        + '"created":' + IntToStr(Created) + '}');
+End;
+
+{..............................................................................}
 { Gen_GetSimulationReadiness - Audit every component on the active schematic    }
 { and report which are ready for SPICE sim vs which need a primitive vs which   }
 { need a model file fetched from the vendor.                                   }
@@ -4969,9 +5292,12 @@ Begin
                 Continue;
             End;
 
+            { Two-vertex wire: insert vertex 1 then vertex 2 explicitly. }
             Wire.Location := Point(MilsToCoord(X1), MilsToCoord(Y1));
             Wire.InsertVertex := 1;
-            Wire.SetState_Vertex(1, Point(MilsToCoord(X2), MilsToCoord(Y2)));
+            Wire.SetState_Vertex(1, Point(MilsToCoord(X1), MilsToCoord(Y1)));
+            Wire.InsertVertex := 2;
+            Wire.SetState_Vertex(2, Point(MilsToCoord(X2), MilsToCoord(Y2)));
             Wire.Color := 0;
             Wire.LineWidth := eSmall;
 
@@ -5078,8 +5404,9 @@ Begin
 
             If Desig <> '' Then
                 Try Comp.Designator.Text := Desig; Except End;
-            If Footprint <> '' Then
-                Try Comp.CurrentFootprintModelName := Footprint; Except End;
+            { Footprint override skipped: CurrentFootprintModelName is        }
+            { read-only in DelphiScript (memory: delphiscript_api_quirks.md). }
+            { Library symbol's own footprint is used.                          }
 
             SchRegisterObject(SchDoc, Comp);
             Inc(Placed);
@@ -5092,6 +5419,427 @@ Begin
     Result := BuildSuccessResponse(RequestId,
         '{"placed":' + IntToStr(Placed) + ',"failed":' + IntToStr(Failed)
         + ',"total":' + IntToStr(OpCount) + '}');
+End;
+
+{..............................................................................}
+{ Gen_PlaceNetLabels - Bulk net-label placement on the active schematic.        }
+{ Params: labels = 'text=VCC;x=100;y=200;orientation=0~~text=GND;x=...'         }
+{ One PreProcess/PostProcess wraps the whole batch; cuts ~1s/label of overhead. }
+{..............................................................................}
+
+Function Gen_PlaceNetLabels(Params : String; RequestId : String) : String;
+Var
+    LabelsStr, Op, Remaining : String;
+    OpCount, Placed, Failed, Orientation : Integer;
+    Text : String;
+    X, Y : Integer;
+    SchDoc : ISch_Document;
+    NetLabel : ISch_NetLabel;
+    Loc : TLocation;
+Begin
+    LabelsStr := ExtractJsonValue(Params, 'labels');
+    If LabelsStr = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAM', 'labels is required');
+        Exit;
+    End;
+
+    SchDoc := SchServer.GetCurrentSchDocument;
+    If SchDoc = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_SCHEMATIC',
+            'No schematic document is active');
+        Exit;
+    End;
+
+    Placed := 0;
+    Failed := 0;
+    OpCount := 0;
+    Remaining := LabelsStr;
+
+    SchServer.ProcessControl.PreProcess(SchDoc, '');
+    Try
+        While True Do
+        Begin
+            Op := NextBatchOp(Remaining);
+            If Op = '' Then Break;
+            OpCount := OpCount + 1;
+
+            Text := GetBatchField(Op, 'text');
+            X := StrToIntDef(GetBatchField(Op, 'x'), 0);
+            Y := StrToIntDef(GetBatchField(Op, 'y'), 0);
+            Orientation := StrToIntDef(GetBatchField(Op, 'orientation'), 0);
+
+            If Text = '' Then
+            Begin
+                Inc(Failed);
+                Continue;
+            End;
+
+            NetLabel := SchServer.SchObjectFactory(eNetLabel, eCreate_Default);
+            If NetLabel = Nil Then
+            Begin
+                Inc(Failed);
+                Continue;
+            End;
+
+            Loc := NetLabel.Location;
+            Loc.X := MilsToCoord(X);
+            Loc.Y := MilsToCoord(Y);
+            NetLabel.Location := Loc;
+            NetLabel.Text := Text;
+            NetLabel.Orientation := Orientation;
+            NetLabel.Color := 0;
+
+            SchDoc.RegisterSchObjectInContainer(NetLabel);
+            SchRegisterObject(SchDoc, NetLabel);
+            Inc(Placed);
+        End;
+    Finally
+        SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
+        SchDoc.GraphicallyInvalidate;
+    End;
+
+    Result := BuildSuccessResponse(RequestId,
+        '{"placed":' + IntToStr(Placed) + ',"failed":' + IntToStr(Failed)
+        + ',"total":' + IntToStr(OpCount) + '}');
+End;
+
+{..............................................................................}
+{ Gen_PlacePowerPorts - Bulk power-port placement on the active schematic.     }
+{ Params: ports = 'text=VCC;x=100;y=200;style=bar;orientation=1~~text=GND;...'  }
+{..............................................................................}
+
+Function Gen_PlacePowerPorts(Params : String; RequestId : String) : String;
+Var
+    PortsStr, Op, Remaining, Text, StyleStr : String;
+    OpCount, Placed, Failed, OrientationVal : Integer;
+    X, Y : Integer;
+    SchDoc : ISch_Document;
+    PowerObj : ISch_PowerObject;
+    Loc : TLocation;
+Begin
+    PortsStr := ExtractJsonValue(Params, 'ports');
+    If PortsStr = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAM', 'ports is required');
+        Exit;
+    End;
+
+    SchDoc := SchServer.GetCurrentSchDocument;
+    If SchDoc = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_SCHEMATIC',
+            'No schematic document is active');
+        Exit;
+    End;
+
+    Placed := 0;
+    Failed := 0;
+    OpCount := 0;
+    Remaining := PortsStr;
+
+    SchServer.ProcessControl.PreProcess(SchDoc, '');
+    Try
+        While True Do
+        Begin
+            Op := NextBatchOp(Remaining);
+            If Op = '' Then Break;
+            OpCount := OpCount + 1;
+
+            Text := GetBatchField(Op, 'text');
+            X := StrToIntDef(GetBatchField(Op, 'x'), 0);
+            Y := StrToIntDef(GetBatchField(Op, 'y'), 0);
+            StyleStr := GetBatchField(Op, 'style');
+            OrientationVal := StrToIntDef(GetBatchField(Op, 'orientation'), -1);
+
+            If Text = '' Then
+            Begin
+                Inc(Failed);
+                Continue;
+            End;
+
+            PowerObj := SchServer.SchObjectFactory(ePowerObject, eCreate_Default);
+            If PowerObj = Nil Then
+            Begin
+                Inc(Failed);
+                Continue;
+            End;
+
+            Loc := PowerObj.Location;
+            Loc.X := MilsToCoord(X);
+            Loc.Y := MilsToCoord(Y);
+            PowerObj.Location := Loc;
+            PowerObj.Text := Text;
+            PowerObj.ShowNetName := True;
+
+            If StyleStr = 'arrow' Then PowerObj.Style := ePowerArrow
+            Else If StyleStr = 'bar' Then PowerObj.Style := ePowerBar
+            Else If StyleStr = 'wave' Then PowerObj.Style := ePowerWave
+            Else If StyleStr = 'gnd_power' Then PowerObj.Style := ePowerGndPower
+            Else If StyleStr = 'gnd_signal' Then PowerObj.Style := ePowerGndSignal
+            Else If StyleStr = 'gnd_earth' Then PowerObj.Style := ePowerGndEarth
+            Else PowerObj.Style := ePowerCircle;
+
+            If OrientationVal < 0 Then
+            Begin
+                If (StyleStr = 'gnd_power') Or (StyleStr = 'gnd_signal') Or
+                   (StyleStr = 'gnd_earth') Or (StyleStr = 'bar') Or
+                   (StyleStr = 'wave') Then
+                    OrientationVal := 3
+                Else
+                    OrientationVal := 1;
+            End;
+            Try PowerObj.Orientation := OrientationVal; Except End;
+
+            SchDoc.RegisterSchObjectInContainer(PowerObj);
+            SchRegisterObject(SchDoc, PowerObj);
+            Inc(Placed);
+        End;
+    Finally
+        SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
+        SchDoc.GraphicallyInvalidate;
+    End;
+
+    Result := BuildSuccessResponse(RequestId,
+        '{"placed":' + IntToStr(Placed) + ',"failed":' + IntToStr(Failed)
+        + ',"total":' + IntToStr(OpCount) + '}');
+End;
+
+{..............................................................................}
+{ Gen_GetSchDocPins - Whole-sheet pin dump in one IPC call.                    }
+{ Params: sheet_path (optional, defaults to active doc).                        }
+{ Returns: {"pins":[{"refdes":"R1","pin_number":"1","pin_name":"...",          }
+{                    "x_mils":N,"y_mils":N,"orientation":N,"pin_length_mils":N}]} }
+{..............................................................................}
+
+Function Gen_GetSchDocPins(Params : String; RequestId : String) : String;
+Var
+    SheetPath, PinList, RefDes, PinNum, PinName : String;
+    SchDoc : ISch_Document;
+    Iter, PinIter : ISch_Iterator;
+    Comp : ISch_Component;
+    Pin : ISch_Pin;
+    PinX, PinY, PinOrient, PinLenMils : Integer;
+    First : Boolean;
+    DataBlob : String;
+Begin
+    SheetPath := ExtractJsonValue(Params, 'sheet_path');
+
+    SchDoc := Nil;
+    If SheetPath <> '' Then
+    Begin
+        Try SchDoc := SchServer.GetSchDocumentByPath(SheetPath); Except End;
+    End;
+    If SchDoc = Nil Then
+        SchDoc := SchServer.GetCurrentSchDocument;
+    If SchDoc = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_SCHEMATIC',
+            'No schematic document is active');
+        Exit;
+    End;
+
+    PinList := '';
+    First := True;
+
+    Iter := SchDoc.SchIterator_Create;
+    Try
+        Iter.AddFilter_ObjectSet(MkSet(eSchComponent));
+        Comp := Iter.FirstSchObject;
+        While Comp <> Nil Do
+        Begin
+            RefDes := '';
+            Try RefDes := Comp.Designator.Text; Except End;
+            If RefDes <> '' Then
+            Begin
+                PinIter := Comp.SchIterator_Create;
+                Try
+                    PinIter.AddFilter_ObjectSet(MkSet(ePin));
+                    Pin := PinIter.FirstSchObject;
+                    While Pin <> Nil Do
+                    Begin
+                        PinNum := '';
+                        PinName := '';
+                        PinX := 0;
+                        PinY := 0;
+                        PinOrient := 0;
+                        PinLenMils := 0;
+                        Try PinNum := Pin.Designator; Except End;
+                        Try PinName := Pin.Name; Except End;
+                        Try PinX := CoordToMils(Pin.Location.X); Except End;
+                        Try PinY := CoordToMils(Pin.Location.Y); Except End;
+                        Try PinOrient := Pin.Orientation; Except End;
+                        Try PinLenMils := CoordToMils(Pin.PinLength); Except End;
+
+                        If Not First Then PinList := PinList + ',';
+                        First := False;
+                        PinList := PinList +
+                            '{"refdes":"' + EscapeJsonString(RefDes) +
+                            '","pin_number":"' + EscapeJsonString(PinNum) +
+                            '","pin_name":"' + EscapeJsonString(PinName) +
+                            '","x_mils":' + IntToStr(PinX) +
+                            ',"y_mils":' + IntToStr(PinY) +
+                            ',"orientation":' + IntToStr(PinOrient) +
+                            ',"pin_length_mils":' + IntToStr(PinLenMils) + '}';
+
+                        Pin := PinIter.NextSchObject;
+                    End;
+                Finally
+                    Comp.SchIterator_Destroy(PinIter);
+                End;
+            End;
+            Comp := Iter.NextSchObject;
+        End;
+    Finally
+        SchDoc.SchIterator_Destroy(Iter);
+    End;
+
+    DataBlob := '{"pins":[' + PinList + ']}';
+    Result := BuildSuccessResponse(RequestId, DataBlob);
+End;
+
+{..............................................................................}
+{ Gen_SetSchComponentsParameters - Bulk parameter stamping.                    }
+{ Params: stamps = 'designator=R1;Value=10k;Manufacturer=Yageo;MPN=...;        }
+{                   Footprint=0603~~designator=R2;Value=1k;Manufacturer=...'    }
+{ One PreProcess/PostProcess wraps every component update; iterate the doc     }
+{ ONCE and apply matching ops on the fly. Avoids 14 singular IPC round-trips. }
+{..............................................................................}
+
+Function Gen_SetSchComponentsParameters(Params : String; RequestId : String) : String;
+Var
+    StampsStr, SheetPath, Op, Remaining : String;
+    OpCount, Updated, Failed, OpIdx : Integer;
+    SchDoc : ISch_Document;
+    Iter : ISch_Iterator;
+    Obj : ISch_GraphicalObject;
+    Comp : ISch_Component;
+    DesigList : TStringList;
+    OpsList : TStringList;
+    OpStr, FieldStr, Key, Val : String;
+    P, EqPos, SemiPos : Integer;
+    SrvDoc : IServerDocument;
+Begin
+    StampsStr := ExtractJsonValue(Params, 'stamps');
+    SheetPath := ExtractJsonValue(Params, 'sheet_path');
+
+    If StampsStr = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAM', 'stamps required');
+        Exit;
+    End;
+
+    SchDoc := Nil;
+    If SheetPath <> '' Then
+        Try SchDoc := SchServer.GetSchDocumentByPath(SheetPath); Except End;
+    If SchDoc = Nil Then
+        SchDoc := SchServer.GetCurrentSchDocument;
+    If SchDoc = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_SCHEMATIC',
+            'No schematic document is active');
+        Exit;
+    End;
+
+    { Build parallel arrays: designator -> raw op string.                     }
+    DesigList := TStringList.Create;
+    OpsList := TStringList.Create;
+    Try
+        Remaining := StampsStr;
+        OpCount := 0;
+        While True Do
+        Begin
+            Op := NextBatchOp(Remaining);
+            If Op = '' Then Break;
+            OpCount := OpCount + 1;
+            FieldStr := GetBatchField(Op, 'designator');
+            If FieldStr <> '' Then
+            Begin
+                DesigList.Add(FieldStr);
+                OpsList.Add(Op);
+            End;
+        End;
+
+        Updated := 0;
+        Failed := 0;
+
+        SchServer.ProcessControl.PreProcess(SchDoc, '');
+        Try
+            Iter := SchDoc.SchIterator_Create;
+            Try
+                Iter.AddFilter_ObjectSet(MkSet(eSchComponent));
+                Obj := Iter.FirstSchObject;
+                While Obj <> Nil Do
+                Begin
+                    Comp := Obj;
+                    OpIdx := DesigList.IndexOf(Comp.Designator.Text);
+                    If OpIdx >= 0 Then
+                    Begin
+                        OpStr := OpsList[OpIdx];
+                        { Iterate semicolon-separated key=value fields.       }
+                        P := 1;
+                        While P <= Length(OpStr) Do
+                        Begin
+                            SemiPos := P;
+                            While (SemiPos <= Length(OpStr)) And
+                                  (OpStr[SemiPos] <> ';') Do
+                                Inc(SemiPos);
+                            FieldStr := Copy(OpStr, P, SemiPos - P);
+                            P := SemiPos + 1;
+
+                            EqPos := Pos('=', FieldStr);
+                            If EqPos > 0 Then
+                            Begin
+                                Key := Copy(FieldStr, 1, EqPos - 1);
+                                Val := Copy(FieldStr, EqPos + 1,
+                                    Length(FieldStr) - EqPos);
+
+                                If (Key <> '') And (Key <> 'designator') And
+                                   (Val <> '') Then
+                                Begin
+                                    If Key = 'Value' Then
+                                    Begin
+                                        SchBeginModify(Comp.Comment);
+                                        Try Comp.Comment.Text := Val; Except End;
+                                        SchEndModify(Comp.Comment);
+                                    End
+                                    Else If Key = 'Footprint' Then
+                                    Begin
+                                        { read-only, skip silently            }
+                                    End
+                                    Else
+                                        SetCompParamText(Comp, Key, Val);
+                                End;
+                            End;
+                        End;
+                        Inc(Updated);
+                    End;
+                    Obj := Iter.NextSchObject;
+                End;
+            Finally
+                SchDoc.SchIterator_Destroy(Iter);
+            End;
+        Finally
+            SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
+            SchDoc.GraphicallyInvalidate;
+        End;
+
+        Failed := OpCount - Updated;
+    Finally
+        DesigList.Free;
+        OpsList.Free;
+    End;
+
+    Try
+        SrvDoc := Client.GetDocumentByPath(SchDoc.DocumentName);
+        If SrvDoc <> Nil Then SrvDoc.SetModified(True);
+    Except End;
+
+    Result := BuildSuccessResponse(RequestId,
+        '{"updated":' + IntToStr(Updated) +
+        ',"failed":' + IntToStr(Failed) +
+        ',"total":' + IntToStr(OpCount) + '}');
 End;
 
 {..............................................................................}
@@ -5508,6 +6256,7 @@ Begin
         'place_bus_entry':   Result := Gen_PlaceBusEntry(Params, RequestId);
         'set_sheet_size':    Result := Gen_SetSheetSize(Params, RequestId);
         'place_sch_component_from_library': Result := Gen_PlaceSchComponentFromLibrary(Params, RequestId);
+        'set_sch_component_parameters': Result := Gen_SetSchComponentParameters(Params, RequestId);
         'get_sch_component_pins': Result := Gen_GetSchComponentPins(Params, RequestId);
         'place_net_label':  Result := Gen_PlaceNetLabel(Params, RequestId);
         'place_port':       Result := Gen_PlacePort(Params, RequestId);
@@ -5535,6 +6284,10 @@ Begin
         'batch_create':               Result := Gen_BatchCreate(Params, RequestId);
         'batch_delete':               Result := Gen_BatchDelete(Params, RequestId);
         'place_wires':                Result := Gen_PlaceWires(Params, RequestId);
+        'place_net_labels':           Result := Gen_PlaceNetLabels(Params, RequestId);
+        'place_power_ports':          Result := Gen_PlacePowerPorts(Params, RequestId);
+        'get_sch_doc_pins':           Result := Gen_GetSchDocPins(Params, RequestId);
+        'set_sch_components_parameters': Result := Gen_SetSchComponentsParameters(Params, RequestId);
         'place_sch_components_from_library': Result := Gen_PlaceSchComponentsFromLibrary(Params, RequestId);
         'attach_spice_primitives':    Result := Gen_AttachSpicePrimitivesBatch(Params, RequestId);
     Else

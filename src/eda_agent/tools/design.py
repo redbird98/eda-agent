@@ -16,10 +16,11 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 from pydantic import ValidationError
 
+from ..design.audit import audit_schematic as run_audit_schematic
 from ..design.discipline import get_discipline
 from ..design.executor import execute_plan_from_json
 from ..design.inventory import LibraryInventory, snapshot_live
@@ -72,7 +73,7 @@ def register_design_tools(mcp) -> None:
         return inventory.model_dump()
 
     @mcp.tool()
-    async def design_validate_plan(plan_json: str) -> dict[str, Any]:
+    async def design_validate_plan(plan_json: Union[str, dict]) -> dict[str, Any]:
         """Validate a candidate DesignPlan JSON against the schema + cross-check.
 
         Run this before ``design.execute_plan`` to catch schema problems
@@ -80,17 +81,23 @@ def register_design_tools(mcp) -> None:
         Altium round-trip.
 
         Args:
-            plan_json: A JSON string of the DesignPlan.
+            plan_json: Either a JSON string of the DesignPlan, or the
+                DesignPlan as a JSON object/dict. The MCP framework
+                auto-deserializes JSON-object literals to dicts before
+                the tool sees them, so both shapes are accepted.
 
         Returns:
             ``{"ok": True, "summary": "..."}`` on success, or
             ``{"ok": False, "errors": [...]}`` listing the specific
             problems. The planner can read these and revise.
         """
-        try:
-            payload = json.loads(plan_json)
-        except json.JSONDecodeError as exc:
-            return {"ok": False, "errors": [f"invalid JSON: {exc}"]}
+        if isinstance(plan_json, dict):
+            payload = plan_json
+        else:
+            try:
+                payload = json.loads(plan_json)
+            except json.JSONDecodeError as exc:
+                return {"ok": False, "errors": [f"invalid JSON: {exc}"]}
 
         try:
             plan = DesignPlan.model_validate(payload)
@@ -117,7 +124,7 @@ def register_design_tools(mcp) -> None:
 
     @mcp.tool()
     async def design_execute_plan(
-        plan_json: str,
+        plan_json: Union[str, dict],
         project_path: str,
     ) -> dict[str, Any]:
         """Instantiate a DesignPlan in Altium (parts placement only).
@@ -133,8 +140,10 @@ def register_design_tools(mcp) -> None:
         equivalent or branching into a library-authoring sub-task.
 
         Args:
-            plan_json: A DesignPlan JSON string. Validated against the
-                schema before any Altium mutation.
+            plan_json: Either a DesignPlan JSON string, or the DesignPlan
+                as a JSON object/dict. The MCP framework auto-deserializes
+                JSON-object literals to dicts before the tool sees them,
+                so both shapes are accepted.
             project_path: Absolute path to the target .PrjPcb. Created
                 if it does not exist.
 
@@ -143,8 +152,45 @@ def register_design_tools(mcp) -> None:
             placed (list of placements) / failures / needs_creation /
             notes.
         """
+        if isinstance(plan_json, dict):
+            plan_json = json.dumps(plan_json)
         result = execute_plan_from_json(plan_json, project_path)
         return result.to_dict()
+
+    @mcp.tool()
+    async def design_audit_schematic(
+        project_path: Optional[str] = None,
+        cluster_radius_mils: int = 600,
+    ) -> dict[str, Any]:
+        """Structured visual/layout audit of the active schematic.
+
+        Call AFTER ``design.execute_plan`` and BEFORE ``design.validate``
+        so layout problems are fixed first; ERC violations downstream are
+        less noisy. Detects three classes of issue, each with enough
+        geometry for the planner to compute a corrective move:
+
+          * overlaps        - pairs of components whose bboxes intersect
+          * wire_crossings  - wire segments that cross a component body
+                              (excluding pin-to-pin connections)
+          * stacked_ports   - 3+ power/ground glyphs of the same net
+                              huddled inside ``cluster_radius_mils``
+
+        Args:
+            project_path: Optional .PrjPcb path. None uses the focused
+                project.
+            cluster_radius_mils: Radius for stacked-port clustering.
+                Default 600 mils.
+
+        Returns:
+            SchematicAuditReport dict: ``{ok, project_path, overlaps[],
+            wire_crossings[], stacked_ports[], notes[]}``.
+            ``ok=True`` iff every list is empty.
+        """
+        report = run_audit_schematic(
+            project_path,
+            cluster_radius_mils=cluster_radius_mils,
+        )
+        return report.to_dict()
 
     @mcp.tool()
     async def design_validate(project_path: Optional[str] = None) -> dict[str, Any]:

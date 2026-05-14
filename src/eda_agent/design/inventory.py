@@ -29,7 +29,16 @@ logger = logging.getLogger("eda_agent.design.inventory")
 
 
 class ComponentSummary(BaseModel):
-    """One component row the planner sees."""
+    """One component row the planner sees.
+
+    Carries the atomic-parts contract fields (mpn, manufacturer,
+    footprint, datasheet) so the planner can populate ``Part`` directly
+    from the inventory without a second round-trip. Pascal fills these
+    from the live ISch_Component's parameters (``Manufacturer Part
+    Number``, ``Manufacturer``, ``Datasheet``) and its current
+    implementation (``ModelName`` -> footprint) when the snapshot is
+    requested with parameters.
+    """
 
     model_config = ConfigDict(extra="ignore")
 
@@ -38,6 +47,9 @@ class ComponentSummary(BaseModel):
     description: Optional[str] = None
     pin_count: Optional[int] = None
     footprint: Optional[str] = None
+    mpn: Optional[str] = None
+    manufacturer: Optional[str] = None
+    datasheet: Optional[str] = None
     parameters: dict[str, str] = Field(default_factory=dict)
 
 
@@ -84,6 +96,11 @@ def _component_summary_from_raw(row: dict) -> ComponentSummary:
 
     The bridge response shape is permissive, different Altium builds /
     component types use different field names. We try the common ones.
+
+    Atomic-parts fields (mpn, manufacturer, datasheet, footprint) are
+    read from the top-level row first (Pascal exposes them explicitly
+    when with_parameters=true) and fall back to the ``parameters`` dict
+    using the canonical Altium parameter names.
     """
 
     def _get(*keys: str) -> Optional[str]:
@@ -102,12 +119,53 @@ def _component_summary_from_raw(row: dict) -> ComponentSummary:
     elif isinstance(raw_pin_count, list):
         pin_count = len(raw_pin_count)
 
+    raw_params = row.get("parameters")
+    parameters: dict[str, str] = {}
+    if isinstance(raw_params, dict):
+        for k, v in raw_params.items():
+            if v in (None, ""):
+                continue
+            parameters[str(k)] = v if isinstance(v, str) else str(v)
+
+    def _param(*keys: str) -> Optional[str]:
+        """Case-insensitive lookup into the parameters dict."""
+        if not parameters:
+            return None
+        lowered = {k.lower(): v for k, v in parameters.items()}
+        for k in keys:
+            v = lowered.get(k.lower())
+            if v not in (None, ""):
+                return v
+        return None
+
+    mpn = _get("mpn", "MPN") or _param(
+        "Manufacturer Part Number",
+        "ManufacturerPartNumber",
+        "Manufacturer_Part_Number",
+        "MPN",
+        "Part Number",
+        "PartNumber",
+    )
+    manufacturer = _get("manufacturer", "Manufacturer") or _param(
+        "Manufacturer", "Mfr", "Mfg"
+    )
+    datasheet = _get("datasheet", "Datasheet", "datasheet_url") or _param(
+        "Datasheet", "DatasheetURL", "Datasheet URL", "ComponentLink1URL"
+    )
+    footprint = _get("footprint", "Footprint", "DefaultFootprint") or _param(
+        "Footprint"
+    )
+
     return ComponentSummary(
         lib_ref=_get("name", "lib_ref", "Name", "ComponentName") or "",
         designator_prefix=_get("designator_prefix", "Designator", "DesignatorPrefix"),
         description=_get("description", "Description"),
         pin_count=pin_count,
-        footprint=_get("footprint", "Footprint", "DefaultFootprint"),
+        footprint=footprint,
+        mpn=mpn,
+        manufacturer=manufacturer,
+        datasheet=datasheet,
+        parameters=parameters,
     )
 
 
@@ -135,8 +193,15 @@ def snapshot_live(library_paths: list[Path]) -> LibraryInventory:
             continue
 
         try:
+            # with_parameters=true makes Pascal walk each component's live
+            # parameter set + current footprint implementation, populating
+            # the atomic-parts fields (mpn, manufacturer, datasheet,
+            # footprint) on every row. Slower than the metadata-only path,
+            # but the planner needs these fields to populate Part for an
+            # atomic-parts-clean BOM, so the snapshot path opts in.
             raw = bridge.send_command(
-                "library.get_components", {"library_path": str(lib_path)}
+                "library.get_components",
+                {"library_path": str(lib_path), "with_parameters": "true"},
             )
         except Exception as exc:  # pragma: no cover
             logger.warning("library.get_components failed for %s: %s", lib_path, exc)

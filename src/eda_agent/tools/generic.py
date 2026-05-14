@@ -955,6 +955,49 @@ def register_generic_tools(mcp):
         return result
 
     @mcp.tool()
+    async def set_sch_component_parameters(
+        designator: str,
+        sheet_path: str,
+        parameters: dict[str, str],
+    ) -> dict[str, Any]:
+        """Stamp BOM/value/footprint metadata onto a placed schematic component.
+
+        Convention for well-known keys:
+        - ``Value`` writes to the component's Comment field (Altium uses the
+          Comment as the canonical Value column).
+        - ``Footprint`` updates the current footprint model name on the placed
+          component instance.
+        - All other keys become first-class ``ISch_Parameter`` entries; an
+          existing parameter with the same name is updated in place, otherwise
+          a new one is created via ``SchObjectFactory(eParameter)``.
+
+        Empty string values are skipped, so callers can pass partially-filled
+        payloads (e.g. ``{"Manufacturer": "TI", "Manufacturer Part Number": ""}``
+        only stamps Manufacturer).
+
+        Args:
+            designator: Refdes of the placed component (e.g. ``"R1"``).
+            sheet_path: Absolute path to the SchDoc the component lives on.
+            parameters: Dict of parameter-name -> string-value pairs.
+
+        Returns:
+            ``{"designator", "applied", "created"}`` where applied is the total
+            number of fields written and created is the count of brand-new
+            parameters (existing fields modified in place are counted in
+            applied but not in created).
+        """
+        bridge = get_bridge()
+        result = await bridge.send_command_async(
+            "generic.set_sch_component_parameters",
+            {
+                "designator": designator,
+                "sheet_path": sheet_path,
+                "parameters": parameters,
+            },
+        )
+        return result
+
+    @mcp.tool()
     async def place_bus(
         x1: int,
         y1: int,

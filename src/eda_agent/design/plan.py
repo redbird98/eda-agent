@@ -62,17 +62,66 @@ class Part(BaseModel):
         description="Footprint name. The executor only stamps it when set; "
         "leave None to defer to the symbol's default.",
     )
+    manufacturer: Optional[str] = Field(
+        default=None,
+        description="Manufacturer name (e.g. 'Texas Instruments'). Stamped on "
+        "the placed symbol as the 'Manufacturer' parameter so downstream BOM "
+        "extraction sees a populated column. Optional, may also come from "
+        "the BomLine that references this refdes.",
+    )
+    mpn: Optional[str] = Field(
+        default=None,
+        description="Manufacturer Part Number (e.g. 'LM7805CT'). Stamped on "
+        "the placed symbol as the 'Manufacturer Part Number' parameter. "
+        "Optional, may also come from the matching BomLine.",
+    )
     status: PartStatus = PartStatus.EXISTING
     sheet: str = Field(default="main", description="Sheet name (matches Sheet.name)")
     zone: Optional[str] = Field(
         default=None,
         description="Optional Zone.name to place the part inside.",
     )
+    role: Optional[str] = Field(
+        default=None,
+        description="Topology-aware role tag the planner assigns so the layout "
+        "stage can reason about each part's purpose. For a buck converter the "
+        "well-known roles are 'ic', 'inductor', 'cin_bulk', 'cin_hf', 'cout', "
+        "'rfb_top', 'rfb_bot', 'cff', 'cboot', 'vin_conn', 'vout_conn'. Free-"
+        "form, but stable per topology so downstream tools can match on it.",
+    )
+    datasheet_url: Optional[str] = Field(
+        default=None,
+        description="Manufacturer datasheet URL for this part. Populated by "
+        "the synthesis solvers so the auditor can trace every spec back to a "
+        "primary source. Stamped on the placed symbol as the 'Datasheet' "
+        "parameter when present.",
+    )
     rationale: Optional[str] = Field(
         default=None,
         description="One-line why-this-part, for audit logs, not sent to "
         "Altium. Useful when the planner re-iterates after a validation fail.",
     )
+
+    def validate_atomic(self) -> list[str]:
+        """Return human-readable atomic-parts contract issues for this part.
+
+        The atomic-parts standard (KiCad Atomic, Digi-Key Library, atopile,
+        JITX) says every existing symbol must carry MPN + footprint +
+        datasheet URL bound at the part level so the BOM and layout come
+        out complete on the first pass. Only enforced on status='existing'
+        parts; needs_creation parts are escalated to the user before they
+        reach a BOM.
+        """
+        if self.status != PartStatus.EXISTING:
+            return []
+        issues: list[str] = []
+        if not (self.mpn and self.mpn.strip()):
+            issues.append(f"{self.refdes} has no mpn")
+        if not (self.footprint and self.footprint.strip()):
+            issues.append(f"{self.refdes} has no footprint")
+        if not (self.datasheet_url and self.datasheet_url.strip()):
+            issues.append(f"{self.refdes} has no datasheet_url")
+        return issues
 
 
 class Net(BaseModel):
@@ -90,6 +139,19 @@ class Net(BaseModel):
     is_ground: bool = Field(
         default=False,
         description="If True, executor adds a GND-style power port.",
+    )
+    role: Optional[str] = Field(
+        default=None,
+        description="Generic electrical role tag the planner asserts so "
+        "downstream tools can apply principles without knowing the "
+        "topology. Well-known values: 'switch' (high-dv/dt SMPS node, "
+        "wants short + wide trace), 'feedback' (sensitive, route away "
+        "from switch / RF), 'high_current' (wants wide trace / polygon), "
+        "'analog_sensitive' (route on quiet layer, away from digital), "
+        "'control' (digital control signal, moderate), 'differential' "
+        "(must route as matched pair), 'clock' (length-matched, "
+        "shielded). Free-form: planners may add new roles when a "
+        "datasheet calls for them.",
     )
 
     @field_validator("pins")
@@ -132,15 +194,49 @@ class Sheet(BaseModel):
 class DesignRuleDelta(BaseModel):
     """A design-rule override the planner wants applied to the project.
 
-    The executor only acts on this in the PCB stage (later slice). Captured
-    here so the planner can express constraints up front.
+    Two styles co-exist:
+
+    * Schematic-planner style (legacy): ``rule_kind`` + ``scope`` +
+      ``parameters`` dict, generic key/value pairs.
+    * PCB-planner style: ``rule_type`` + per-rule-type typed fields
+      (``net`` / ``from_net`` / ``to_net`` / mil-width / gap fields).
+      The buck-layout helper emits this style so callers can dispatch
+      directly to ``pcb_create_design_rule`` without re-parsing a dict.
+
+    Both styles round-trip through JSON. Callers pick whichever fields
+    they need; unused fields stay ``None``.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    rule_kind: str = Field(min_length=1, description="e.g. 'Width', 'Clearance'")
-    scope: str = Field(min_length=1, description="Net class or 'all'")
+    rule_kind: Optional[str] = Field(
+        default=None, description="Legacy: e.g. 'Width', 'Clearance'"
+    )
+    scope: Optional[str] = Field(
+        default=None, description="Legacy: net class or 'all'"
+    )
     parameters: dict[str, str] = Field(default_factory=dict)
+
+    rule_type: Optional[str] = Field(
+        default=None,
+        description="One of 'width', 'clearance'. Drives which of the typed "
+        "fields below are populated.",
+    )
+    net: Optional[str] = Field(
+        default=None, description="Single-net scope, used for width rules."
+    )
+    from_net: Optional[str] = Field(
+        default=None, description="Clearance: source net."
+    )
+    to_net: Optional[str] = Field(
+        default=None, description="Clearance: target net."
+    )
+    min_width_mils: Optional[float] = None
+    preferred_width_mils: Optional[float] = None
+    max_width_mils: Optional[float] = None
+    gap_mils: Optional[float] = Field(
+        default=None, description="Clearance gap in mils."
+    )
 
 
 class BomLine(BaseModel):
@@ -169,6 +265,12 @@ class DesignPlan(BaseModel):
         min_length=1,
         description="One-paragraph explanation of the topology choice, for "
         "the human reviewer, not the executor.",
+    )
+    topology: Optional[str] = Field(
+        default=None,
+        description="Topology tag the planner asserts, e.g. 'buck', 'boost', "
+        "'ldo', 'opamp_filter'. Free-form, layout passes and review tools "
+        "branch on it. None means the planner did not classify the design.",
     )
     sheets: list[Sheet] = Field(min_length=1)
     zones: list[Zone] = Field(default_factory=list)

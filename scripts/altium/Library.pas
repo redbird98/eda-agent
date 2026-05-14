@@ -613,9 +613,12 @@ Var
     Component : ISch_Component;
     ParamIterator : ISch_Iterator;
     Param : ISch_Parameter;
+    Impl : IComponentImplementation;
     Workspace : IWorkspace;
     Doc : IDocument;
     LibPath, Data, CompName, ParamList, WithParamsStr : String;
+    ParamLower, ParamText : String;
+    Mpn, Manufacturer, Datasheet, FootprintName : String;
     CompNum, I : Integer;
     First, WithParams : Boolean;
 Begin
@@ -690,9 +693,17 @@ Begin
         Data := Data + ',"description":"' + EscapeJsonString(CompInfo.Description) + '"';
 
         // Slow path, opt-in via with_parameters=true.
+        // Atomic-parts contract: when we're already paying for the live
+        // component load, harvest mpn / manufacturer / datasheet from the
+        // parameter set plus the current implementation's footprint model
+        // name so the planner can populate Part directly from inventory.
         If WithParams Then
         Begin
             ParamList := '';
+            Mpn := '';
+            Manufacturer := '';
+            Datasheet := '';
+            FootprintName := '';
             If (SchLib <> Nil) And (SchLib.ObjectId = eSchLib) Then
             Begin
                 Component := SchLib.GetState_SchComponentByLibRef(CompName);
@@ -704,13 +715,46 @@ Begin
                     While Param <> Nil Do
                     Begin
                         If ParamList <> '' Then ParamList := ParamList + ',';
-                        ParamList := ParamList + '"' + EscapeJsonString(Param.Name) + '":"' + EscapeJsonString(Param.Text) + '"';
+                        ParamText := Param.Text;
+                        ParamList := ParamList + '"' + EscapeJsonString(Param.Name) + '":"' + EscapeJsonString(ParamText) + '"';
+                        // Capture atomic-parts fields by canonical Altium
+                        // parameter names. LowerCase makes us tolerant of
+                        // libs that capitalize "MPN" vs "Mpn", etc.
+                        ParamLower := LowerCase(Param.Name);
+                        If (Mpn = '') And ((ParamLower = 'manufacturer part number')
+                            Or (ParamLower = 'manufacturerpartnumber')
+                            Or (ParamLower = 'mpn')
+                            Or (ParamLower = 'part number')
+                            Or (ParamLower = 'partnumber')) Then
+                            Mpn := ParamText;
+                        If (Manufacturer = '') And ((ParamLower = 'manufacturer')
+                            Or (ParamLower = 'mfr')
+                            Or (ParamLower = 'mfg')) Then
+                            Manufacturer := ParamText;
+                        If (Datasheet = '') And ((ParamLower = 'datasheet')
+                            Or (ParamLower = 'datasheeturl')
+                            Or (ParamLower = 'datasheet url')
+                            Or (ParamLower = 'componentlink1url')) Then
+                            Datasheet := ParamText;
                         Param := ParamIterator.NextSchObject;
                     End;
                     Component.SchIterator_Destroy(ParamIterator);
+
+                    // Current implementation = the linked footprint model
+                    // (see Lib_LinkFootprint, which writes Impl.ModelName).
+                    // Wrapped in Try because a symbol with zero
+                    // implementations returns Nil here.
+                    Impl := Nil;
+                    Try Impl := Component.GetState_CurrentImplementation; Except End;
+                    If Impl <> Nil Then
+                        Try FootprintName := Impl.ModelName; Except End;
                 End;
             End;
             Data := Data + ',"parameters":{' + ParamList + '}';
+            Data := Data + ',"mpn":"' + EscapeJsonString(Mpn) + '"';
+            Data := Data + ',"manufacturer":"' + EscapeJsonString(Manufacturer) + '"';
+            Data := Data + ',"datasheet":"' + EscapeJsonString(Datasheet) + '"';
+            Data := Data + ',"footprint":"' + EscapeJsonString(FootprintName) + '"';
         End;
         Data := Data + '}';
     End;

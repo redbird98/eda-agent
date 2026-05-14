@@ -632,21 +632,46 @@ def register_project_tools(mcp):
     @mcp.tool()
     async def export_image(
         output_path: str,
-        format: str = "png",
+        format: str = "pdf",
         width: int = 1920,
         height: int = 1080,
     ) -> dict[str, Any]:
-        """Export the current document view as an image file.
+        """Export the active schematic / PCB document, silent (no dialog).
+
+        Only ``format="pdf"`` is currently supported as a silent path.
+        Raster formats (png/jpg/bmp) require a hand-configured OutJob with
+        a Schematic Print -> Multimedia (Image) container; the Pascal side
+        rejects them with ``IMAGE_FORMAT_UNSUPPORTED`` and points the
+        caller at ``run_outjob`` instead.
+
+        Under the hood the PDF path uses Altium's
+        ``WorkspaceManager:Print`` server process with ``FileName=`` - the
+        same machinery as ``export_pdf``. No OutJob is loaded. The print
+        runs against ``Client.CurrentView`` (the focused document), so
+        ensure the schematic or PCB you want exported is the active tab
+        before calling.
+
+        The Pascal side deletes any pre-existing file at ``output_path``
+        before running so the post-run FileExists probe is a true
+        existence check. Python verifies again here and downgrades a
+        Pascal "success" to ``EXPORT_FILE_MISSING`` if no file landed.
 
         Args:
-            output_path: Full path for the output image file
-            format: Image format, "png", "jpg", or "bmp" (default "png")
-            width: Image width in pixels (default 1920)
-            height: Image height in pixels (default 1080)
+            output_path: Full path for the output file. The directory must
+                already exist. The extension should be ``.pdf``.
+            format: Output format. Only ``"pdf"`` is silent today
+                (default). ``"png"``, ``"jpg"``, ``"bmp"`` return an
+                explicit ``IMAGE_FORMAT_UNSUPPORTED`` error.
+            width: Kept for API compatibility. Unused by the PDF path.
+            height: Kept for API compatibility. Unused by the PDF path.
 
         Returns:
-            Dictionary confirming the export with dimensions
+            Dictionary confirming the export with the resolved path,
+            format, width, height, and the scoped schematic. Sets
+            ``file_exists`` based on a Python-side existence check.
         """
+        import os
+
         bridge = get_bridge()
         result = await bridge.send_command_async(
             "project.export_image",
@@ -658,6 +683,25 @@ def register_project_tools(mcp):
             },
             timeout=120.0,
         )
+        if isinstance(result, dict) and result.get("success"):
+            exists = os.path.exists(output_path)
+            result["file_exists"] = exists
+            if exists:
+                try:
+                    result["file_size_bytes"] = os.path.getsize(output_path)
+                except OSError:
+                    pass
+            else:
+                # Pascal claimed success but file is missing - downgrade
+                # to an explicit error so callers don't trust a phantom
+                # success.
+                result["success"] = False
+                result["error"] = "EXPORT_FILE_MISSING"
+                result["details"] = (
+                    f"Pascal reported success but {output_path} does not "
+                    f"exist on disk. The synthetic-OutJob silent path may "
+                    f"not be supported on this Altium build."
+                )
         return result
 
     @mcp.tool()

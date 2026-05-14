@@ -169,6 +169,10 @@ Begin
 End;
 
 Procedure ShowStatusForm;
+Var
+    NewLeft, NewTop : Integer;
+    AvailL, AvailT, AvailW, AvailH : Integer;
+    Margin : Integer;
 Begin
     Try
         { Initial flags derived from initial checkbox captions in the DFM,     }
@@ -176,6 +180,29 @@ Begin
         HidePingsFlag := Pos('[x]', chk_HidePings.Caption) > 0;
         OnlySlowFlag  := Pos('[x]', chk_OnlySlow.Caption) > 0;
         ResetPerfStats;
+
+        { Position bottom-right of the screen work area (excludes taskbar),    }
+        { with a small margin. Clamp so the form is always fully visible even  }
+        { if the work area is unusually small. Set BEFORE Show so the form    }
+        { does not flicker through the center.                                  }
+        Margin := 16;
+        AvailL := 0;
+        AvailT := 0;
+        AvailW := Screen.Width;
+        AvailH := Screen.Height - 40;
+        Try
+            AvailL := Screen.WorkAreaLeft;
+            AvailT := Screen.WorkAreaTop;
+            AvailW := Screen.WorkAreaWidth;
+            AvailH := Screen.WorkAreaHeight;
+        Except End;
+        NewLeft := AvailL + AvailW - StatusForm.Width  - Margin;
+        NewTop  := AvailT + AvailH - StatusForm.Height - Margin;
+        If NewLeft < AvailL Then NewLeft := AvailL;
+        If NewTop  < AvailT Then NewTop  := AvailT;
+        Try StatusForm.Left := NewLeft; Except End;
+        Try StatusForm.Top  := NewTop;  Except End;
+
         If Not StatusForm.Visible Then StatusForm.Show;
         Try StatusForm.Caption := 'EDA Agent MCP - v' + SCRIPT_VERSION; Except End;
         Try lbl_Version.Caption := 'v' + SCRIPT_VERSION; Except End;

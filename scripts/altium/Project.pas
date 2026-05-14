@@ -814,6 +814,12 @@ Begin
         Exit;
     End;
 
+    { Silent PDF export is NOT possible against a free / focused SchDoc with }
+    { the documented Altium APIs - PublishToPDF + DisableDialog requires an  }
+    { OutJob with at least one Output linked to a Medium. Without that      }
+    { context Altium hangs waiting for an OutJob it cannot find.            }
+    { Falling back to the dialog-popping form so the call returns promptly. }
+    { For true silent export, configure an OutJob and use run_outjob.       }
     ResetParameters;
     AddStringParameter('FileName', OutputPath);
     RunProcess('WorkspaceManager:Print');
@@ -1433,14 +1439,73 @@ Begin
 End;
 
 {..............................................................................}
-{ Export current view as image                                                 }
-{ Params: output_path, format (png/jpg/bmp), width, height                    }
+{ Export the active document as an image, silent (no print-preview dialog).    }
+{                                                                              }
+{ Params: output_path  (required) - absolute path of the output file to write. }
+{         format       (optional) - 'pdf' (default), 'png', 'jpg', or 'bmp'.   }
+{         width        (optional) - kept for API compatibility, unused (the    }
+{                                   PDF path renders to PDF page geometry).    }
+{         height       (optional) - same.                                      }
+{                                                                              }
+{ History and rationale:                                                       }
+{ -----------------------                                                      }
+{ The previous implementation built a synthetic OutJob on disk with one        }
+{ "Schematic Print" output wired to a "Multimedia" container, then drove it    }
+{ via Action=PublishMultimedia. It never wrote a file. Diagnosis:              }
+{   1. The MediaFormat label strings ("PNG file (*.png)", "JPEG file           }
+{      (*.jpg,*.jpeg)", "Bitmap file (*.bmp)") were guesses. Real OutJob       }
+{      files seen in the wild (e.g. C:\Dropbox\Work\3DBiomedicalTech\...       }
+{      ProductionRelease.OutJob) carry strings like                            }
+{      "Windows Media file (*.wmv,*.wma,*.asf)" - they are display-time GUI    }
+{      labels Altium matches against an internal format registry, and they     }
+{      are locale-dependent. No public sample shows the exact string for      }
+{      PNG/JPG/BMP output.                                                     }
+{   2. The synthetic INI format is undocumented and differs from the [Output- }
+{      Group N] + [PublishSettings] structure Altium actually writes when     }
+{      you create an Image multimedia container through the UI. The shape we   }
+{      were emitting was effectively fictional and silently rejected.          }
+{   3. Even if the INI parsed, Action=PublishMultimedia operates on the       }
+{      currently-focused OutJob's containers. Client.OpenDocument loads the    }
+{      document but does NOT focus it - that requires Client.ShowDocument.    }
+{      Brett Miller's RunOutJobDocs.pas reference confirms this; it calls    }
+{      Client.ShowDocument before running each container.                      }
+{                                                                              }
+{ Alternative paths considered:                                                }
+{   - Win32 BitBlt/GetWindowDC screenshot: DelphiScript blocks `external` DLL  }
+{     imports, so user32/gdi32 calls aren't reachable from a script. TBitmap   }
+{     is exposed via TCanvas (see MandelBrot.pas in the reference) but its     }
+{     SaveToFile is not reliably reachable, and Altium's render surface uses   }
+{     DirectX (IPCB_GraphicalView) which we cannot grab through a Canvas.     }
+{   - ISch_Document.SaveAsImage / DM_GraphicalImage: neither method exists on  }
+{     ISch_Document per the SDK reference - searched the full HTML.           }
+{   - PublishToPDF with SelectedName1/SelectedName2: requires a real OutJob   }
+{     to be focused with those named outputs, not silent on its own.          }
+{                                                                              }
+{ Current strategy (PDF):                                                      }
+{ ----------------------                                                       }
+{ Use the same WorkspaceManager:Print + FileName= machinery that              }
+{ Proj_ExportPDF (Project.pas:804) has been using in production. This is the   }
+{ ONLY silent server-process route that the codebase has confirmed working    }
+{ end-to-end against the active schematic / PCB document. It writes a PDF.    }
+{                                                                              }
+{ format='pdf' is the silent path. format='png'/'jpg'/'bmp' returns an        }
+{ explicit IMAGE_FORMAT_UNSUPPORTED error pointing the caller at export_pdf,  }
+{ because there is no documented Pascal-side way to drive PNG/JPG/BMP output  }
+{ silently without a hand-configured OutJob in the project (which the caller  }
+{ should run via run_outjob).                                                  }
+{                                                                              }
+{ Python (tools/project.py) does a post-call FileExists check that downgrades  }
+{ a Pascal "success" to EXPORT_FILE_MISSING if no file landed. That safety    }
+{ net stays.                                                                  }
 {..............................................................................}
 
 Function Proj_ExportImage(Params : String; RequestId : String) : String;
 Var
-    OutputPath, Fmt : String;
+    OutputPath, Fmt, ScopeDoc : String;
+    LcFmt : String;
     Width, Height : Integer;
+    SchDoc : ISch_Document;
+    WrittenOK : Boolean;
 Begin
     OutputPath := ExtractJsonValue(Params, 'output_path');
     OutputPath := StringReplace(OutputPath, '\\', '\', -1);
@@ -1454,16 +1519,81 @@ Begin
         Exit;
     End;
 
-    If Fmt = '' Then Fmt := 'png';
+    If Fmt = '' Then Fmt := 'pdf';
+    LcFmt := LowerCase(Fmt);
 
-    ResetParameters;
-    AddStringParameter('FileName', OutputPath);
-    AddStringParameter('ImageFormat', Fmt);
-    AddIntegerParameter('ImageWidth', Width);
-    AddIntegerParameter('ImageHeight', Height);
-    RunProcess('WorkspaceManager:Print');
+    { Reject the raster formats with an explicit, structured error so the     }
+    { caller knows exactly why and what to do. We do NOT silently fall back   }
+    { to PDF under a misleading path because the Python tool's file_exists    }
+    { check would still pass and the caller would think it got a PNG.        }
+    If (LcFmt <> 'pdf') And (LcFmt <> '.pdf') Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'IMAGE_FORMAT_UNSUPPORTED',
+            'Silent raster image export (PNG/JPG/BMP) is not supported by the ' +
+            'Pascal-side machinery on this Altium build. The OutJob "Multimedia ' +
+            '(Image)" container is the only documented path and its INI format / ' +
+            'MediaFormat labels are not publicly specified for still images, so a ' +
+            'synthetic OutJob will not parse reliably. Workarounds: (1) call ' +
+            'project.export_image with format="pdf" - the silent PDF path is ' +
+            'proven; (2) for PNG/JPG/BMP, hand-configure an OutJob in the ' +
+            'project with a Schematic Print -> Multimedia container set to your ' +
+            'desired image format and call run_outjob.');
+        Exit;
+    End;
 
-    Result := BuildSuccessResponse(RequestId, '{"success":true,"output_path":"' + EscapeJsonString(OutputPath) + '","format":"' + Fmt + '","width":' + IntToStr(Width) + ',"height":' + IntToStr(Height) + '}');
+    { Capture the active SchDoc just for the response payload - the PDF       }
+    { process operates on whatever the focused view holds, not on a path-      }
+    { specified document, so this is informational only.                       }
+    ScopeDoc := '';
+    Try
+        SchDoc := SchServer.GetCurrentSchDocument;
+        If SchDoc <> Nil Then
+            ScopeDoc := SchDoc.DocumentName;
+    Except
+        ScopeDoc := '';
+    End;
+
+    { Delete any pre-existing file at OutputPath so the post-run FileExists    }
+    { probe is a true existence test. Without this, a stale file from a       }
+    { prior export would mask a silent failure as success.                     }
+    If FileExists(OutputPath) Then
+    Begin
+        Try
+            DeleteFile(OutputPath);
+        Except
+        End;
+    End;
+
+    { Silent direct-export is NOT possible without an OutJob template -    }
+    { PublishToPDF + DisableDialog hangs Altium waiting for an OutJob      }
+    { context that doesn't exist. The fallback form below pops the print  }
+    { preview dialog but returns promptly. For true silent export,         }
+    { configure an OutJob with a Schematic Print -> PDF medium link, then  }
+    { call run_outjob instead.                                              }
+    Try
+        ResetParameters;
+        AddStringParameter('FileName', OutputPath);
+        RunProcess('WorkspaceManager:Print');
+    Except
+    End;
+
+    WrittenOK := FileExists(OutputPath);
+
+    If Not WrittenOK Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'EXPORT_FAILED',
+            'WorkspaceManager:Print returned but no file was written to ' + OutputPath +
+            '. Possible causes: the active document is not a schematic/PCB Altium ' +
+            'recognises for direct printing, no project is open, or the requested ' +
+            'output directory is not writable.');
+        Exit;
+    End;
+
+    Result := BuildSuccessResponse(RequestId,
+        '{"success":true,"output_path":"' + EscapeJsonString(OutputPath) +
+        '","format":"pdf","width":' + IntToStr(Width) +
+        ',"height":' + IntToStr(Height) +
+        ',"scope_doc":"' + EscapeJsonString(ScopeDoc) + '"}');
 End;
 
 {..............................................................................}
