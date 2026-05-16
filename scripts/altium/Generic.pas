@@ -2339,7 +2339,7 @@ Var
     Iterator : ISch_Iterator;
     Sym : ISch_SheetSymbol;
     Entry : ISch_SheetEntry;
-    SheetNameStr, EntryName, IOStr, SideStr : String;
+    SheetNameStr, EntryName, IOStr, SideStr, ThisName : String;
     DistFromTop : Integer;
     Found : Boolean;
 Begin
@@ -2364,12 +2364,14 @@ Begin
     End;
 
     { Locate the target sheet symbol by its SheetName.                          }
-    { DelphiScript interface narrowing happens at iterator-return only:         }
-    { `Sym := Obj` between locals does NOT narrow ISch_BasicObject to           }
-    { ISch_SheetSymbol, and Sym.SheetName then resolves through a variant       }
-    { wrapper that raises "Invalid variant operation" when compared to String.  }
-    { Assign Sym directly from FirstSchObject / NextSchObject so the typed      }
-    { interface lives the whole loop.                                           }
+    { Two layered DelphiScript traps to navigate:                               }
+    { 1. Interface narrowing only happens at iterator-return; we already        }
+    {    assign Sym directly from FirstSchObject so Sym is properly typed.     }
+    { 2. Comparing a typed-interface String property to a String local raises   }
+    {    "Invalid variant operation" because the property accessor returns     }
+    {    through a variant wrapper. Coerce to String via an assignment to a    }
+    {    local Var first, then compare the local. Assignment unwraps the       }
+    {    variant; comparison directly on the property accessor does not.      }
     Found := False;
     Iterator := SchDoc.SchIterator_Create;
     Iterator.AddFilter_ObjectSet(MkSet(eSheetSymbol));
@@ -2377,13 +2379,13 @@ Begin
         Sym := Iterator.FirstSchObject;
         While Sym <> Nil Do
         Begin
-            Try
-                If Sym.SheetName = SheetNameStr Then
-                Begin
-                    Found := True;
-                    Break;
-                End;
-            Except End;
+            ThisName := '';
+            Try ThisName := Sym.SheetName; Except End;
+            If ThisName = SheetNameStr Then
+            Begin
+                Found := True;
+                Break;
+            End;
             Sym := Iterator.NextSchObject;
         End;
     Finally
