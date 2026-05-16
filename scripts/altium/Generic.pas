@@ -2364,14 +2364,12 @@ Begin
     End;
 
     { Locate the target sheet symbol by its SheetName.                          }
-    { Two layered DelphiScript traps to navigate:                               }
-    { 1. Interface narrowing only happens at iterator-return; we already        }
-    {    assign Sym directly from FirstSchObject so Sym is properly typed.     }
-    { 2. Comparing a typed-interface String property to a String local raises   }
-    {    "Invalid variant operation" because the property accessor returns     }
-    {    through a variant wrapper. Coerce to String via an assignment to a    }
-    {    local Var first, then compare the local. Assignment unwraps the       }
-    {    variant; comparison directly on the property accessor does not.      }
+    { ISch_SheetSymbol.SheetName is a COMPOUND sub-object (ISch_SheetName),     }
+    { not a String -- see Generic.pas:83-97. Accessing it directly returns an   }
+    { interface reference; comparing that to a String raises "Invalid variant   }
+    { operation" at runtime. The actual text is on the .Text property of the   }
+    { sub-object. ISch_SheetFileName has the same shape; both must be          }
+    { dereferenced through .Text before any string operation.                  }
     Found := False;
     Iterator := SchDoc.SchIterator_Create;
     Iterator.AddFilter_ObjectSet(MkSet(eSheetSymbol));
@@ -2380,7 +2378,10 @@ Begin
         While Sym <> Nil Do
         Begin
             ThisName := '';
-            Try ThisName := Sym.SheetName; Except End;
+            Try
+                If Sym.SheetName <> Nil Then
+                    ThisName := Sym.SheetName.Text;
+            Except End;
             If ThisName = SheetNameStr Then
             Begin
                 Found := True;
