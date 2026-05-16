@@ -2306,7 +2306,6 @@ Function Gen_PlaceSheetEntry(Params : String; RequestId : String) : String;
 Var
     SchDoc : ISch_Document;
     Iterator : ISch_Iterator;
-    Obj : ISch_BasicObject;
     Sym : ISch_SheetSymbol;
     Entry : ISch_SheetEntry;
     SheetNameStr, EntryName, IOStr, SideStr : String;
@@ -2333,23 +2332,28 @@ Begin
         Exit;
     End;
 
-    { Locate the target sheet symbol by its SheetName. }
+    { Locate the target sheet symbol by its SheetName.                          }
+    { DelphiScript interface narrowing happens at iterator-return only:         }
+    { `Sym := Obj` between locals does NOT narrow ISch_BasicObject to           }
+    { ISch_SheetSymbol, and Sym.SheetName then resolves through a variant       }
+    { wrapper that raises "Invalid variant operation" when compared to String.  }
+    { Assign Sym directly from FirstSchObject / NextSchObject so the typed      }
+    { interface lives the whole loop.                                           }
     Found := False;
     Iterator := SchDoc.SchIterator_Create;
     Iterator.AddFilter_ObjectSet(MkSet(eSheetSymbol));
     Try
-        Obj := Iterator.FirstSchObject;
-        While Obj <> Nil Do
+        Sym := Iterator.FirstSchObject;
+        While Sym <> Nil Do
         Begin
             Try
-                Sym := Obj;
                 If Sym.SheetName = SheetNameStr Then
                 Begin
                     Found := True;
                     Break;
                 End;
             Except End;
-            Obj := Iterator.NextSchObject;
+            Sym := Iterator.NextSchObject;
         End;
     Finally
         SchDoc.SchIterator_Destroy(Iterator);
