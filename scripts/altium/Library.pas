@@ -78,6 +78,20 @@ Begin
             End;
         End;
     End;
+    { Force a SchLib editor redraw -- without this, primitives that were just }
+    { committed (lines, rectangles, pins, polygons, arcs added by Lib_Add*)   }
+    { are saved to memory + disk but the open lib editor window doesn't show  }
+    { them until the user manually closes and reopens the symbol. The         }
+    { SchLib editor renders the CURRENT COMPONENT, not the lib document, so   }
+    { SchLib.GraphicallyInvalidate alone is insufficient. Invalidate the      }
+    { component too, and process pending paint messages so the new state     }
+    { surfaces immediately.                                                  }
+    Try SchLib.GraphicallyInvalidate; Except End;
+    Try
+        If SchLib.CurrentSchComponent <> Nil Then
+            SchLib.CurrentSchComponent.GraphicallyInvalidate;
+    Except End;
+    Try Application.ProcessMessages; Except End;
 End;
 
 Function Lib_CreateSymbol(Params : String; RequestId : String) : String;
@@ -122,6 +136,12 @@ Begin
 
         SchServer.ProcessControl.PreProcess(SchLib, '');
         SchLib.AddSchComponent(Component);
+        { AddSchComponent overrides LibReference with an auto-generated      }
+        { 'Component_<N>' on the second and later additions to the same     }
+        { SchLib in one session. The pre-add assignment on line 119 sticks  }
+        { only for the first symbol. Re-assign here so the caller's chosen  }
+        { name is what survives to disk (and what ResolveLibRef will see).  }
+        Component.LibReference := Name;
         SchServer.ProcessControl.PostProcess(SchLib, 'Edit');
 
         // Broadcast as a new component (source=nil, dest=c_BroadCast). This
@@ -145,6 +165,64 @@ Begin
     End
     Else
         Result := BuildErrorResponse(RequestId, 'CREATE_FAILED', 'Failed to create symbol');
+End;
+
+{ Lib_SetCurrentComponent — make a named component the "current" one in    }
+{ the SchLib editor so subsequent SchIterator-based commands (modify_objects }
+{ on ePin / eRectangle / eParameter via active_doc scope) target it. The    }
+{ asymmetry this fixes: GetState_SchComponentByLibRef is a read-only fetch  }
+{ that does NOT update the editor's selection -- without this command, the  }
+{ SchLib editor stays pointed at whatever was last manually clicked (or     }
+{ the first component on load), so modify_objects silently hits the wrong  }
+{ component when the caller thinks they switched.                          }
+Function Lib_SetCurrentComponent(Params : String; RequestId : String) : String;
+Var
+    Name : String;
+    SchLib : ISch_Lib;
+    Component : ISch_Component;
+Begin
+    Name := ExtractJsonValue(Params, 'name');
+    If Name = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_NAME', 'name is required');
+        Exit;
+    End;
+
+    If SchServer = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_SCHLIB', 'No schematic library is active');
+        Exit;
+    End;
+
+    SchLib := SchServer.GetCurrentSchDocument;
+    If (SchLib = Nil) Or (SchLib.ObjectId <> eSchLib) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_SCHLIB', 'No schematic library is active');
+        Exit;
+    End;
+
+    Component := SchLib.GetState_SchComponentByLibRef(Name);
+    If Component = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NOT_FOUND',
+            'Component not found in active library: ' + Name);
+        Exit;
+    End;
+
+    SchLib.CurrentSchComponent := Component;
+    LastCreatedLibComponent := Component;
+    { Reset PartID + DisplayMode so subsequent Lib_AddSymbol* calls write     }
+    { their primitives onto the visible normal-mode part (Part 1, DisplayMode }
+    { 0). Without this, after a fresh SchLib reopen Component.CurrentPartID   }
+    { can be 0 (no part) and AddSchObject silently succeeds but the primitive }
+    { lands on an invisible bucket -- explains the "line added with success   }
+    { but no eLine in query_objects" behaviour observed 2026-05-16.           }
+    Try Component.CurrentPartID := 1; Except End;
+    Try Component.DisplayMode := 0; Except End;
+    Try SchLib.GraphicallyInvalidate; Except End;
+
+    Result := BuildSuccessResponse(RequestId,
+        '{"success":true,"name":"' + EscapeJsonString(Name) + '"}');
 End;
 
 Function Lib_AddPin(Params : String; RequestId : String) : String;
@@ -221,6 +299,7 @@ Var
     SchLib : ISch_Lib;
     Component : ISch_Component;
     Rect : ISch_Rectangle;
+    Loc : TLocation;
 Begin
     X1 := StrToIntDef(ExtractJsonValue(Params, 'x1'), 0);
     Y1 := StrToIntDef(ExtractJsonValue(Params, 'y1'), 0);
@@ -244,10 +323,18 @@ Begin
     Rect := SchServer.SchObjectFactory(eRectangle, eCreate_Default);
     If Rect <> Nil Then
     Begin
-        Rect.Location.X := MilsToCoord(X1);
-        Rect.Location.Y := MilsToCoord(Y1);
-        Rect.Corner.X := MilsToCoord(X2);
-        Rect.Corner.Y := MilsToCoord(Y2);
+        { Read-modify-write the TLocation record; direct `.X := value` on the }
+        { Location property is a write to a record COPY and is silently       }
+        { discarded (the rect retains its default 0,0 / 500,500 from the      }
+        { factory). Same fix is applied in Lib_AddSymbolLine and Generic.pas. }
+        Loc := Rect.Location;
+        Loc.X := MilsToCoord(X1);
+        Loc.Y := MilsToCoord(Y1);
+        Rect.Location := Loc;
+        Loc := Rect.Corner;
+        Loc.X := MilsToCoord(X2);
+        Loc.Y := MilsToCoord(Y2);
+        Rect.Corner := Loc;
         Rect.IsSolid := False;
 
         SchServer.ProcessControl.PreProcess(SchLib, '');
@@ -257,6 +344,7 @@ Begin
         SchServer.ProcessControl.PostProcess(SchLib, 'Edit');
 
         MarkLibDirty(SchLib);
+        Try SchLib.GraphicallyInvalidate; Except End;
         Result := BuildSuccessResponse(RequestId, '{"success":true}');
     End
     Else
@@ -269,6 +357,7 @@ Var
     SchLib : ISch_Lib;
     Component : ISch_Component;
     Line : ISch_Line;
+    Loc : TLocation;
 Begin
     X1 := StrToIntDef(ExtractJsonValue(Params, 'x1'), 0);
     Y1 := StrToIntDef(ExtractJsonValue(Params, 'y1'), 0);
@@ -295,10 +384,19 @@ Begin
     Line := SchServer.SchObjectFactory(eLine, eCreate_Default);
     If Line <> Nil Then
     Begin
-        Line.Location.X := MilsToCoord(X1);
-        Line.Location.Y := MilsToCoord(Y1);
-        Line.Corner.X := MilsToCoord(X2);
-        Line.Corner.Y := MilsToCoord(Y2);
+        { Read-modify-write -- direct `Line.Location.X := value` writes to a }
+        { record copy and is silently discarded, leaving the line at its     }
+        { default 0,0 / 0,0 (zero-length, invisible, not added to the        }
+        { component). Confirmed broken 2026-05-16 when 12 lib_add_symbol_line }
+        { calls all reported success but no eLine objects were on the symbol. }
+        Loc := Line.Location;
+        Loc.X := MilsToCoord(X1);
+        Loc.Y := MilsToCoord(Y1);
+        Line.Location := Loc;
+        Loc := Line.Corner;
+        Loc.X := MilsToCoord(X2);
+        Loc.Y := MilsToCoord(Y2);
+        Line.Corner := Loc;
         Line.LineWidth := Width;
 
         SchServer.ProcessControl.PreProcess(SchLib, '');
@@ -308,6 +406,10 @@ Begin
         SchServer.ProcessControl.PostProcess(SchLib, 'Edit');
 
         MarkLibDirty(SchLib);
+        { Force the lib editor to redraw -- without this, primitives are    }
+        { committed but not visible until the user closes and reopens the   }
+        { symbol. Same fix applied to other lib_add_symbol_* helpers.       }
+        Try SchLib.GraphicallyInvalidate; Except End;
         Result := BuildSuccessResponse(RequestId, '{"success":true}');
     End
     Else
@@ -1221,6 +1323,7 @@ Begin
                 '","x":' + IntToStr(CoordToMils(Pin.Location.X)) +
                 ',"y":' + IntToStr(CoordToMils(Pin.Location.Y)) +
                 ',"orientation":' + IntToStr(Pin.Orientation) +
+                ',"length":' + IntToStr(CoordToMils(Pin.PinLength)) +
                 ',"hidden":' + BoolToJsonStr(Pin.IsHidden) +
                 ',"label_hidden":' + BoolToJsonStr(PinLabelHidden) + '}';
             Inc(PinCount);
@@ -1919,6 +2022,7 @@ Begin
                 '","x":' + IntToStr(CoordToMils(Pin.Location.X)) +
                 ',"y":' + IntToStr(CoordToMils(Pin.Location.Y)) +
                 ',"orientation":' + IntToStr(Pin.Orientation) +
+                ',"length":' + IntToStr(CoordToMils(Pin.PinLength)) +
                 ',"hidden":' + BoolToJsonStr(Pin.IsHidden) + '}';
             Inc(PinCount);
 
@@ -2095,6 +2199,95 @@ Begin
 
             Component.AddSchObject(Pin);
             SchRegisterObject(Component, Pin);
+            Inc(Added);
+        End;
+    Finally
+        SchServer.ProcessControl.PostProcess(SchLib, 'Edit');
+    End;
+
+    MarkLibDirty(SchLib);
+
+    Result := BuildSuccessResponse(RequestId,
+        '{"added":' + IntToStr(Added) + ',"failed":' + IntToStr(Failed)
+        + ',"total":' + IntToStr(OpCount) + '}');
+End;
+
+{ Batch line authoring: same shape as Lib_AddPins. Receives a `lines` array }
+{ encoded with the ~~ / ; / = separators NextBatchOp expects, applies them  }
+{ all inside one PreProcess / PostProcess pair, and triggers a single       }
+{ MarkLibDirty (which now also handles graphical invalidate).               }
+Function Lib_AddSymbolLines(Params : String; RequestId : String) : String;
+Var
+    LinesStr, Op, Remaining : String;
+    OpCount, Added, Failed : Integer;
+    X1, Y1, X2, Y2, Width : Integer;
+    SchLib : ISch_Lib;
+    Component : ISch_Component;
+    Line : ISch_Line;
+    Loc : TLocation;
+Begin
+    LinesStr := ExtractJsonValue(Params, 'lines');
+    If LinesStr = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAM', 'lines is required');
+        Exit;
+    End;
+
+    SchLib := SchServer.GetCurrentSchDocument;
+    If (SchLib = Nil) Or (SchLib.ObjectId <> eSchLib) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_SCHLIB', 'No schematic library is active');
+        Exit;
+    End;
+
+    Component := GetTargetLibComponent(SchLib);
+    If Component = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_COMPONENT', 'No component is selected');
+        Exit;
+    End;
+
+    Added := 0;
+    Failed := 0;
+    OpCount := 0;
+    Remaining := LinesStr;
+
+    SchServer.ProcessControl.PreProcess(SchLib, '');
+    Try
+        While True Do
+        Begin
+            Op := NextBatchOp(Remaining);
+            If Op = '' Then Break;
+            OpCount := OpCount + 1;
+            X1 := StrToIntDef(GetBatchField(Op, 'x1'), 0);
+            Y1 := StrToIntDef(GetBatchField(Op, 'y1'), 0);
+            X2 := StrToIntDef(GetBatchField(Op, 'x2'), 0);
+            Y2 := StrToIntDef(GetBatchField(Op, 'y2'), 0);
+            Width := StrToIntDef(GetBatchField(Op, 'width'), 1);
+            If Width < 0 Then Width := 0;
+            If Width > 3 Then Width := 3;
+
+            Line := SchServer.SchObjectFactory(eLine, eCreate_Default);
+            If Line = Nil Then
+            Begin
+                Inc(Failed);
+                Continue;
+            End;
+
+            { Read-modify-write the TLocation record -- see Lib_AddSymbolLine. }
+            Loc := Line.Location;
+            Loc.X := MilsToCoord(X1);
+            Loc.Y := MilsToCoord(Y1);
+            Line.Location := Loc;
+            Loc := Line.Corner;
+            Loc.X := MilsToCoord(X2);
+            Loc.Y := MilsToCoord(Y2);
+            Line.Corner := Loc;
+            Line.LineWidth := Width;
+
+            SetOwnerPart(Line, Component);
+            Component.AddSchObject(Line);
+            SchRegisterObject(Component, Line);
             Inc(Added);
         End;
     Finally
@@ -2685,6 +2878,7 @@ Begin
         'add_pins':             Result := Lib_AddPins(Params, RequestId);
         'add_symbol_rectangle': Result := Lib_AddSymbolRectangle(Params, RequestId);
         'add_symbol_line':      Result := Lib_AddSymbolLine(Params, RequestId);
+        'add_symbol_lines':     Result := Lib_AddSymbolLines(Params, RequestId);
         'create_footprint':     Result := Lib_CreateFootprint(Params, RequestId);
         'add_footprint_pad':    Result := Lib_AddFootprintPad(Params, RequestId);
         'add_footprint_track':  Result := Lib_AddFootprintTrack(Params, RequestId);
@@ -2704,6 +2898,7 @@ Begin
         'copy_component':     Result := Lib_CopyComponent(Params, RequestId);
         'audit_styles':       Result := Lib_AuditStyles(Params, RequestId);
         'set_label_format':   Result := Lib_SetLabelFormat(Params, RequestId);
+        'set_current_component': Result := Lib_SetCurrentComponent(Params, RequestId);
     Else
         Result := BuildErrorResponse(RequestId, 'UNKNOWN_ACTION', 'Unknown library action: ' + Action);
     End;

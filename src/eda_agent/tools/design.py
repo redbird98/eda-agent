@@ -24,6 +24,11 @@ from ..design.audit import audit_schematic as run_audit_schematic
 from ..design.discipline import get_discipline
 from ..design.executor import execute_plan_from_json
 from ..design.inventory import LibraryInventory, snapshot_live
+from ..design.learner import learn_from_layout
+from ..design.orchestrator import (
+    execute_plan_via_canvas_from_json,
+    preview_plan_from_json,
+)
 from ..design.plan import DesignPlan
 from ..design.validator import validate as run_validate
 
@@ -126,18 +131,26 @@ def register_design_tools(mcp) -> None:
     async def design_execute_plan(
         plan_json: Union[str, dict],
         project_path: str,
+        use_canvas: bool = True,
+        placement_hints: Optional[dict[str, dict[str, int]]] = None,
     ) -> dict[str, Any]:
-        """Instantiate a DesignPlan in Altium (parts placement only).
+        """Instantiate a DesignPlan in Altium.
 
-        Slice B.1 scope: opens or creates the project at project_path,
-        creates a SchDoc per plan.sheet, places every existing-lib part
-        at a grid-computed position, saves. Wiring (net labels at pin
-        coordinates) is NOT in this slice, see design.execute_plan_wires
-        when Slice B.2 lands.
+        Two execution paths:
 
-        The call halts early if the plan contains any needs_creation
-        parts. Resolve those first by either picking an existing-lib
-        equivalent or branching into a library-authoring sub-task.
+        - ``use_canvas=True`` (default): the new canvas-based pipeline.
+          Plan -> SymbolExtractor -> SchematicCanvas (all in Python) ->
+          one-shot batched emit to Altium. Layout decisions are made
+          before any IPC; an SVG preview is written next to the project
+          file so you can sanity-check the schematic without opening it.
+
+        - ``use_canvas=False``: the legacy executor that interleaves
+          layout with Altium IPC. Kept as a fallback while the new path
+          stabilises.
+
+        Both halt early if the plan contains any needs_creation parts.
+        Resolve those first by either picking an existing-lib equivalent
+        or branching into a library-authoring sub-task.
 
         Args:
             plan_json: Either a DesignPlan JSON string, or the DesignPlan
@@ -146,16 +159,103 @@ def register_design_tools(mcp) -> None:
                 so both shapes are accepted.
             project_path: Absolute path to the target .PrjPcb. Created
                 if it does not exist.
+            use_canvas: Pick the execution path. Default ``True`` runs
+                the new canvas pipeline; pass ``False`` to fall back to
+                the legacy executor.
+
+        Args (continued):
+            placement_hints: Optional ``{refdes: {"x": int, "y": int,
+                "rotation": int}}`` partial anchors. Hinted refdes pin
+                to the supplied position; others run through the
+                algorithmic placement (Sugiyama + multi-try scoring).
+                Used by the agent-in-loop refinement workflow:
+                  1. Run ``design_preview_plan`` -> see SVG + score.
+                  2. If layout is bad, identify specific refdes that
+                     should sit elsewhere; build hints dict.
+                  3. Call ``design_preview_plan`` again with hints ->
+                     iterate until score is acceptable.
+                  4. Call ``design_execute_plan`` with the same hints
+                     to emit the refined layout.
 
         Returns:
-            ExecutorResult dict with ok / project_path / sheets_touched /
-            placed (list of placements) / failures / needs_creation /
-            notes.
+            Result dict with ok / project_path / sheets_touched / placed
+            (list of placements) / failures / needs_creation / notes.
+            Canvas-path additions: ``canvas`` (the SchematicCanvas dict
+            snapshot) and ``preview_svg_path`` (where the SVG was written).
         """
+        if use_canvas:
+            return execute_plan_via_canvas_from_json(
+                plan_json, project_path,
+                placement_hints=placement_hints,
+            )
         if isinstance(plan_json, dict):
             plan_json = json.dumps(plan_json)
         result = execute_plan_from_json(plan_json, project_path)
         return result.to_dict()
+
+    @mcp.tool()
+    async def design_learn_from_layout(
+        project_path: str,
+    ) -> dict[str, Any]:
+        """Capture your placement edits as training data.
+
+        Workflow:
+        1. Run ``design_execute_plan`` (canvas path) — it writes a
+           ``<project>.canvas.json`` snapshot alongside the .PrjPcb.
+        2. Open the schematic in Altium, drag components to taste, save.
+        3. Call this tool. It reads the snapshot + current Altium
+           positions, diffs them, and appends one row per moved component
+           to ``%USERPROFILE%\\.eda-agent\\placement_edits.jsonl``.
+
+        Each row carries: design_id, refdes, part_role, part_lib_ref,
+        anchor_refdes, anchor_role, anchor_lib_ref, dx_mils, dy_mils,
+        rot_delta_deg, design_size, ts.
+
+        Anchor = highest-pin-count netlist neighbor on a non-power /
+        non-ground net (or spatial-nearest fallback). Captures the
+        relational placement preference, not just "I moved this 200 mils
+        right".
+
+        The accumulating log feeds ``placement_priors.json`` (the
+        relative-anchor priors used by the pipeline's placement pass).
+
+        Args:
+            project_path: Same project path you passed to
+                ``design_execute_plan``.
+
+        Returns:
+            Dict with ok, rows_appended, refdes_moved, refdes_unchanged,
+            log_path, notes.
+        """
+        return learn_from_layout(project_path)
+
+    @mcp.tool()
+    async def design_preview_plan(
+        plan_json: Union[str, dict],
+        output_svg_path: Optional[str] = None,
+        placement_hints: Optional[dict[str, dict[str, int]]] = None,
+    ) -> dict[str, Any]:
+        """Render a DesignPlan to SVG without emitting to Altium.
+
+        Same pipeline as ``design_execute_plan(use_canvas=True)`` minus
+        the place + wire + save IPC pass. Symbol extraction still
+        consults Altium on cache miss (it has to read the SchLib), but
+        no project is created and nothing is placed. Use this to
+        sanity-check a layout cheaply before committing to a full emit.
+
+        Args:
+            plan_json: DesignPlan as JSON string or dict.
+            output_svg_path: Where to write the SVG. Default:
+                ``<repo>/.symbol_cache/preview.svg``.
+
+        Returns:
+            Dict with ok / preview_svg_path / canvas (snapshot) /
+            counts {placements, wires, labels, power_ports, junctions} /
+            notes / failures.
+        """
+        return preview_plan_from_json(
+            plan_json, output_svg_path, placement_hints=placement_hints,
+        )
 
     @mcp.tool()
     async def design_audit_schematic(

@@ -5,6 +5,7 @@
 import argparse
 import logging
 import sys
+from pathlib import Path
 from mcp.server.fastmcp import FastMCP
 
 from .tools import register_all_tools
@@ -120,6 +121,24 @@ def main() -> int:
         help="Emit machine-readable JSON instead of the text report.",
     )
 
+    # vote -- pairwise-preference vote UI in the browser
+    vote_p = subparsers.add_parser(
+        "vote",
+        help=(
+            "Launch the pairwise layout-preference vote UI in your "
+            "browser. Generates two layouts of the same plan; you click "
+            "the better one. Builds training data for the quality model."
+        ),
+    )
+    vote_p.add_argument("--plan", required=True, type=Path,
+                        help="Path to the DesignPlan JSON to vote on.")
+    vote_p.add_argument("--symbols", type=Path, default=None,
+                        help="Symbol fixtures JSON for offline mode. "
+                             "Omit to use the live Altium bridge.")
+    vote_p.add_argument("--host", default="127.0.0.1")
+    vote_p.add_argument("--port", type=int, default=8765)
+    vote_p.add_argument("--debug", action="store_true")
+
     args = parser.parse_args()
 
     if args.command is None or args.command == "serve":
@@ -132,6 +151,15 @@ def main() -> int:
         return cli.cmd_scripts_path()
     if args.command == "install-scripts":
         return cli.cmd_install_scripts(dest=args.dest, force=args.force)
+    if args.command == "vote":
+        from .web.server import main as vote_main
+        return vote_main([
+            "--plan", str(args.plan),
+            *(["--symbols", str(args.symbols)] if args.symbols else []),
+            "--host", args.host,
+            "--port", str(args.port),
+            *(["--debug"] if args.debug else []),
+        ])
     if args.command in ("health", "doctor"):
         from .diag.checks import format_report, overall_exit_code
         if args.command == "health":

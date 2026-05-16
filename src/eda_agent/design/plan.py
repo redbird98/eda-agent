@@ -140,6 +140,16 @@ class Net(BaseModel):
         default=False,
         description="If True, executor adds a GND-style power port.",
     )
+    force_label: bool = Field(
+        default=False,
+        description="Override for the block-local-wires default: when True, "
+        "the executor emits a net label at every pin even if all pins share "
+        "one functional block (zone). Use sparingly — only when a wire would "
+        "genuinely tangle the block (e.g. a high-fanout intra-block rail with "
+        "10+ pins, a control line that would weave between five other "
+        "components). Has no effect on power/ground nets, which always use "
+        "port glyphs.",
+    )
     role: Optional[str] = Field(
         default=None,
         description="Generic electrical role tag the planner asserts so "

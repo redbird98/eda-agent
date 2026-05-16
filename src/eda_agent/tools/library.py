@@ -10,6 +10,31 @@ from .datasheet_hints import tag_response
 from ..config import get_config
 
 
+# Schematic symbol grid is 100 mils. Every pin Location and every
+# rectangle/line corner authored via the lib_add_* tools is rounded to
+# this grid before the bridge call. Off-grid pins break wire routing
+# in placed instances; off-grid rectangle corners produce blurry-looking
+# bodies and prevent the Altium snap mechanism from aligning them.
+# This is a hard invariant, not a hint -- every coord goes through here.
+_SCHEMATIC_GRID_MILS = 100
+
+
+def _snap(value: int) -> int:
+    """Round a mil coordinate to the schematic 100-mil grid.
+
+    Banker's-style: nearest-50 rounds away from zero. The placement
+    pipelines all snap downward (// 100 * 100), but the symbol author
+    tools accept user-supplied coords that may be off by a few mils
+    (e.g., a hand-typed 503) -- rounding is more forgiving than
+    truncating in that case.
+    """
+    if value >= 0:
+        return ((value + _SCHEMATIC_GRID_MILS // 2)
+                // _SCHEMATIC_GRID_MILS) * _SCHEMATIC_GRID_MILS
+    return -(((-value + _SCHEMATIC_GRID_MILS // 2)
+              // _SCHEMATIC_GRID_MILS) * _SCHEMATIC_GRID_MILS)
+
+
 def register_library_tools(mcp):
     """Register library tools with the MCP server."""
 
@@ -43,6 +68,43 @@ def register_library_tools(mcp):
             },
         )
         return result
+
+    @mcp.tool()
+    async def lib_set_current_component(
+        component_name: str,
+    ) -> dict[str, Any]:
+        """Make a named component the editor's current selection in the
+        active SchLib.
+
+        Required before bulk-editing a specific component's pins,
+        rectangle, or parameters via ``modify_objects`` / ``batch_modify``
+        on a SchLib. The asymmetry it fixes: ``lib_get_component_details``
+        is a read-only fetch and does NOT update the editor's current
+        component, so subsequent ``modify_objects`` on the SchLib's
+        ePin / eRectangle / eParameter iterators silently hits whatever
+        component was last UI-selected -- usually NOT the one you just
+        read.
+
+        Use this between switching components:
+            lib_set_current_component("MyIC")
+            modify_objects("ePin", scope="active_doc",
+                           filter="Location.X=200", set="Orientation=2")
+            lib_set_current_component("MyOtherPart")
+            modify_objects("ePin", scope="active_doc",
+                           filter="Location.X=200", set="Orientation=2")
+
+        Args:
+            component_name: Component name (LibRef) in the active SchLib.
+
+        Returns:
+            Dict with ``success`` + ``name``, or an error if no SchLib
+            is active or the component name isn't found in it.
+        """
+        bridge = get_bridge()
+        return await bridge.send_command_async(
+            "library.set_current_component",
+            {"name": component_name},
+        )
 
     @mcp.tool()
     async def lib_add_pin(
@@ -84,9 +146,9 @@ def register_library_tools(mcp):
             {
                 "designator": designator,
                 "name": name,
-                "x": x,
-                "y": y,
-                "length": length,
+                "x": _snap(int(x)),
+                "y": _snap(int(y)),
+                "length": _snap(int(length)),
                 "rotation": rotation,
                 "electrical_type": electrical_type,
                 "hidden": hidden,
@@ -143,9 +205,9 @@ def register_library_tools(mcp):
             fields = [
                 f"designator={desig}",
                 f"name={name}",
-                f"x={int(p.get('x', 0))}",
-                f"y={int(p.get('y', 0))}",
-                f"length={int(p.get('length', 200))}",
+                f"x={_snap(int(p.get('x', 0)))}",
+                f"y={_snap(int(p.get('y', 0)))}",
+                f"length={_snap(int(p.get('length', 200)))}",
                 f"rotation={int(p.get('rotation', 0))}",
                 f"electrical_type={p.get('electrical_type', 'passive')}",
                 f"hidden={'true' if p.get('hidden') else 'false'}",
@@ -187,15 +249,53 @@ def register_library_tools(mcp):
         result = await bridge.send_command_async(
             "library.add_symbol_rectangle",
             {
-                "x1": x1,
-                "y1": y1,
-                "x2": x2,
-                "y2": y2,
+                "x1": _snap(int(x1)),
+                "y1": _snap(int(y1)),
+                "x2": _snap(int(x2)),
+                "y2": _snap(int(y2)),
                 "fill_color": fill_color,
                 "border_color": border_color,
             },
         )
         return result
+
+    @mcp.tool()
+    async def lib_add_symbol_lines(
+        lines: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Add MANY lines to the current symbol body in ONE call.
+
+        PREFER THIS over looping ``lib_add_symbol_line``. A 12-line LED
+        diode glyph drawn line-by-line is 12 LLM turns + 12 IPC
+        round-trips + 12 redraw passes; this tool does it in one turn
+        with a single PreProcess/PostProcess pair and one editor
+        redraw at the end.
+
+        Args:
+            lines: list of dicts, each with keys ``x1``, ``y1``,
+                ``x2``, ``y2`` (mils, int), ``width`` (int 0-3,
+                default 1). Coords are snapped to the 100-mil grid.
+
+        Returns:
+            Dict with ``added``, ``failed``, ``total`` counts.
+        """
+        op_strs: list[str] = []
+        for line in lines:
+            fields = [
+                f"x1={_snap(int(line.get('x1', 0)))}",
+                f"y1={_snap(int(line.get('y1', 0)))}",
+                f"x2={_snap(int(line.get('x2', 0)))}",
+                f"y2={_snap(int(line.get('y2', 0)))}",
+                f"width={int(line.get('width', 1))}",
+            ]
+            op_strs.append(";".join(fields))
+        if not op_strs:
+            return {"error": "No lines provided", "added": 0}
+        bridge = get_bridge()
+        return await bridge.send_command_async(
+            "library.add_symbol_lines",
+            {"lines": "~~".join(op_strs)},
+        )
 
     @mcp.tool()
     async def lib_add_symbol_line(
@@ -220,7 +320,9 @@ def register_library_tools(mcp):
         bridge = get_bridge()
         result = await bridge.send_command_async(
             "library.add_symbol_line",
-            {"x1": x1, "y1": y1, "x2": x2, "y2": y2, "width": width},
+            {"x1": _snap(int(x1)), "y1": _snap(int(y1)),
+             "x2": _snap(int(x2)), "y2": _snap(int(y2)),
+             "width": width},
         )
         return result
 
@@ -953,9 +1055,9 @@ def register_library_tools(mcp):
         result = await bridge.send_command_async(
             "library.add_symbol_arc",
             {
-                "x_center": x_center,
-                "y_center": y_center,
-                "radius": radius,
+                "x_center": _snap(int(x_center)),
+                "y_center": _snap(int(y_center)),
+                "radius": _snap(int(radius)),
                 "start_angle": start_angle,
                 "end_angle": end_angle,
                 "width": width,
@@ -978,6 +1080,17 @@ def register_library_tools(mcp):
         Returns:
             Dictionary confirming polygon addition with vertex count
         """
+        # Snap each (x, y) vertex pair to the schematic 100-mil grid.
+        # Off-grid polygon vertices look ragged and don't align with
+        # the pin grid the rest of the symbol uses.
+        try:
+            coords = [int(v.strip()) for v in vertices.split(",") if v.strip()]
+            if len(coords) >= 6 and len(coords) % 2 == 0:
+                snapped = [_snap(c) for c in coords]
+                vertices = ",".join(str(c) for c in snapped)
+        except (ValueError, AttributeError):
+            # Pass through; bridge will reject malformed vertices itself.
+            pass
         bridge = get_bridge()
         result = await bridge.send_command_async(
             "library.add_symbol_polygon",

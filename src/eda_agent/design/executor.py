@@ -25,6 +25,21 @@ from pydantic import ValidationError
 
 from eda_agent.design.layout import PlacedPart, compute_layout
 from eda_agent.design.plan import DesignPlan, Net, Part, PartStatus, PinRef
+from eda_agent.design.router import (
+    _STUB_CLEARANCE_MILS,
+    _STUB_LEN_MILS,
+    _STUB_MIN_LEN_MILS,
+    _adaptive_stub_length,
+    _l_path_collisions,
+    _path_collisions,
+    _path_length,
+    _pin_direction_vector,
+    _route_l_path,
+    _route_s_bend,
+    _route_signal_pins,
+    _segment_crosses_rect,
+    _stub_endpoints,
+)
 
 logger = logging.getLogger("eda_agent.design.executor")
 
@@ -48,6 +63,17 @@ _PARAM_STAMP_TIMEOUT_S = 30.0
 
 
 @dataclass
+class NetMismatch:
+    """One net-verification mismatch from the post-emission check."""
+
+    code: str               # 'NET_SHORT' | 'NET_OPEN' | 'NET_MISSING_PIN'
+    plan_net: str           # name of the plan-side Net affected
+    actual_nets: list[str]  # actual Altium net(s) involved (sorted)
+    pins: list[str]         # involved (refdes.pin) entries
+    text: str               # human-readable description
+
+
+@dataclass
 class ExecutorResult:
     """What ``execute_plan`` returns."""
 
@@ -60,6 +86,7 @@ class ExecutorResult:
     notes: list[str] = field(default_factory=list)
     nets_labelled: int = 0
     power_ports_placed: int = 0
+    net_mismatches: list[NetMismatch] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -84,49 +111,33 @@ class ExecutorResult:
             "notes": list(self.notes),
             "nets_labelled": self.nets_labelled,
             "power_ports_placed": self.power_ports_placed,
+            "net_mismatches": [
+                {
+                    "code": m.code,
+                    "plan_net": m.plan_net,
+                    "actual_nets": list(m.actual_nets),
+                    "pins": list(m.pins),
+                    "text": m.text,
+                }
+                for m in self.net_mismatches
+            ],
         }
 
 
-def _sheet_path(project_path: Path, sheet_name: str) -> Path:
-    """Default SchDoc path for a plan-declared sheet."""
-    return project_path.parent / f"{sheet_name}.SchDoc"
-
-
-def _bom_lookup(plan: DesignPlan) -> dict[str, tuple[Optional[str], Optional[str]]]:
-    """Map refdes -> (manufacturer, mpn) drawn from plan.bom for fallback.
-
-    Built once per execution so the per-part lookup is O(1). Multiple BomLines
-    can reference the same refdes only if there's a planner bug; first match
-    wins.
-    """
-    lookup: dict[str, tuple[Optional[str], Optional[str]]] = {}
-    for line in plan.bom:
-        for refdes in line.refdes_list:
-            lookup.setdefault(refdes, (line.manufacturer, line.mpn))
-    return lookup
-
-
-def _part_parameters(
-    part: Part,
-    bom_lookup: dict[str, tuple[Optional[str], Optional[str]]],
-) -> dict[str, str]:
-    """Build the parameter sub-object the Pascal handler will stamp.
-
-    Resolution order for Manufacturer / MPN: Part fields win over BomLine
-    fallback. Empty values are stripped so the Pascal side has nothing to
-    skip and the IPC payload stays compact.
-    """
-    bom_mfr, bom_mpn = bom_lookup.get(part.refdes, (None, None))
-    mfr = part.manufacturer or bom_mfr
-    mpn = part.mpn or bom_mpn
-
-    candidate: dict[str, Optional[str]] = {
-        "Value": part.value,
-        "Manufacturer": mfr,
-        "Manufacturer Part Number": mpn,
-        "Footprint": part.footprint,
-    }
-    return {k: v for k, v in candidate.items() if v}
+# Pure-Python helpers moved to ``_wiring.py`` so both this legacy executor
+# and the new canvas-based pipeline read from the same source of truth.
+# Re-exported here under the same names for backward compat — anything
+# that did ``from eda_agent.design.executor import _detect_junctions``
+# keeps working.
+from eda_agent.design._wiring import (
+    _bom_lookup,
+    _detect_junctions,
+    _ground_style,
+    _net_representation,
+    _part_parameters,
+    _power_port_orientation,
+    _sheet_path,
+)
 
 
 def execute_plan(plan: DesignPlan, project_path: str, *, bridge: Optional[Any] = None) -> ExecutorResult:
@@ -295,13 +306,11 @@ def execute_plan(plan: DesignPlan, project_path: str, *, bridge: Optional[Any] =
 
         if placement_ops:
             try:
-                bridge.send_command(
+                place_response = bridge.send_command(
                     "generic.place_sch_components_from_library",
                     {"placements": "~~".join(placement_ops)},
                     timeout=_PLACE_TIMEOUT_S * max(1, len(placement_ops) // 4),
                 )
-                for part in parts_to_place:
-                    result.placed.append(placement_by_refdes[part.refdes])
             except Exception as exc:
                 for part in parts_to_place:
                     result.failures.append(
@@ -312,6 +321,43 @@ def execute_plan(plan: DesignPlan, project_path: str, *, bridge: Optional[Any] =
                         )
                     )
                 continue
+            # Pascal returns {"placed", "failed", "total", "failed_refdes"?}
+            # failed_refdes is a comma-separated "DESIG:CODE,DESIG:CODE" list of
+            # parts the handler silently skipped (LibRef missing, lib resolve
+            # failed, or LoadComponentFromLibrary returned nil). Without this
+            # parsing, the bulk handler's partial success is invisible: every
+            # part lands in result.placed even when only N-1 actually made it.
+            failed_payload = ""
+            if isinstance(place_response, dict):
+                failed_payload = str(place_response.get("failed_refdes", "") or "")
+            failed_map: dict[str, str] = {}
+            if failed_payload:
+                for entry in failed_payload.split(","):
+                    entry = entry.strip()
+                    if not entry:
+                        continue
+                    if ":" in entry:
+                        refdes, code = entry.split(":", 1)
+                    else:
+                        refdes, code = entry, "PLACE_FAILED"
+                    failed_map[refdes.strip()] = code.strip() or "PLACE_FAILED"
+            for part in parts_to_place:
+                if part.refdes in failed_map:
+                    code = failed_map[part.refdes]
+                    result.failures.append(
+                        PartFailure(
+                            refdes=part.refdes,
+                            reason=(
+                                f"Pascal place handler reported {code} for "
+                                f"lib_ref={part.lib_ref!r} from "
+                                f"lib_path={part.lib_path!r}. The symbol was "
+                                "not added to the SchDoc."
+                            ),
+                            code=code,
+                        )
+                    )
+                else:
+                    result.placed.append(placement_by_refdes[part.refdes])
 
         # Bulk-stamp Value / Manufacturer / MPN / Footprint on every just-placed
         # part. Bulk handler iterates the sheet once, applies all params under
@@ -367,311 +413,156 @@ def execute_plan(plan: DesignPlan, project_path: str, *, bridge: Optional[Any] =
         result.notes.append(f"save_all failed: {exc}")
         result.ok = False
 
-    if result.failures:
+    # Net verification: query Altium's compiled netlist and check that
+    # the as-built topology matches the plan. Catches shorts (two plan
+    # nets merged into one Altium net) and opens (one plan net split
+    # across multiple Altium nets). Bridging through pins is invisible
+    # to ERC (which sees one valid net and no floating pins), so this
+    # is the only line of defence.
+    try:
+        _verify_nets(plan, str(project), bridge, result)
+    except Exception as exc:
+        result.notes.append(f"net verification skipped: {exc}")
+
+    if result.failures or result.net_mismatches:
         result.ok = False
 
     return result
 
 
-def _ground_style(net_name: str) -> str:
-    """Pick a power-port style for an is_ground net based on its name.
+def _verify_nets(
+    plan: DesignPlan,
+    project_path: str,
+    bridge: Any,
+    result: ExecutorResult,
+) -> None:
+    """Compare planned net topology to Altium's compiled netlist.
 
-    Altium has separate gnd_power / gnd_signal / gnd_earth glyphs. When the
-    net name carries a hint we honour it; otherwise default to gnd_power.
+    For every plan-side Net, every (refdes, pin) it lists must land
+    on the SAME Altium-side net (its name may differ -- Altium
+    auto-generates names like ``NetC1_1`` for unlabelled nets, that's
+    fine as long as the topology matches). Different plan-nets must
+    land on DIFFERENT Altium-nets.
+
+    Mismatches are surfaced as ``NetMismatch`` entries with codes:
+
+    - ``NET_SHORT``: two or more plan nets ended up on the same
+      Altium-net (a wire bridged them). This is the failure ERC
+      doesn't catch -- Altium sees one valid net so ERC's "no
+      floating pin" check passes silently.
+    - ``NET_OPEN``: one plan net's pins split across multiple
+      Altium-nets (a wire is missing).
+    - ``NET_MISSING_PIN``: a planned pin doesn't appear in the
+      compiled netlist at all.
+
+    Power and ground nets carry their name via the port glyph and
+    typically match the plan name exactly; signal nets get auto-
+    generated names that we treat as opaque tokens.
     """
-    upper = net_name.upper()
-    if "EARTH" in upper or upper == "PE":
-        return "gnd_earth"
-    if "AGND" in upper or "ANALOG" in upper or upper == "AGND":
-        return "gnd_signal"
-    return "gnd_power"
+    netlist = bridge.send_command(
+        "project.get_nets",
+        {"limit": "10000", "project_path": project_path},
+        timeout=_LABEL_TIMEOUT_S,
+    )
+    if not isinstance(netlist, dict):
+        result.notes.append("net verification: get_nets returned non-dict")
+        return
+    # A bridge that doesn't actually implement get_nets (mock / fake)
+    # returns no ``pins`` key at all; treat that as "verification not
+    # available" rather than "every pin is missing".
+    if "pins" not in netlist:
+        result.notes.append("net verification skipped: bridge did not return a netlist")
+        return
+
+    # pin (refdes, pin_id) -> actual Altium net name
+    actual: dict[tuple[str, str], str] = {}
+    for entry in netlist.get("pins", []) or []:
+        comp = str(entry.get("component", ""))
+        pin = str(entry.get("pin", ""))
+        net = str(entry.get("net", ""))
+        if comp and pin:
+            actual[(comp, pin)] = net
+
+    # For each plan net: which actual nets do its pins end up on?
+    plan_to_actual: dict[str, list[str]] = {}
+    for n in plan.nets:
+        nets_seen: list[str] = []
+        for pr in n.pins:
+            actual_net = actual.get((pr.refdes, str(pr.pin)))
+            if actual_net is None:
+                result.net_mismatches.append(NetMismatch(
+                    code="NET_MISSING_PIN",
+                    plan_net=n.name,
+                    actual_nets=[],
+                    pins=[f"{pr.refdes}.{pr.pin}"],
+                    text=(
+                        f"plan net {n.name!r} pin {pr.refdes}.{pr.pin} is "
+                        "not present in the compiled netlist"
+                    ),
+                ))
+                continue
+            nets_seen.append(actual_net)
+        plan_to_actual[n.name] = nets_seen
+        unique = sorted(set(nets_seen))
+        if len(unique) > 1:
+            pins_repr = [f"{pr.refdes}.{pr.pin}" for pr in n.pins]
+            result.net_mismatches.append(NetMismatch(
+                code="NET_OPEN",
+                plan_net=n.name,
+                actual_nets=unique,
+                pins=pins_repr,
+                text=(
+                    f"plan net {n.name!r} pins are split across "
+                    f"{len(unique)} actual nets ({', '.join(unique)}) -- "
+                    "a wire is missing"
+                ),
+            ))
+
+    # Multiple plan nets sharing one actual net -> short.
+    actual_to_plan: dict[str, set[str]] = {}
+    for plan_name, nets_seen in plan_to_actual.items():
+        for a in nets_seen:
+            actual_to_plan.setdefault(a, set()).add(plan_name)
+    for actual_name, plan_names in actual_to_plan.items():
+        if len(plan_names) > 1:
+            offenders = sorted(plan_names)
+            pins = sorted(
+                f"{pr.refdes}.{pr.pin}"
+                for n in plan.nets
+                if n.name in plan_names
+                for pr in n.pins
+            )
+            result.net_mismatches.append(NetMismatch(
+                code="NET_SHORT",
+                plan_net=", ".join(offenders),
+                actual_nets=[actual_name],
+                pins=pins,
+                text=(
+                    f"plan nets {offenders} are SHORTED -- all merged "
+                    f"into actual net {actual_name!r} (ERC doesn't catch "
+                    "this; a wire is bridging pins it shouldn't)"
+                ),
+            ))
 
 
 # 100-mil stub wire length between a pin's electrical hot end and the net
 # label / power port that attaches to it. ERC reports "Floating net labels"
 # when a label sits exactly on a pin endpoint without an intervening wire,
 # so every label/port gets pulled out along the pin's vector by this much.
-_STUB_LEN_MILS = 300
+# Stub-length constants and the pin-direction / adaptive-length / stub-
+# endpoint helpers were extracted to ``design.router`` so this file
+# stays focused on orchestration + Altium IPC. They are re-imported at
+# the top of this module so the rest of the executor keeps using the
+# same names.
+#
+# _ground_style / _power_port_orientation / _net_representation /
+# _detect_junctions / _bom_lookup / _part_parameters / _sheet_path
+# moved to ``_wiring.py`` and re-exported via the import block near the
+# top of this file.
+
+# _route_signal_pins moved to design.router; re-imported below.
 
 
-def _pin_direction_vector(orientation: int) -> tuple[int, int]:
-    """Map Altium's TRotationBy90 pin orientation to a unit vector.
-
-    0=right (+x), 1=up (+y), 2=left (-x), 3=down (-y). Matches what
-    Pascal's ``Gen_GetSchComponentPins`` returns from ``Pin.Orientation``.
-    Unknown values fall through as (1, 0) so the stub still draws.
-    """
-    if orientation == 1:
-        return (0, 1)
-    if orientation == 2:
-        return (-1, 0)
-    if orientation == 3:
-        return (0, -1)
-    return (1, 0)
-
-
-def _stub_endpoints(
-    pin_x: int,
-    pin_y: int,
-    orientation: int,
-    pin_length_mils: int,  # retained for ABI compat; ignored
-) -> tuple[tuple[int, int], tuple[int, int]]:
-    """Compute (stub_start, stub_end) for a pin.
-
-    ``ISch_Pin.Location`` returns the ELECTRICAL endpoint of the pin
-    (the point where a wire attaches), NOT the body-side end. Verified
-    empirically: U1 pin 1 BOOT of a placed TPS54331D symbol returned
-    location (3500, 4400) when the IC body's left edge was at x=3700;
-    the leftmost (electrical) end of the pin graphic at x=3500 is what
-    Pin.Location reports.
-
-    Therefore the stub starts AT Pin.Location and extends outward along
-    the pin's orientation vector by ``_STUB_LEN_MILS``. ``pin_length``
-    is not added: doing so was the original Slice 1-3 bug that left the
-    stub wires floating ``pin_length`` mils away from the actual pin
-    terminal.
-    """
-    dx, dy = _pin_direction_vector(orientation)
-    hot_x = pin_x
-    hot_y = pin_y
-    end_x = hot_x + dx * _STUB_LEN_MILS
-    end_y = hot_y + dy * _STUB_LEN_MILS
-    return ((hot_x, hot_y), (end_x, end_y))
-
-
-def _power_port_orientation(pin_orientation: int, is_ground: bool) -> int:
-    """Canonical schematic convention:
-
-    - VCC / power rails ALWAYS point up   (orientation 1) -- bar / circle
-      glyph sits above the connection point.
-    - GND ALWAYS points down              (orientation 3) -- triangle /
-      bar glyph hangs below the connection point.
-
-    Independent of the pin's outward direction. The stub wire absorbs
-    the horizontal-vs-vertical mismatch when the pin faces sideways:
-    the port's electrical connection is always at the stub end, and
-    the glyph extends UP for power or DOWN for ground from there.
-
-    ``pin_orientation`` is unused (retained for ABI compat).
-    """
-    del pin_orientation  # noqa: F841 - retained for ABI compat
-    return 3 if is_ground else 1
-
-
-def _net_label_orientation(pin_orientation: int) -> int:
-    """Pick net-label rotation so text runs parallel to the stub wire.
-
-    Horizontal pins (right/left) -> label horizontal (0).
-    Vertical pins (up/down)      -> label rotated 90 so text reads along Y.
-    """
-    if pin_orientation in (1, 3):
-        return 1
-    return 0
-
-
-def _segment_crosses_rect(
-    x1: int, y1: int, x2: int, y2: int,
-    rx1: int, ry1: int, rx2: int, ry2: int,
-) -> bool:
-    """True iff axis-aligned segment (x1,y1)->(x2,y2) crosses the interior
-    of the axis-aligned rectangle [rx1,rx2] x [ry1,ry2]. Endpoints sitting
-    on the boundary count as crossings only when the segment continues
-    into the interior.
-    """
-    rx1, rx2 = (rx1, rx2) if rx1 <= rx2 else (rx2, rx1)
-    ry1, ry2 = (ry1, ry2) if ry1 <= ry2 else (ry2, ry1)
-    if y1 == y2:  # horizontal segment
-        if y1 <= ry1 or y1 >= ry2:
-            return False
-        seg_x_lo, seg_x_hi = min(x1, x2), max(x1, x2)
-        return seg_x_lo < rx2 and seg_x_hi > rx1
-    if x1 == x2:  # vertical segment
-        if x1 <= rx1 or x1 >= rx2:
-            return False
-        seg_y_lo, seg_y_hi = min(y1, y2), max(y1, y2)
-        return seg_y_lo < ry2 and seg_y_hi > ry1
-    return False  # only orthogonal segments here
-
-
-def _l_path_collisions(
-    x1: int, y1: int, x2: int, y2: int,
-    horiz_first: bool,
-    obstacles: list[tuple[int, int, int, int]],
-    skip_at: tuple[tuple[int, int], ...] = (),
-) -> int:
-    """Count how many obstacle rects an L-path (x1,y1)->(x2,y2) crosses.
-
-    Obstacles are (rx1, ry1, rx2, ry2) bboxes. Skip rects that contain
-    either endpoint (those are the pin's own component or the centroid's
-    host part — wires must enter / leave SOME bbox to connect).
-    """
-    if horiz_first:
-        segs = [(x1, y1, x2, y1), (x2, y1, x2, y2)]
-    else:
-        segs = [(x1, y1, x1, y2), (x1, y2, x2, y2)]
-    n = 0
-    for (sx1, sy1, sx2, sy2) in segs:
-        for rx1, ry1, rx2, ry2 in obstacles:
-            # Skip obstacles owning either endpoint.
-            owns_start = rx1 <= x1 <= rx2 and ry1 <= y1 <= ry2
-            owns_end = rx1 <= x2 <= rx2 and ry1 <= y2 <= ry2
-            if owns_start or owns_end:
-                continue
-            if (x1, y1) in skip_at or (x2, y2) in skip_at:
-                continue
-            if _segment_crosses_rect(sx1, sy1, sx2, sy2, rx1, ry1, rx2, ry2):
-                n += 1
-                break
-    return n
-
-
-def _route_l_path(
-    x1: int, y1: int, x2: int, y2: int,
-    obstacles: list[tuple[int, int, int, int]],
-) -> list[tuple[int, int, int, int]]:
-    """Pick the better-of-two L-path orderings (H-then-V vs V-then-H)
-    based on which crosses fewer obstacles. Returns the segment list."""
-    if x1 == x2 and y1 == y2:
-        return []
-    if x1 == x2 or y1 == y2:
-        return [(x1, y1, x2, y2)]
-    h_first = _l_path_collisions(x1, y1, x2, y2, True, obstacles)
-    v_first = _l_path_collisions(x1, y1, x2, y2, False, obstacles)
-    if v_first < h_first:
-        return [(x1, y1, x1, y2), (x1, y2, x2, y2)]
-    return [(x1, y1, x2, y1), (x2, y1, x2, y2)]
-
-
-def _route_signal_pins(
-    stub_ends: list[tuple[int, int]],
-    obstacles: list[tuple[int, int, int, int]] | None = None,
-) -> list[tuple[int, int, int, int]]:
-    """Manhattan-route wires connecting the stub ends of pins on a signal net.
-
-    Within-block schematic convention: connect same-net pins with real
-    wires rather than relying on per-pin net labels. Power and ground
-    nets are exempt (the rail symbology is the connection).
-
-    For 2 pins: a 2-segment L-path between the two stub ends.
-    For 3+ pins: a star to the centroid, each spoke an L-path.
-
-    All segments are axis-aligned (horizontal OR vertical), grid-snapped.
-    When ``obstacles`` (component-body bboxes) are supplied each L-path
-    picks the ordering that crosses fewer of them; this is what task #50
-    needed to drop the 37-wire-through-component crossings the audit saw.
-    """
-    obstacles = obstacles or []
-    if len(stub_ends) < 2:
-        return []
-    segs: list[tuple[int, int, int, int]] = []
-    if len(stub_ends) == 2:
-        (x1, y1), (x2, y2) = stub_ends
-        segs.extend(_route_l_path(x1, y1, x2, y2, obstacles))
-        return segs
-
-    # 3+ pin: try CHAIN topology (sort by x then y, connect consecutive
-    # pairs) and STAR topology (hub at a smartly-chosen point), pick the
-    # one with fewer crossings. Chain avoids the central hub crowding;
-    # star is sometimes shorter total but tends to cross the middle.
-    def _count_chain_crossings(pts: list[tuple[int, int]]) -> tuple[int, list[tuple[int, int, int, int]]]:
-        cs = 0
-        ss: list[tuple[int, int, int, int]] = []
-        for i in range(len(pts) - 1):
-            x1, y1 = pts[i]
-            x2, y2 = pts[i + 1]
-            spoke = _route_l_path(x1, y1, x2, y2, obstacles)
-            ss.extend(spoke)
-            for (sx1, sy1, sx2, sy2) in spoke:
-                for rx1, ry1, rx2, ry2 in obstacles:
-                    owns_a = rx1 <= x1 <= rx2 and ry1 <= y1 <= ry2
-                    owns_b = rx1 <= x2 <= rx2 and ry1 <= y2 <= ry2
-                    if owns_a or owns_b:
-                        continue
-                    if _segment_crosses_rect(sx1, sy1, sx2, sy2, rx1, ry1, rx2, ry2):
-                        cs += 1
-                        break
-        return cs, ss
-
-    # Try chain in x-then-y sort and in y-then-x sort.
-    by_x = sorted(stub_ends, key=lambda p: (p[0], p[1]))
-    by_y = sorted(stub_ends, key=lambda p: (p[1], p[0]))
-    best_segs: list[tuple[int, int, int, int]] = []
-    best_crossings = -1
-    for chain in (by_x, by_y):
-        cs, ss = _count_chain_crossings(chain)
-        if best_crossings < 0 or cs < best_crossings:
-            best_crossings = cs
-            best_segs = ss
-
-    if best_crossings == 0:
-        return best_segs
-
-    # 3+ pin star. Pick the routing HUB so that no L-path spoke is forced to
-    # cross a component body. Candidates:
-    #   * each stub end (using a pin as the hub - cleanest for nets where one
-    #     pin clearly belongs to the IC anchoring the net)
-    #   * the geometric centroid (snapped to grid)
-    #   * the centroid pushed out of any obstacle it lands inside
-    # The candidate with the fewest spoke collisions wins.
-    raw_cx = sum(p[0] for p in stub_ends) // len(stub_ends)
-    raw_cy = sum(p[1] for p in stub_ends) // len(stub_ends)
-    raw_cx = (raw_cx // 100) * 100
-    raw_cy = (raw_cy // 100) * 100
-
-    candidates: list[tuple[int, int]] = [(raw_cx, raw_cy)]
-    candidates.extend(stub_ends)
-    # Centroid pushed to each obstacle edge if the centroid is interior.
-    for rx1, ry1, rx2, ry2 in obstacles:
-        if rx1 < raw_cx < rx2 and ry1 < raw_cy < ry2:
-            candidates.append((rx1 - 100, raw_cy))
-            candidates.append((rx2 + 100, raw_cy))
-            candidates.append((raw_cx, ry1 - 100))
-            candidates.append((raw_cx, ry2 + 100))
-
-    best_segs: list[tuple[int, int, int, int]] = []
-    best_crossings = -1
-    for (hx, hy) in candidates:
-        cand_segs: list[tuple[int, int, int, int]] = []
-        crossings = 0
-        for (x, y) in stub_ends:
-            if x == hx and y == hy:
-                continue
-            spoke = _route_l_path(x, y, hx, hy, obstacles)
-            cand_segs.extend(spoke)
-            for (sx1, sy1, sx2, sy2) in spoke:
-                for rx1, ry1, rx2, ry2 in obstacles:
-                    owns_start = rx1 <= x <= rx2 and ry1 <= y <= ry2
-                    owns_end = rx1 <= hx <= rx2 and ry1 <= hy <= ry2
-                    if owns_start or owns_end:
-                        continue
-                    if _segment_crosses_rect(
-                        sx1, sy1, sx2, sy2, rx1, ry1, rx2, ry2
-                    ):
-                        crossings += 1
-                        break
-        if crossings < best_crossings:
-            best_crossings = crossings
-            best_segs = cand_segs
-            if crossings == 0:
-                break
-    return best_segs
-
-
-def _signal_label_anchor(
-    stub_ends: list[tuple[int, int]],
-) -> tuple[int, int]:
-    """Pick where a signal net's ONE label sits.
-
-    2-pin nets: at the first stub end (sits next to a part, easy to read).
-    3+ pin nets: at the centroid (the star's hub).
-    """
-    if not stub_ends:
-        return (0, 0)
-    if len(stub_ends) <= 2:
-        return stub_ends[0]
-    cx = sum(p[0] for p in stub_ends) // len(stub_ends)
-    cy = sum(p[1] for p in stub_ends) // len(stub_ends)
-    return ((cx // 100) * 100, (cy // 100) * 100)
 
 
 def _place_net_labels(
@@ -768,6 +659,12 @@ def _place_net_labels(
                         p.x_mils + half, p.y_mils + half,
                     ))
     refdes_to_sheet: dict[str, str] = {p.refdes: p.sheet for p in plan.parts}
+    # zone is the functional-block identifier per discipline rule 3.
+    # None means the part isn't assigned to a block — those parts fall
+    # into the implicit "unzoned" group when deciding wire vs label.
+    refdes_to_zone: dict[str, Optional[str]] = {
+        p.refdes: p.zone for p in plan.parts
+    }
 
     # (sheet_name, refdes) -> {pin_id -> (x_mils, y_mils, orientation, pin_length_mils)}
     # orientation is the TRotationBy90 enum (0=right, 1=up, 2=left, 3=down)
@@ -803,6 +700,14 @@ def _place_net_labels(
         pending_wires: list[tuple[int, int, int, int]] = []
         pending_labels: list[tuple[str, int, int]] = []
         pending_ports: list[tuple[str, int, int, str, int]] = []
+
+        # Stagger counter: how many stubs have already been emitted
+        # from this (refdes, direction) pair on this sheet. Each
+        # subsequent same-direction stub gets +100 mil so the L-path
+        # bends don't share a column. Without this two pins on the
+        # same connector both bend at the same x and the wires sit on
+        # top of each other.
+        stagger_counter: dict[tuple[str, int, int], int] = {}
 
         sheet_p = str(_sheet_path(project, sheet_name))
 
@@ -848,10 +753,24 @@ def _place_net_labels(
                 if nm and nm not in pm:
                     pm[nm] = entry
 
+        # Two-pass per sheet:
+        #
+        # Pass 1 - stub emission: for every (net, pin) compute the stub
+        #   endpoint, emit the stub wire, and record the stub_end so we
+        #   know where each net's pins terminate on the sheet.
+        #
+        # Pass 2 - routing / labels / ports: each net's L-path router
+        #   sees not just component bboxes as obstacles but ALSO every
+        #   OTHER net's stub_end as a small point-obstacle. Without
+        #   this, a power-port spoke from one pin can run straight
+        #   along an x-column that another net's stub_end happens to
+        #   sit on, bridging the two nets (Altium auto-junctions at
+        #   coincident endpoints, so the wires merge into one net
+        #   silently).
+
+        sheet_net_actions: dict[str, list[tuple[Any, tuple[int, int], int]]] = {}
+
         for net in nets:
-            # Two-pass: gather per-pin info into ``net_actions`` first, then
-            # decide between per-pin power ports (rails) and wire-routing +
-            # ONE label (signals) at the net level.
             net_actions: list[tuple[Any, tuple[int, int], int]] = []
             for pin_ref in net.pins:
                 if pin_ref.refdes not in placed_refdes:
@@ -934,20 +853,53 @@ def _place_net_labels(
                     continue
 
                 x, y, pin_orient, pin_len = entry
+                dx_dir, dy_dir = _pin_direction_vector(pin_orient)
+                stagger_key = (pin_ref.refdes, dx_dir, dy_dir)
+                extra = stagger_counter.get(stagger_key, 0) * 100
+                stagger_counter[stagger_key] = (
+                    stagger_counter.get(stagger_key, 0) + 1
+                )
                 (hot_x, hot_y), (end_x, end_y) = _stub_endpoints(
-                    x, y, pin_orient, pin_len
+                    x, y, pin_orient, pin_len,
+                    obstacles=obstacles_by_sheet.get(sheet_name, []),
+                    extra_length_mils=extra,
                 )
                 # Every pin still gets a stub wire from the pin endpoint
                 # outward to the label / port / routing-junction point.
                 pending_wires.append((hot_x, hot_y, end_x, end_y))
                 net_actions.append((pin_ref, (end_x, end_y), pin_orient))
 
+            if net_actions:
+                sheet_net_actions[net.name] = net_actions
+
+        # End Pass 1. Build the sheet-wide stub-end point cloud so each
+        # net's routing can avoid running through other nets' stub_ends.
+        all_stub_end_points: set[tuple[int, int]] = set()
+        for actions in sheet_net_actions.values():
+            for _, (ex, ey), _ in actions:
+                all_stub_end_points.add((ex, ey))
+
+        # Pass 2: routing / labels / ports per net.
+        for net in nets:
+            net_actions = sheet_net_actions.get(net.name)
             if not net_actions:
                 continue
+            own_stub_ends: set[tuple[int, int]] = {a[1] for a in net_actions}
+            other_stub_end_bboxes = [
+                (x - 50, y - 50, x + 50, y + 50)
+                for (x, y) in all_stub_end_points
+                if (x, y) not in own_stub_ends
+            ]
+            routing_obstacles = (
+                list(obstacles_by_sheet.get(sheet_name, []))
+                + other_stub_end_bboxes
+            )
 
             stub_ends: list[tuple[int, int]] = [a[1] for a in net_actions]
 
-            if net.is_power or net.is_ground:
+            representation = _net_representation(net, refdes_to_zone)
+
+            if representation == "port":
                 # Rails: power-port consolidation (task #51). Group pins by
                 # proximity (Manhattan radius), place ONE rail glyph per
                 # cluster, wire every pin in the cluster to the glyph via
@@ -974,7 +926,7 @@ def _place_net_labels(
                     if not joined:
                         clusters.append([i])
 
-                sheet_obstacles = obstacles_by_sheet.get(sheet_name, [])
+                sheet_obstacles = routing_obstacles
                 for cl in clusters:
                     cluster_pts = [net_actions[i][1] for i in cl]
                     cluster_orients = [net_actions[i][2] for i in cl]
@@ -1006,15 +958,21 @@ def _place_net_labels(
                             pt[0], pt[1], centroid_x, port_y, sheet_obstacles
                         ):
                             pending_wires.append(seg)
-            else:
-                # Signal nets: wire pins together directly + ONE label.
+            elif representation == "wire":
+                # Block-local net: every pin lives in the same zone, so the
+                # connection is visually traceable within that block. Wire
+                # the stub ends together, no label.
                 for seg in _route_signal_pins(
-                    stub_ends, obstacles_by_sheet.get(sheet_name, [])
+                    stub_ends, routing_obstacles
                 ):
                     pending_wires.append(seg)
-                if stub_ends:
-                    label_x, label_y = _signal_label_anchor(stub_ends)
-                    pending_labels.append((net.name, label_x, label_y))
+
+            else:  # representation == "label_per_pin"
+                # Cross-block net OR planner-asserted force_label: drop a
+                # net label at every pin's stub end. No inter-pin wires —
+                # connectivity is established by the shared label name.
+                for (end_x, end_y) in stub_ends:
+                    pending_labels.append((net.name, end_x, end_y))
                     result.nets_labelled += 1
 
         # End of net/pin loops for this sheet — flush the three batches.
@@ -1033,6 +991,28 @@ def _place_net_labels(
                 result.notes.append(
                     f"bulk stub-wires for sheet {sheet_name} failed: {exc}"
                 )
+
+            # Emit junction dots wherever 3+ wires meet or a wire ends
+            # mid-segment of another wire. Altium's auto-junction-on-
+            # compile sometimes misses these, particularly when wires
+            # are scripted-placed rather than user-drawn. Explicit
+            # eJunction objects give the schematic the conventional
+            # dot at every T-junction.
+            junctions = _detect_junctions(pending_wires)
+            if junctions:
+                junctions_payload = "~~".join(
+                    f"x={jx};y={jy}" for (jx, jy) in junctions
+                )
+                try:
+                    bridge.send_command(
+                        "generic.place_junctions",
+                        {"junctions": junctions_payload},
+                        timeout=_LABEL_TIMEOUT_S * max(1, len(junctions) // 8),
+                    )
+                except Exception as exc:
+                    result.notes.append(
+                        f"bulk junctions for sheet {sheet_name} failed: {exc}"
+                    )
 
         if pending_labels:
             labels_payload = "~~".join(

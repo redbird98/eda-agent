@@ -240,6 +240,14 @@ Var
     R : ISch_Rectangle;
     L : ISch_Line;
 Begin
+    { GOTCHA observed 2026-05-16: callers using modify_objects / batch_modify }
+    { with a pipe-combined set like `Location.X=200|Orientation=2` on an ePin }
+    { saw Location.X take effect but Orientation silently dropped. Writing    }
+    { Location on a pin triggers a re-layout that can snapshot the previous   }
+    { Orientation. Workaround until the multi-set parser applies properties   }
+    { in an Altium-safe order (Orientation first, then Location): split the   }
+    { combined set into two separate ops, the second filtering on the NEW    }
+    { Location.X so it still matches the moved pin.                          }
     Try
         // Coordinates (expected in mils). `Obj.Location` returns a copy of
         // the TLocation record via the GetState_Location reader; writing
@@ -1997,7 +2005,9 @@ Begin
     Wire.SetState_Vertex(1, Point(MilsToCoord(X1), MilsToCoord(Y1)));
     Wire.InsertVertex := 2;
     Wire.SetState_Vertex(2, Point(MilsToCoord(X2), MilsToCoord(Y2)));
-    Wire.Color := 0;
+    { Color := 0 renders the wire BLACK so it looks like a graphic
+      line, not an electrical wire. Leave Color at factory default so
+      Altium's wire colour scheme applies. }
     Wire.LineWidth := eSmall;
 
     SchServer.ProcessControl.PreProcess(SchDoc, '');
@@ -3640,6 +3650,70 @@ Begin
 End;
 
 {..............................................................................}
+{ Gen_PlaceJunctions - Bulk junction placement on the active schematic.        }
+{ Params: junctions = 'x=100;y=200~~x=300;y=400~~...'                          }
+{..............................................................................}
+
+Function Gen_PlaceJunctions(Params : String; RequestId : String) : String;
+Var
+    JuncStr, Remaining, Op : String;
+    OpCount, Placed, Failed : Integer;
+    X, Y : Integer;
+    SchDoc : ISch_Document;
+    Junction : ISch_GraphicalObject;
+Begin
+    JuncStr := ExtractJsonValue(Params, 'junctions');
+    If JuncStr = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAM', 'junctions is required');
+        Exit;
+    End;
+
+    SchDoc := SchServer.GetCurrentSchDocument;
+    If SchDoc = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_SCHEMATIC', 'No schematic document is active');
+        Exit;
+    End;
+
+    Placed := 0;
+    Failed := 0;
+    OpCount := 0;
+    Remaining := JuncStr;
+
+    SchServer.ProcessControl.PreProcess(SchDoc, '');
+    Try
+        While True Do
+        Begin
+            Op := NextBatchOp(Remaining);
+            If Op = '' Then Break;
+            OpCount := OpCount + 1;
+            X := StrToIntDef(GetBatchField(Op, 'x'), 0);
+            Y := StrToIntDef(GetBatchField(Op, 'y'), 0);
+
+            Junction := SchServer.SchObjectFactory(eJunction, eCreate_Default);
+            If Junction = Nil Then
+            Begin
+                Inc(Failed);
+                Continue;
+            End;
+
+            Junction.Location := Point(MilsToCoord(X), MilsToCoord(Y));
+            SchDoc.RegisterSchObjectInContainer(Junction);
+            SchRegisterObject(SchDoc, Junction);
+            Inc(Placed);
+        End;
+    Finally
+        SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
+        SchDoc.GraphicallyInvalidate;
+    End;
+
+    Result := BuildSuccessResponse(RequestId,
+        '{"placed":' + IntToStr(Placed) + ',"failed":' + IntToStr(Failed)
+        + ',"total":' + IntToStr(OpCount) + '}');
+End;
+
+{..............................................................................}
 { Get comprehensive info about the active document                            }
 { Returns: file_path, kind, sheet_size, title_block, grid_size, unit_system  }
 {..............................................................................}
@@ -4261,12 +4335,14 @@ Begin
 
     SchServer.ProcessControl.PreProcess(SchDoc, '');
     Try Probe.Location := Point(MilsToCoord(X), MilsToCoord(Y)); Except End;
-    If NetName <> '' Then
-        Try Probe.Text := NetName; Except End;
-    If MethodStr = 'all_nets' Then
-        Try Probe.ProbeMethod := eProbeMethodAllNets; Except End
-    Else
-        Try Probe.ProbeMethod := eProbeMethodProbedNetsOnly; Except End;
+    { ISch_Probe exposes essentially nothing settable from DelphiScript:
+      ``Text``, ``NetName`` and ``ProbeMethod`` all raise "Undeclared
+      identifier" at compile (Try/Except cannot catch). The probe
+      auto-picks up the net of the wire it lands on, and the default
+      probe method ("probed nets only") is what we want anyway.
+      ``net_name`` and ``probe_method`` from the request are accepted
+      for forward compatibility but currently echoed back in the
+      response without being applied. }
 
     SchDoc.RegisterSchObjectInContainer(Probe);
     SchRegisterObject(SchDoc, Probe);
@@ -4364,21 +4440,35 @@ End;
 { empty when it doesn't look like a standard passive.                         }
 Function ClassifyPassivePrefix(Comment : String) : String;
 Var
-    S : String;
-    Ch : Char;
+    S, U, First, Second : String;
 Begin
+    { DelphiScript quirk: ``UpCase(S[1])`` raises EInvalidCast because
+      S[1] is treated as String (not Char), and UpCase here expects a
+      Char. Use string ops instead: ``UpperCase(S)`` + 1-char ``Copy``
+      slices. Same applies to the second-character class check. }
     Result := '';
     If Comment = '' Then Exit;
     S := Trim(Comment);
-    Ch := UpCase(S[1]);
-    If (Ch = 'R') Or (Ch = 'L') Or (Ch = 'C') Then
+    If S = '' Then Exit;
+    U := UpperCase(S);
+    First := Copy(U, 1, 1);
+    If (First = 'R') Or (First = 'L') Or (First = 'C') Then
     Begin
-        { Accept "R1", "10k", "Res", "Cap" etc., anything that starts with    }
-        { the letter and is short. Longer names (e.g. "Resonator") we skip.    }
-        If (Length(S) <= 20) And ((Length(S) = 1) Or (S[2] = ' ') Or
-           (S[2] >= '0') And (S[2] <= '9') Or (UpCase(S[2]) >= 'A') And
-           (UpCase(S[2]) <= 'Z')) Then
-            Result := Ch;
+        { Accept "R1", "10k", "Res", "Cap" etc., anything that starts with
+          the letter and is short. Longer names (e.g. "Resonator") we
+          skip. }
+        If Length(S) = 1 Then
+        Begin
+            Result := First;
+        End
+        Else If Length(S) <= 20 Then
+        Begin
+            Second := Copy(U, 2, 1);
+            If (Second = ' ') Or
+               ((Second >= '0') And (Second <= '9')) Or
+               ((Second >= 'A') And (Second <= 'Z')) Then
+                Result := First;
+        End;
     End;
 End;
 
@@ -4771,10 +4861,14 @@ Begin
             Comp := Obj;
             Designator := '';
             Try Designator := Comp.Designator.Text; Except End;
-            Comment := '';
-            Try Comment := Comp.DM_Comment; Except End;
+            { DM_Comment / DM_LibraryReference are on the DM-API
+              component interface (returned by SchDoc.DM_Components),
+              NOT on the ISch_Component you get from SchIterator.
+              Read via the parameter table and direct LibReference
+              property instead. }
+            Comment := GetCompParamText(Comp, 'Comment');
             LibRef := '';
-            Try LibRef := Comp.DM_LibraryReference; Except End;
+            Try LibRef := Comp.LibReference; Except End;
 
             SpicePrefix := GetCompParamText(Comp, 'SpicePrefix');
             Value := GetCompParamText(Comp, 'Value');
@@ -5298,7 +5392,10 @@ Begin
             Wire.SetState_Vertex(1, Point(MilsToCoord(X1), MilsToCoord(Y1)));
             Wire.InsertVertex := 2;
             Wire.SetState_Vertex(2, Point(MilsToCoord(X2), MilsToCoord(Y2)));
-            Wire.Color := 0;
+            { Color := 0 makes wires render BLACK and look like graphic
+              lines; leave Wire.Color at the factory default so the
+              schematic editor's wire colour scheme applies (blue by
+              default). LineWidth=eSmall is the canonical wire weight. }
             Wire.LineWidth := eSmall;
 
             SchDoc.RegisterSchObjectInContainer(Wire);
@@ -5323,7 +5420,7 @@ End;
 
 Function Gen_PlaceSchComponentsFromLibrary(Params : String; RequestId : String) : String;
 Var
-    PlaceStr, Op, Remaining : String;
+    PlaceStr, Op, Remaining, FailedRefdes, ResponseBody : String;
     OpCount, Placed, Failed, Rotation, OrientationVal : Integer;
     LibPath, LibRef, Desig, Footprint, AvailHint : String;
     X, Y : Integer;
@@ -5348,6 +5445,7 @@ Begin
     Failed := 0;
     OpCount := 0;
     Remaining := PlaceStr;
+    FailedRefdes := '';
 
     SchServer.ProcessControl.PreProcess(SchDoc, '');
     Try
@@ -5367,6 +5465,11 @@ Begin
             If LibRef = '' Then
             Begin
                 Inc(Failed);
+                If Desig <> '' Then
+                Begin
+                    If FailedRefdes <> '' Then FailedRefdes := FailedRefdes + ',';
+                    FailedRefdes := FailedRefdes + Desig + ':MISSING_LIB_REF';
+                End;
                 Continue;
             End;
 
@@ -5375,6 +5478,11 @@ Begin
                 If Not ResolveLibRef(LibPath, LibRef, AvailHint) Then
                 Begin
                     Inc(Failed);
+                    If Desig <> '' Then
+                    Begin
+                        If FailedRefdes <> '' Then FailedRefdes := FailedRefdes + ',';
+                        FailedRefdes := FailedRefdes + Desig + ':RESOLVE_FAILED';
+                    End;
                     Continue;
                 End;
 
@@ -5390,6 +5498,11 @@ Begin
             If Comp = Nil Then
             Begin
                 Inc(Failed);
+                If Desig <> '' Then
+                Begin
+                    If FailedRefdes <> '' Then FailedRefdes := FailedRefdes + ',';
+                    FailedRefdes := FailedRefdes + Desig + ':LOAD_FAILED';
+                End;
                 Continue;
             End;
 
@@ -5416,9 +5529,14 @@ Begin
         SchDoc.GraphicallyInvalidate;
     End;
 
-    Result := BuildSuccessResponse(RequestId,
-        '{"placed":' + IntToStr(Placed) + ',"failed":' + IntToStr(Failed)
-        + ',"total":' + IntToStr(OpCount) + '}');
+    ResponseBody := '{"placed":' + IntToStr(Placed)
+        + ',"failed":' + IntToStr(Failed)
+        + ',"total":' + IntToStr(OpCount);
+    If FailedRefdes <> '' Then
+        ResponseBody := ResponseBody + ',"failed_refdes":"'
+            + EscapeJsonString(FailedRefdes) + '"';
+    ResponseBody := ResponseBody + '}';
+    Result := BuildSuccessResponse(RequestId, ResponseBody);
 End;
 
 {..............................................................................}
@@ -6266,6 +6384,7 @@ Begin
         'get_object_count': Result := Gen_GetObjectCount(Params, RequestId);
         'place_no_erc':     Result := Gen_PlaceNoERC(Params, RequestId);
         'place_junction':   Result := Gen_PlaceJunction(Params, RequestId);
+        'place_junctions':  Result := Gen_PlaceJunctions(Params, RequestId);
         'get_document_info': Result := Gen_GetDocumentInfo(Params, RequestId);
         'set_grid':         Result := Gen_SetGrid(Params, RequestId);
         'set_sch_units':    Result := Gen_SetSchUnits(Params, RequestId);

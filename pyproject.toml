@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "eda-agent"
-version = "0.2.0"
+version = "0.3.0"
 description = "MCP server for EDA tool automation — currently supports Altium Designer. 150+ tools for schematic, PCB, and library ops via DelphiScript bridge."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -28,12 +28,18 @@ dependencies = [
     "pydantic>=2.0",
     "psutil>=5.9.0",
     "pywin32>=306",
+    "networkx>=3.0",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0",
     "pytest-asyncio>=0.21",
+]
+# Local HTTP vote UI for pairwise layout preference capture. Flask is
+# the only runtime dep; the rest is stdlib. ~70 KB on disk.
+web = [
+    "flask>=3.0",
 ]
 
 [project.scripts]

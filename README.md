@@ -44,7 +44,7 @@ This is **not** a batch tool that opens a project, runs a script, and exits. It'
 - **Activity logs**: every command is appended to `workspace/activity.log` (CSV with timestamps, durations, command name, response size). The bridge also writes `bridge_trace.log` for IPC-level diagnostics
 - **Bulk-tool nudge**: when a singular tool is hit 2 to 3 times in 10 s, the response carries a `_hint_bulk` field pointing at the batch variant. Clients that missed the bulk tool in the docstring learn about it at runtime
 - **Design agent surface**: six MCP tools (`design_get_discipline`, `design_snapshot_inventory`, `design_validate_plan`, `design_execute_plan`, `design_audit_schematic`, `design_validate`) that let an MCP-client LLM produce a structured `DesignPlan` JSON, instantiate it on a fresh sheet (parts + wires + labels + rail glyphs), audit the result for layout problems, and validate ERC + connectivity. Datasheet-first, NDA-isolated by construction
-- **Force-directed schematic layout**: spring + repulsion solver on the `plan.nets` graph, hard-shove second pass guarantees 0 component-bbox overlaps on dense designs, mass-weighted (ICs anchor, passives drift), edge-bias for `power_in` / `power_out` connectors. Topology-agnostic — works for a buck, an LDO, an MCU, an audio amp, anything with a clean net graph
+- **Motif composer + canonical priors + Sugiyama placement**: three-layer placement strategy. (1) Sugiyama / force-directed gives every part a baseline position. (2) The motif composer detects canonical sub-circuits in the netlist (bypass cap, voltage divider, fb_divider, lc_output, ...) via VF2 subgraph isomorphism and splats each match into its frozen canonical layout — same data shape, IC-anchored or self-contained. (3) Canonical priors apply per-role-pair nudges (e.g. `vcc_decoup` sits 400 mils from its IC). A final overlap-shove pass repairs any collisions; sheet-edge clamping keeps every glyph and port within the page boundary. Role-compatibility filter drops false-positive motif matches (a structural rc-lowpass that's actually a decoupling cap stays out of the filter motif). Topology-agnostic — works for a buck, an LDO, an MCU, an audio amp, anything with a clean net graph
 - **Within-block schematic wiring**: stub wires from each pin endpoint outward to the label / port (no more "floating net labels" ERC warnings), Manhattan routing between same-net pins for signal nets, **rail consolidation** clusters power / ground pins so one VCC bar or GND triangle serves many pins instead of stacking N glyphs. Obstacle-aware: every L-path picks the orientation that crosses fewest component bodies, using real `BoundingRectangle` data queried from Altium
 - **Atomic-parts contract**: every existing-status Part must carry `mpn`, `footprint`, `datasheet_url`; the inventory snapshot exposes those fields per component; `design_validate` emits `atomic_parts` warnings when the contract is missed. Aligns with the KiCad Atomic / Digi-Key Library / atopile / JITX convention
 - **Schematic audit**: `design_audit_schematic` returns structured `{overlaps, wire_crossings, stacked_ports}` for the active schematic — pairs of components whose bboxes intersect, wire segments crossing a non-endpoint component body (real Pascal-side `Vertex.*` + `BoundingRectangle.*` accessors), and clusters of 3+ rail glyphs of the same net. Each violation carries enough geometry for the planner to compute a corrective move. Programmatic feedback loop without needing a visual snapshot
@@ -314,9 +314,9 @@ Symbol and footprint creation, linking, batch editing, comparison.
 
 | Tool | Purpose |
 |---|---|
-| `lib_create_symbol` / `lib_copy_component` / `lib_set_component_description` | Symbol lifecycle |
+| `lib_create_symbol` / `lib_copy_component` / `lib_set_component_description` / `lib_set_current_component` | Symbol lifecycle. `lib_set_current_component` switches the SchLib editor's active component so subsequent generic-primitive calls (`modify_objects` on pins / rect / parameters) target the named symbol rather than whatever was last UI-selected |
 | `lib_add_pin` / `lib_add_pins` / `lib_get_pin_list` | Pins (bulk variant places the whole pinout in one call) |
-| `lib_add_symbol_rectangle` / `lib_add_symbol_line` / `lib_add_symbol_arc` / `lib_add_symbol_polygon` | Symbol graphics |
+| `lib_add_symbol_rectangle` / `lib_add_symbol_line` / `lib_add_symbol_lines` / `lib_add_symbol_arc` / `lib_add_symbol_polygon` | Symbol graphics. Coordinates auto-snap to the 100-mil grid. `lib_add_symbol_lines` does N lines in one IPC round-trip for diode glyphs / op-amp triangles / connector outlines |
 | `lib_create_footprint` | Footprint creation |
 | `lib_add_footprint_pad` / `lib_add_footprint_track` / `lib_add_footprint_arc` | Footprint primitives |
 | `lib_link_footprint` / `lib_link_3d_model` | Link footprint / 3D model to symbol |
@@ -386,16 +386,19 @@ Queries and modifications on the active PCB document.
 | `pcb_export_coordinates` | Pick-and-place export |
 | `pcb_delete_object` | Delete a specific object |
 
-### Design agent (5 tools)
+### Design agent (8 tools)
 
-A high-level surface for autonomous schematic creation. The MCP client's LLM is the planner; these tools provide the discipline, the inventory, and the executor.
+A high-level surface for autonomous schematic creation. The MCP client's LLM is the planner; these tools provide the discipline, the inventory, the placer, and the executor.
 
 | Tool | Purpose |
 |---|---|
-| `design_get_discipline` | Returns the design discipline doc (net-label-driven wiring, datasheet-first part choice, NDA isolation, ...) plus the `DesignPlan` JSON schema the executor enforces. Always call this first when starting a design task |
+| `design_get_discipline` | Returns the design discipline doc (datasheet-first part choice, NDA isolation, user-libraries-are-read-only, top-leftmost pin at (0,0) symbol-authoring convention, 100-mil grid, hide non-essential parameters, functional pin layout, ...) plus the `DesignPlan` JSON schema the executor enforces. Always call this first when starting a design task |
 | `design_snapshot_inventory` | Open a list of `.SchLib` paths and report what components they contain (lib_ref, designator prefix, pin count, description, footprint). The planner uses this to bias its part choices toward existing-lib parts |
 | `design_validate_plan` | Schema + cross-check on a candidate `DesignPlan` JSON. No Altium round-trip; cheap pre-flight |
-| `design_execute_plan` | Open or create the project, create SchDoc(s) for each plan sheet, place every existing-lib part on a grid, drop net labels at every plan-defined pin endpoint, drop power ports for `is_power` / `is_ground` nets, save. Halts on any `needs_creation` part with a structured error so the planner can resolve before instantiating |
+| `design_preview_plan` | Run the full pipeline (motif composer + priors + wiring + routing-shorts detector) WITHOUT touching Altium, returning the canvas snapshot + an SVG preview for the planner to inspect before emit |
+| `design_execute_plan` | Open or create the project, create SchDoc(s) for each plan sheet, place every existing-lib part using the motif composer + canonical priors, route wires between same-block pins, drop labels for cross-block nets, drop power ports for `is_power` / `is_ground` nets, stamp Manufacturer / MPN / Datasheet (hidden by default), save. Halts on any `needs_creation` part with a structured error so the planner can resolve before instantiating. Accepts `placement_hints` for agent-driven layout refinement |
+| `design_audit_schematic` | Returns structured `{overlaps, wire_crossings, stacked_ports}` for the active schematic. Lets the planner read geometric violations and compute corrective placement moves |
+| `design_learn_from_layout` | After the user drags components in Altium and saves, diffs pre-edit vs post-edit positions and appends per-refdes `(part_role, anchor_role, dx, dy, rot_delta)` rows to `~/.eda-agent/placement_edits.jsonl`. The offline `build_placement_priors.py` aggregator turns that log into the relative-anchor priors the placement pipeline consumes |
 | `design_validate` | ERC + `get_unconnected_pins` + compile messages bundled into a structured `ValidationReport(passed, errors[], warnings[], notes[])` so the planner can read failures and revise the plan |
 
 ## Architecture

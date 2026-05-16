@@ -43,10 +43,49 @@ these rules before producing a plan; they bound your choices.
    than substituting a wrong existing one. The executor escalates
    needs_creation parts to the user; that is the right behavior.
 
-3. **Wiring is net-label-driven, not geometric.** For every electrical
-   connection, define a Net with all participating pins. The executor
-   drops a net label at each pin (there is no "wire" object in the plan).
-   Buses are just named nets, one per signal.
+3. **Connectivity policy: ports > block-local wires > cross-block labels.**
+   For every electrical connection, define a Net with all participating
+   pins. The executor decides the visual representation per Net using a
+   three-tier priority rule:
+
+   **(a) Power and ground = port glyphs.** Set `is_power=true` or
+   `is_ground=true` (see rule 4). The executor places a power-port glyph
+   at every pin on the net — no wires, no labels.
+
+   **(b) Block-local nets = WIRES (default).** When every pin on a Net
+   lives in the same functional block (regulator + its passives, amp +
+   its gain network, RF front-end + matching, MCU + its decoupling,
+   sensor + its filter, etc.), the executor draws actual wires from pin
+   to pin. Local sub-circuit topology MUST be visually traceable — a
+   reader looking at the buck block should see the FB divider,
+   compensation, bootstrap and LC output as ONE connected drawing, not
+   a maze of name-matched label stubs. This is the default for any net
+   that isn't power/ground.
+
+   **(c) Cross-block nets = labels.** When pins span two or more
+   functional blocks, every pin gets a net label. This is the canonical
+   block-diagram-at-the-top-level read; wiring across blocks would
+   produce inter-block spaghetti. MCU GPIO is almost always cross-block
+   by definition (MCU pin in the MCU block, peripheral pin in an
+   audio / RF / sensor block) and so almost always uses labels.
+
+   **Common-sense override:** the priority order is (a) > (b) > (c).
+   Within tier (b), a particular intra-block net MAY be promoted to a
+   label IF a wire would genuinely tangle the block — e.g. a
+   high-fanout local rail that touches every part in a 10-cap
+   decoupling stack, or a control line that would have to weave between
+   five other components to stay block-local. This is a deviation from
+   the default, not the default itself. Every block-local net starts as
+   wires; promoting one to a label requires a one-line justification in
+   `open_questions` or in the Net comment.
+
+   **Block membership** is expressed via `zones` (rule 11) or a `block`
+   field on each Part. The executor reads block membership and applies
+   (a)→(b)→(c) automatically; the planner's job is to assign each Part
+   to a block and let the executor pick the representation.
+
+   Buses are just named nets, one per signal — the same tier rule
+   applies to each.
 
 4. **Power and ground are explicit Nets** with `is_power=true` or
    `is_ground=true`. The executor uses power ports for those instead of
@@ -97,7 +136,105 @@ these rules before producing a plan; they bound your choices.
     a component, surface that in `open_questions` rather than silently
     shipping an incomplete Part.
 
-13. **IC schematic symbols: functional pin layout, NOT package order.**
+12b. **Agent-generated artifacts go in the local workspace, NEVER under
+    the user profile.** Test projects, preview SVGs, snapshot JSON,
+    debug dumps -- everything the agent creates as scratch output --
+    must land under the current working directory (typically the
+    eda-agent repo or wherever the user invoked the tool). Conventional
+    locations:
+    - `test_projects/` for dev / debug `.PrjPcb` files the agent
+      creates while iterating
+    - `.preview_*.svg` at the repo root for one-off preview renders
+    - `.symbol_cache/` (gitignored) for the symbol-extraction cache
+
+    NEVER default to `%USERPROFILE%\EDA Agent\projects\...` or
+    similar user-profile paths. That dir is reserved for the user's
+    own deliberate projects and for the eda-agent IPC workspace.
+
+    The agent must pick the project path from the user's explicit
+    instruction or default to `<cwd>/test_projects/<name>/<name>.PrjPcb`.
+    When the user gives a name only (no path), expand it to the local
+    convention -- not a global path.
+
+13. **User libraries are read-only.** Treat every SchLib that the agent
+    did not author in the current session as the user's property and
+    MUST NOT modify it. That includes:
+    - pin geometry (Location, Orientation, length, name)
+    - body primitives (rectangles, lines, polygons, arcs, fill color)
+    - parameter visibility / position / style
+    - parameter values, designator prefix, description
+    - component name / alias
+
+    Allowed: USING parts from those libraries in placements, BOM,
+    emitted schematics — read-only consumption is fine. Forbidden: any
+    write that lands in the user's `.SchLib` file.
+
+    Agent-owned libraries (created this session via
+    `lib_create_symbol` or named in the task history as agent-authored)
+    are the only ones the agent may restyle, fix, or restructure.
+    Bulk operations like "hide Manufacturer params across every symbol"
+    must include an explicit allowlist of agent-owned libraries.
+
+    If the user wants the agent to touch their library, they will say
+    so explicitly ("clean up the parameters in my caps library").
+    Without that, the default is no-write.
+
+14. **Symbol-local origin: top-leftmost pin wire-connection at (0, 0).**
+    When authoring any new schematic symbol (`lib_create_symbol` +
+    `lib_add_pins`), the local coordinate frame MUST be anchored so
+    that the TOP-LEFTMOST pin's WIRE-CONNECTION POINT sits at exactly
+    (0, 0). Concretely:
+    - Identify the top-leftmost pin: smallest X column among left-side
+      pins, then largest Y within that column.
+    - Place that pin so its wire-connection (electrical end, where a
+      wire would snap) lands at (0, 0).
+    - Every other pin's Y is ≤ 0 from there; right-column wire
+      connections sit at (W, 0) for the top-rightmost pin, where W is
+      the body width (typically 1000 mils for an SOIC-8-style block).
+    - Body rectangle top edge aligns with Y = 0 (or just below);
+      bottom edge wraps the lowest pin.
+
+    Why: a consistent local origin means placing the same symbol on a
+    schematic always behaves the same way (the placed instance's
+    reported anchor point matches the wire grid), and wire routing
+    code in the pipeline doesn't have to special-case per-symbol
+    offsets. Aligns with Altium's own default behaviour for new
+    components and keeps the wire grid clean.
+
+    Concretely with the standard 200-mil pin length and 100-mil grid:
+    - Top-leftmost pin: Location = (200, 0), Orientation = 2 (leftward)
+      → wire snaps at (200 − 200, 0) = (0, 0). ✓
+    - Top-rightmost pin: Location = (body_width, 0), Orientation = 0
+      → wire snaps at (body_width + 200, 0). ✓
+    - Subsequent pins on the same column step DOWN in 100-mil
+      increments: Y = −100, −200, etc.
+
+15. **All pin locations AND rectangle corners must lie on the 100-mil
+    grid.** Off-grid coordinates break Altium's snap mechanism and
+    make wires look frayed when placed instances are dragged. The
+    `tools/library.py` helpers (`lib_add_pin`, `lib_add_pins`,
+    `lib_add_symbol_rectangle`, `lib_add_symbol_line`,
+    `lib_add_symbol_arc`, `lib_add_symbol_polygon`) round every coord
+    to the nearest 100 before sending to the bridge, so callers can
+    pass approximate values and trust the snap — but never deliberately
+    pass off-grid values expecting them to land off-grid.
+
+16. **Hide non-essential parameters on agent-authored symbols.**
+    Visible by default on the symbol body: Designator (the refdes
+    like U1, R1), Comment / Value (the part value). Hidden by
+    default: Manufacturer, Manufacturer Part Number, Datasheet. The
+    hidden parameters still exist on the symbol and appear in BOM
+    output; they just don't clutter the schematic. When creating a
+    new symbol the agent should set `IsHidden = true` on those
+    parameters immediately after creation.
+
+17. **Symbol body fill: Altium default yellow.** New symbol bodies
+    (the bounding `eRectangle`) should use `AreaColor = 8454143`
+    (Altium's standard light-yellow body) with `IsSolid = true`.
+    Bare-outline bodies look like first-draft work and don't match
+    the rest of the user's library.
+
+18. **IC schematic symbols: functional pin layout, NOT package order.**
     When authoring a schematic symbol for an IC via
     `lib_create_symbol` + `lib_add_pins`, NEVER lay the pins out in
     physical package order. Pins go ONLY on the LEFT and RIGHT sides

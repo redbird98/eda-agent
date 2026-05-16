@@ -132,7 +132,9 @@ def test_execute_plan_rejects_invalid_json() -> None:
 
 def test_discipline_text_contains_key_rules() -> None:
     text = get_discipline()
-    assert "net-label-driven" in text.lower()
+    # Connectivity policy: ports > block-local wires > cross-block labels.
+    assert "block-local" in text.lower()
+    assert "port glyph" in text.lower()
     assert "datasheet" in text.lower()
     assert "nda" in text.lower()
     assert "DesignPlan JSON schema" in text
