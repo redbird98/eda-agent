@@ -461,8 +461,10 @@ Function ProcessSchDocObjects(SchDoc : ISch_Document; ObjTypeInt : Integer;
     Mode : String; DocPath : String;
     Var TotalMatched : Integer; Limit : Integer) : String;
 Var
-    Iterator : ISch_Iterator;
+    Iterator, SymIter : ISch_Iterator;
     Obj, FoundObj : ISch_GraphicalObject;
+    Sym : ISch_SheetSymbol;
+    Removed : Boolean;
     ObjJson : String;
     First : Boolean;
     MaxIter : Integer;
@@ -492,11 +494,40 @@ Begin
             End;
             SchDoc.SchIterator_Destroy(Iterator);
             If FoundObj = Nil Then Break;
-            SchDoc.RemoveSchObject(FoundObj);
+            { Sheet entries belong to their parent sheet symbol's child       }
+            { container, not the SchDoc. SchDoc.RemoveSchObject silently      }
+            { no-ops on them, leaving the entry placed. Walk sheet symbols    }
+            { until one of them accepts the remove. Try/Except absorbs the    }
+            { wrong-parent failures.                                          }
+            If ObjTypeInt = eSheetEntry Then
+            Begin
+                Removed := False;
+                SymIter := SchDoc.SchIterator_Create;
+                SymIter.AddFilter_ObjectSet(MkSet(eSheetSymbol));
+                Try
+                    Sym := SymIter.FirstSchObject;
+                    While Sym <> Nil Do
+                    Begin
+                        Try
+                            Sym.RemoveSchObject(FoundObj);
+                            Removed := True;
+                            Break;
+                        Except End;
+                        Sym := SymIter.NextSchObject;
+                    End;
+                Finally
+                    SchDoc.SchIterator_Destroy(SymIter);
+                End;
+                If Not Removed Then
+                    Try SchDoc.RemoveSchObject(FoundObj); Except End;
+            End
+            Else
+                SchDoc.RemoveSchObject(FoundObj);
             Inc(TotalMatched);
             Dec(MaxIter);
         End;
         SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
+        SchDoc.GraphicallyInvalidate;
         Exit;
     End;
 
