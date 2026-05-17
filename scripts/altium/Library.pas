@@ -883,8 +883,8 @@ End;
 {                  also loads each candidate live (slow on big libs).        }
 {   library_path - optional, restrict the search to a single .SchLib file.  }
 {   limit        - max matches (default 100).                                }
-{ Returns a JSON array of {name, alias_name, description, library_path,     }
-{ part_count} per match.                                                     }
+{ Returns a JSON array of [name, alias_name, description, library_path,    }
+{ part_count] per match.                                                    }
 Function SearchOneLibrary(LibPath, Query, SearchType : String;
     SearchParams : Boolean; SchLib : ISch_Lib;
     Var ResultsJson : String; Var First : Boolean;
@@ -1102,8 +1102,8 @@ End;
 { Returns metadata (name, description, part_count, alias_name) PLUS pins,    }
 { parameters, and full visual-style records for the designator, the comment, }
 { and every parameter (font_id, color, is_hidden, x, y, orientation,        }
-{ justification). FontId can be expanded into a {name, size, bold, italic}  }
-{ description by calling get_font_spec; we pass it through as an integer    }
+{ justification). FontId can be expanded into a (name, size, bold, italic)  }
+{ record by calling get_font_spec; we pass it through as an integer here    }
 { here so the cost stays on the caller when style detail isn't needed.       }
 {                                                                              }
 { Pins/parameters require loading the live ISch_Component, which only the    }
@@ -1114,8 +1114,8 @@ End;
 { disturb in-flight edits on other libs.                                     }
 {                                                                              }
 { Schema breaks vs the previous version (introduced two commits ago):        }
-{   designator_prefix (str) -> designator (object {text, font_id, color,    }
-{                              is_hidden, x, y, orientation, justification})}
+{   designator_prefix (str) -> designator (object: text, font_id, color,    }
+{                              is_hidden, x, y, orientation, justification) }
 {   pins[].font_id, color, label_hidden added                                }
 {   comment (object) added                                                   }
 {   parameter_styles (array, parallel to parameters dict) added              }
@@ -2321,8 +2321,8 @@ End;
 {   expect_designator_color=N     - filter: trim matches.                    }
 {   limit=5000                    - cap on emitted entries.                  }
 {                                                                              }
-{ Returns: {library_path, count, mismatch_count, limit, truncated,           }
-{          filter_applied, components:[...]}.                                 }
+{ Returns object with library_path, count, mismatch_count, limit, truncated, }
+{ filter_applied, components:[...].                                          }
 Function Lib_AuditStyles(Params : String; RequestId : String) : String;
 Var
     LibPath, FocusedPath, FlagStr : String;
@@ -2571,7 +2571,7 @@ End;
 {..............................................................................}
 { Lib_SetLabelFormat - bulk OR single-component label-style writer.            }
 {                                                                              }
-{ Sets any subset of {font_id, color, is_hidden, orientation, justification}  }
+{ Sets any subset of (font_id, color, is_hidden, orientation, justification) }
 { on a target ISch_Label (designator, comment, or one named parameter) for    }
 { either one component (component_name supplied) or every component in the   }
 { library (component_name omitted). Symmetric counterpart to                  }
@@ -2594,8 +2594,8 @@ End;
 {   only_mismatched=true|false    (default true) - skip already-compliant   }
 {   limit=5000                    - cap on processed components in bulk     }
 {                                                                              }
-{ Returns: {library_path, target, scope, total, modified, already_compliant, }
-{          missing_target, failed, limit, truncated}.                         }
+{ Returns object: library_path, target, scope, total, modified,              }
+{ already_compliant, missing_target, failed, limit, truncated.              }
 Procedure ResolveTargetLabel(Component : ISch_Component; Target : String;
     Var Lbl : ISch_Label; Var Found : Boolean);
 Var

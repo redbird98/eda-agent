@@ -82,7 +82,7 @@ class TestAltiumBridge:
 
         bridge.ensure_workspace()
         request = CommandRequest(command="test.command", params={"key": "value"})
-        bridge._write_request(request)
+        bridge._publish_request(request)
 
         request_path = temp_workspace / f"request_{request.id}.json"
         assert request_path.exists()

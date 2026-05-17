@@ -2415,13 +2415,19 @@ Begin
     Else If IOStr = 'bidirectional' Then Entry.IOType := ePortBidirectional
     Else Entry.IOType := ePortUnspecified;
 
-    If SideStr = 'right' Then Entry.Side := eSide_Right
-    Else If SideStr = 'top' Then Entry.Side := eSide_Top
-    Else If SideStr = 'bottom' Then Entry.Side := eSide_Bottom
-    Else Entry.Side := eSide_Left;
+    If SideStr = 'right' Then Entry.Side := eRightSide
+    Else If SideStr = 'top' Then Entry.Side := eTopSide
+    Else If SideStr = 'bottom' Then Entry.Side := eBottomSide
+    Else Entry.Side := eLeftSide;
 
+    { Use AddAndPositionSchObject, not AddSchObject. The plain AddSchObject       }
+    { attaches the entry to the parent sheet symbol's child container but does    }
+    { NOT compute the entry's geometric position from Side + DistanceFromTop;     }
+    { the entry ends up drawn at default 0,0 world coords, off the sheet symbol.  }
+    { AddAndPositionSchObject performs the position calc against the symbol's    }
+    { current bounds. See SDK reference, ISch_BasicContainer interface.          }
     SchServer.ProcessControl.PreProcess(SchDoc, '');
-    Sym.AddSchObject(Entry);
+    Sym.AddAndPositionSchObject(Entry);
     SchRegisterObject(Sym, Entry);
     SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
     SchDoc.GraphicallyInvalidate;
@@ -3055,7 +3061,7 @@ End;
 {..............................................................................}
 { Get pin world coordinates for a placed component on the active SchDoc.     }
 { Params: designator                                                          }
-{ Returns array of {pin_number, pin_name, x_mils, y_mils, orientation}.      }
+{ Returns array of [pin_number, pin_name, x_mils, y_mils, orientation].     }
 {                                                                             }
 { Used by the design executor to look up pin positions after place_sch_     }
 { component_from_library so it can drop net labels at the right spot.        }
@@ -5765,8 +5771,8 @@ End;
 {..............................................................................}
 { Gen_GetSchDocPins - Whole-sheet pin dump in one IPC call.                    }
 { Params: sheet_path (optional, defaults to active doc).                        }
-{ Returns: {"pins":[{"refdes":"R1","pin_number":"1","pin_name":"...",          }
-{                    "x_mils":N,"y_mils":N,"orientation":N,"pin_length_mils":N}]} }
+{ Returns object with "pins" array; each entry has refdes, pin_number,       }
+{ pin_name, x_mils, y_mils, orientation, pin_length_mils.                    }
 {..............................................................................}
 
 Function Gen_GetSchDocPins(Params : String; RequestId : String) : String;
