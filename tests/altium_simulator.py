@@ -369,14 +369,33 @@ class AltiumSimulator:
             time.sleep(self._poll_interval)
 
     def _process_single_request(self) -> bool:
-        """Mirrors Dispatcher.pas ProcessSingleRequest.
+        """Mirrors Dispatcher.pas ProcessSingleRequest under IPC v2.
 
-        Pascal reads request.json (single file), extracts the id from its
-        body, and writes the response to response_<id>.json.
+        IPC v2 publishes requests as per-id files ``request_<id>.json`` so
+        keep-alive pings and user calls never race on a single shared
+        filename. Scan the workspace, pick the first matching file, extract
+        the id from the filename (authoritative -- the file body's id must
+        agree but does not pick the path), read the body, dispatch, and
+        write ``response_<id>.json``.
+
+        Heartbeat protocol: write ``progress_<id>.json`` before dispatch
+        and remove it after the response is written. Python's bridge uses
+        the progress marker to distinguish "Altium is still working" from
+        "polling loop dead", letting legitimately slow handlers run past
+        the per-call deadline without false timeouts.
         """
-        request_path = self.workspace_dir / "request.json"
-        if not request_path.exists():
+        request_path: Optional[Path] = None
+        for entry in self.workspace_dir.glob("request_*.json"):
+            request_path = entry
+            break
+        if request_path is None:
             return False
+
+        # The id lives in the filename: request_<id>.json. The IPC contract
+        # demands the body's id field match; if it doesn't, we trust the
+        # filename (mirroring Pascal's IsValidRequestId-on-filename pattern).
+        stem = request_path.stem  # request_<id>
+        filename_id = stem[len("request_"):] if stem.startswith("request_") else ""
 
         try:
             content = request_path.read_text(encoding="utf-8")
@@ -400,7 +419,8 @@ class AltiumSimulator:
         except json.JSONDecodeError:
             return False
 
-        request_id = request_data.get("id", "")
+        body_id = request_data.get("id", "")
+        request_id = body_id or filename_id
         command = request_data.get("command", "")
         params = request_data.get("params", {})
         proto_ver = request_data.get("protocol_version")
@@ -408,36 +428,54 @@ class AltiumSimulator:
         if not request_id or not _is_valid_request_id(request_id):
             return False
 
-        if not command:
-            response_content = _build_error_response(
-                request_id, "MALFORMED_REQUEST",
-                "Request missing required field: command",
-            )
-        elif proto_ver is not None and proto_ver != SIM_PROTOCOL_VERSION:
-            response_content = _build_error_response(
-                request_id,
-                "PROTOCOL_VERSION_MISMATCH",
-                f"Client protocol_version={proto_ver} does not match server PROTOCOL_VERSION={SIM_PROTOCOL_VERSION}.",
-                details_json=json.dumps(
-                    {"client_version": proto_ver, "server_version": SIM_PROTOCOL_VERSION}
-                ),
-            )
-        else:
-            try:
-                response_content = self._dispatch(command, params, request_id)
-            except Exception:
-                response_content = _build_error_response(
-                    request_id, "INTERNAL_ERROR",
-                    f"Unhandled exception processing: {command}",
-                )
-
-        response_path = self.workspace_dir / f"response_{request_id}.json"
-        tmp_path = response_path.with_suffix(".json.tmp")
+        progress_path = self.workspace_dir / f"progress_{request_id}.json"
         try:
-            tmp_path.write_text(response_content, encoding="utf-8")
-            tmp_path.replace(response_path)
+            progress_path.write_text(
+                json.dumps({"started_ms": int(time.monotonic() * 1000)}),
+                encoding="utf-8",
+            )
         except (IOError, OSError):
             pass
+
+        try:
+            if not command:
+                response_content = _build_error_response(
+                    request_id, "MALFORMED_REQUEST",
+                    "Request missing required field: command",
+                )
+            elif proto_ver is not None and proto_ver != SIM_PROTOCOL_VERSION:
+                response_content = _build_error_response(
+                    request_id,
+                    "PROTOCOL_VERSION_MISMATCH",
+                    f"Client protocol_version={proto_ver} does not match server PROTOCOL_VERSION={SIM_PROTOCOL_VERSION}.",
+                    details_json=json.dumps(
+                        {"client_version": proto_ver, "server_version": SIM_PROTOCOL_VERSION}
+                    ),
+                )
+            else:
+                try:
+                    response_content = self._dispatch(command, params, request_id)
+                except Exception:
+                    response_content = _build_error_response(
+                        request_id, "INTERNAL_ERROR",
+                        f"Unhandled exception processing: {command}",
+                    )
+
+            response_path = self.workspace_dir / f"response_{request_id}.json"
+            tmp_path = response_path.with_suffix(".json.tmp")
+            try:
+                tmp_path.write_text(response_content, encoding="utf-8")
+                tmp_path.replace(response_path)
+            except (IOError, OSError):
+                pass
+        finally:
+            # Delete progress AFTER the response is written so there is never
+            # a moment where neither file exists (Python's deadline-check
+            # would otherwise race the cleanup and fire a false hard-timeout).
+            try:
+                progress_path.unlink()
+            except OSError:
+                pass
 
         return True
 

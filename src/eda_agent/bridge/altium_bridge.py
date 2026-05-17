@@ -37,6 +37,14 @@ logger = logging.getLogger("eda_agent.bridge")
 # Bump together; mismatch raises AltiumProtocolError on either side.
 PROTOCOL_VERSION = 2
 
+# Heartbeat-aware deadline extension cap. The Pascal dispatcher writes a
+# progress_<id>.json marker while a handler runs; Python's poll loop extends
+# the per-call deadline by another `timeout` window each time it observes
+# fresh progress, up to this many extensions. With the default 10 s timeout
+# this gives a 300 s ceiling per command -- plenty for heavy emit / compile
+# passes while still catching runaway handlers.
+_MAX_HEARTBEAT_EXTENSIONS = 30
+
 # Thread pool for blocking I/O
 _executor = ThreadPoolExecutor(max_workers=1)
 
@@ -257,6 +265,9 @@ class AltiumBridge:
     def _request_path(self, request_id: str) -> Path:
         return self.config.workspace_dir / f"request_{request_id}.json"
 
+    def _progress_path(self, request_id: str) -> Path:
+        return self.config.workspace_dir / f"progress_{request_id}.json"
+
     def _publish_request(self, request: CommandRequest) -> None:
         """Publish a request to its own per-request file.
 
@@ -282,63 +293,127 @@ class AltiumBridge:
         logger.debug("Published request %s: %s", request.id, request.command)
 
     def _poll_response(self, request_id: str, timeout: float) -> CommandResponse:
-        """Poll for response_<id>.json. Returns when it appears, raises on timeout."""
+        """Poll for response_<id>.json. Returns when it appears, raises on
+        timeout.
+
+        Heartbeat-aware. The Pascal dispatcher writes progress_<id>.json
+        before invoking a handler and deletes it after the response is
+        written. While progress_<id>.json exists, the polling loop is
+        actively working on this request -- a legitimately slow handler is
+        not a "polling loop dead" signal. We extend the deadline by another
+        ``timeout`` window each time the heartbeat is still ticking, up to
+        ``_MAX_HEARTBEAT_EXTENSIONS`` extensions before declaring the
+        operation truly stuck. Default ceiling: 30 * 10 s = 5 minutes per
+        command, which covers heavy emits / compiles without losing the
+        early failure detection of the original 10 s timeout.
+
+        Race window: Pascal writes the response THEN deletes the progress
+        file, so at no instant are both absent. When the per-window
+        deadline fires we re-check the response one more time after the
+        progress check, in case the heartbeat was cleared between the two
+        observations.
+        """
         response_path = self._response_path(request_id)
+        progress_path = self._progress_path(request_id)
         workspace_dir = self.config.workspace_dir
-        deadline = time.monotonic() + timeout
         poll_interval = self.config.poll_interval
+        deadline = time.monotonic() + timeout
+        extensions = 0
         poll_count = 0
         first_appearance: Optional[float] = None
         parse_errors = 0
         start = time.monotonic()
 
-        _trace_log(workspace_dir, f"POLL_START id={request_id[:8]} timeout={timeout}s interval={poll_interval}s")
+        _trace_log(
+            workspace_dir,
+            f"POLL_START id={request_id[:8]} timeout={timeout}s "
+            f"interval={poll_interval}s",
+        )
 
-        while time.monotonic() < deadline:
+        while True:
             poll_count += 1
-            if not response_path.exists():
-                time.sleep(poll_interval)
-                continue
-
-            if first_appearance is None:
-                first_appearance = time.monotonic() - start
-                _trace_log(
-                    workspace_dir,
-                    f"POLL_SEEN id={request_id[:8]} after={first_appearance*1000:.0f}ms polls={poll_count}",
-                )
-
-            try:
-                with open(response_path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-            except (json.JSONDecodeError, IOError, UnicodeDecodeError) as e:
-                parse_errors += 1
-                if parse_errors <= 3 or parse_errors % 50 == 0:
+            if response_path.exists():
+                if first_appearance is None:
+                    first_appearance = time.monotonic() - start
                     _trace_log(
                         workspace_dir,
-                        f"POLL_PARSE_ERR id={request_id[:8]} err={type(e).__name__} count={parse_errors}",
+                        f"POLL_SEEN id={request_id[:8]} "
+                        f"after={first_appearance*1000:.0f}ms polls={poll_count}",
                     )
-                time.sleep(poll_interval)
-                continue
+                try:
+                    with open(response_path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                except (json.JSONDecodeError, IOError, UnicodeDecodeError) as e:
+                    parse_errors += 1
+                    if parse_errors <= 3 or parse_errors % 50 == 0:
+                        _trace_log(
+                            workspace_dir,
+                            f"POLL_PARSE_ERR id={request_id[:8]} "
+                            f"err={type(e).__name__} count={parse_errors}",
+                        )
+                    # Fall through to the deadline check so a permanently
+                    # corrupt file cannot wedge us in an infinite parse loop.
+                else:
+                    try:
+                        response_path.unlink()
+                    except OSError:
+                        pass
 
-            try:
-                response_path.unlink()
-            except OSError:
-                pass
+                    elapsed = (time.monotonic() - start) * 1000
+                    _trace_log(
+                        workspace_dir,
+                        f"POLL_MATCH id={request_id[:8]} elapsed={elapsed:.0f}ms "
+                        f"polls={poll_count} parse_errs={parse_errors} "
+                        f"extensions={extensions}",
+                    )
+                    return CommandResponse.from_dict(data)
 
-            elapsed = (time.monotonic() - start) * 1000
-            _trace_log(
-                workspace_dir,
-                f"POLL_MATCH id={request_id[:8]} elapsed={elapsed:.0f}ms polls={poll_count} parse_errs={parse_errors}",
-            )
-            return CommandResponse.from_dict(data)
+            if time.monotonic() >= deadline:
+                # Window expired. Heartbeat still ticking? extend.
+                if progress_path.exists() and extensions < _MAX_HEARTBEAT_EXTENSIONS:
+                    extensions += 1
+                    elapsed = (time.monotonic() - start) * 1000
+                    _trace_log(
+                        workspace_dir,
+                        f"POLL_EXTEND id={request_id[:8]} "
+                        f"extensions={extensions}/{_MAX_HEARTBEAT_EXTENSIONS} "
+                        f"elapsed={elapsed:.0f}ms",
+                    )
+                    deadline = time.monotonic() + timeout
+                    continue
+                # Race window: progress was cleared between deletion and
+                # our check. Take one more response peek before giving up,
+                # but ONLY if we have not already been parsing the file --
+                # otherwise a permanently-corrupt response would loop here
+                # forever. ``first_appearance`` being non-None means we've
+                # already opened the file at least once and the top-of-
+                # loop parse check is doing its job; no need to re-enter.
+                if first_appearance is None and response_path.exists():
+                    continue
+                break
+
+            time.sleep(poll_interval)
 
         elapsed = (time.monotonic() - start) * 1000
         _trace_log(
             workspace_dir,
-            f"POLL_TIMEOUT id={request_id[:8]} elapsed={elapsed:.0f}ms polls={poll_count} parse_errs={parse_errors} first_seen_ms={first_appearance*1000 if first_appearance else -1}",
+            f"POLL_TIMEOUT id={request_id[:8]} elapsed={elapsed:.0f}ms "
+            f"polls={poll_count} parse_errs={parse_errors} "
+            f"extensions={extensions} "
+            f"first_seen_ms={first_appearance*1000 if first_appearance else -1}",
         )
+        if extensions >= _MAX_HEARTBEAT_EXTENSIONS:
+            raise AltiumTimeoutError(
+                f"Handler exceeded {_MAX_HEARTBEAT_EXTENSIONS} heartbeat "
+                f"extensions ({_MAX_HEARTBEAT_EXTENSIONS * timeout:.0f}s "
+                f"total); Altium is responding to keepalives but the command "
+                f"never returned. The handler is likely stuck in an infinite "
+                f"loop."
+            )
         raise AltiumTimeoutError(
-            f"No response within {timeout}s, is the Altium script running?"
+            f"No response within {timeout}s and no progress heartbeat. The "
+            f"Altium polling loop is probably not running -- relaunch "
+            f"StartMCPServer."
         )
 
     def _execute_command(self, command: str, params: dict[str, Any], timeout: float) -> Any:

@@ -116,24 +116,33 @@ Begin
     ResultTag := 'OK';
 
     ExceptionMsg := '';
+    { Heartbeat: write progress_<id>.json so Python can distinguish "still      }
+    { working" from "polling loop dead" when the 10 s default deadline runs   }
+    { out on a legitimately-slow handler. Delete only AFTER writing the       }
+    { response, so at no point are both files missing.                        }
+    StartProgress(RequestId);
     Try
-        ResponseContent := ProcessCommand(Command, Params, RequestId);
-    Except
-        ExceptionMsg := 'Unhandled exception processing: ' + Command;
-        ResponseContent := BuildErrorResponse(RequestId, 'INTERNAL_ERROR', ExceptionMsg);
-        ResultTag := 'EXCEPTION';
-    End;
+        Try
+            ResponseContent := ProcessCommand(Command, Params, RequestId);
+        Except
+            ExceptionMsg := 'Unhandled exception processing: ' + Command;
+            ResponseContent := BuildErrorResponse(RequestId, 'INTERNAL_ERROR', ExceptionMsg);
+            ResultTag := 'EXCEPTION';
+        End;
 
-    If ResponseContent = '' Then
-    Begin
-        // Handler returned nothing, degenerate but recoverable. Synthesise
-        // an INTERNAL_ERROR rather than leaving the caller polling forever.
-        ResponseContent := BuildErrorResponse(RequestId, 'INTERNAL_ERROR',
-            'Handler returned empty response for: ' + Command);
-        ResultTag := 'EMPTY';
-    End;
+        If ResponseContent = '' Then
+        Begin
+            // Handler returned nothing, degenerate but recoverable. Synthesise
+            // an INTERNAL_ERROR rather than leaving the caller polling forever.
+            ResponseContent := BuildErrorResponse(RequestId, 'INTERNAL_ERROR',
+                'Handler returned empty response for: ' + Command);
+            ResultTag := 'EMPTY';
+        End;
 
-    WriteResponseFile(RequestId, ResponseContent);
+        WriteResponseFile(RequestId, ResponseContent);
+    Finally
+        EndProgress(RequestId);
+    End;
 
     DurationMs := GetTickCount - StartMs;
     StatusTotalAltiumMs := StatusTotalAltiumMs + DurationMs;
@@ -153,6 +162,7 @@ End;
 Procedure CleanupMCPServer;
 Begin
     CleanupOrphanResponses;
+    CleanupOrphanProgress;
     Application.ProcessMessages;
 End;
 
@@ -186,6 +196,7 @@ Begin
     EnsureWorkspaceDir;
     LoadMCPConfig;
     CleanupOrphanResponses;
+    CleanupOrphanProgress;
     Running := True;
     StopPath := WorkspaceDir + 'stop';
     If FileExists(StopPath) Then DeleteFile(StopPath);

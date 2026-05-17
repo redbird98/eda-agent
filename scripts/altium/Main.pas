@@ -13,7 +13,7 @@ Const
     // returns, mismatch means Altium is running a stale compiled script
     // (DelphiScript caches compiled units until the script project is
     // reopened or Altium is restarted).
-    SCRIPT_VERSION = '2026.05.16.10';
+    SCRIPT_VERSION = '2026.05.17.2';
 
     // Wire protocol version. Bumped whenever the request/response JSON shape
     // changes incompatibly. Python and Pascal must agree; mismatch returns
@@ -805,6 +805,61 @@ End;
 Function ResponseFilePath(RequestId : String) : String;
 Begin
     Result := WorkspaceDir + 'response_' + RequestId + '.json';
+End;
+
+Function ProgressFilePath(RequestId : String) : String;
+Begin
+    Result := WorkspaceDir + 'progress_' + RequestId + '.json';
+End;
+
+{ Heartbeat protocol for long-running commands.                                }
+{                                                                              }
+{ DelphiScript is single-threaded: while a handler is executing, the polling  }
+{ loop cannot respond to anything else. A 10-second Python deadline on a      }
+{ legitimately-slow operation (large project compile, multi-document iterate, }
+{ heavy emit pass) fires a false timeout. Heartbeat fixes that by writing a   }
+{ short-lived marker file at the start of dispatch; the Python bridge treats  }
+{ marker presence as "Altium is still working on it, keep waiting".           }
+{                                                                              }
+{ Ordering matters: write the response file BEFORE deleting the progress     }
+{ file so there is never a moment where neither exists (which would let       }
+{ Python's deadline-check race the cleanup and fire a false hard-timeout).    }
+Procedure StartProgress(RequestId : String);
+Var
+    ProgressPath : String;
+Begin
+    If Not IsValidRequestId(RequestId) Then Exit;
+    ProgressPath := ProgressFilePath(RequestId);
+    Try
+        WriteFileContent(ProgressPath,
+            '{"started_ms":' + IntToStr(GetTickCount) + '}');
+    Except End;
+End;
+
+Procedure EndProgress(RequestId : String);
+Var ProgressPath : String;
+Begin
+    If Not IsValidRequestId(RequestId) Then Exit;
+    ProgressPath := ProgressFilePath(RequestId);
+    Try DeleteFile(ProgressPath); Except End;
+End;
+
+{ Wipe orphaned progress_*.json files at session start. A previous run that   }
+{ crashed mid-handler would leave its progress marker behind; left untouched, }
+{ Python could keep extending its deadline against a stale marker.            }
+Procedure CleanupOrphanProgress;
+Var
+    Files : TStringList;
+    I : Integer;
+Begin
+    Files := TStringList.Create;
+    Try
+        FindFiles(WorkspaceDir, 'progress_*.json', 63, False, Files);
+        For I := 0 To Files.Count - 1 Do
+            Try DeleteFile(Files[I]); Except End;
+    Finally
+        Files.Free;
+    End;
 End;
 
 { Pick up the next request. Python writes per-request file request_<id>.json.}
