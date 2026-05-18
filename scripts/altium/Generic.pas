@@ -6155,11 +6155,14 @@ Var
     { just got no name match".                                            }
     DiagBoardNil, DiagIterVisited, DiagPadNetNil, DiagNameRaise : Integer;
     NetReadOk : Boolean;
-    SchList, PCBList : Array[0..999] Of String;
-    SchCount, PCBCount : Integer;
+    { Heap-allocated lists - fixed-size `Array[0..N] Of String` as a       }
+    { function local silently returns Params as the response in            }
+    { DelphiScript, see [[delphiscript_fixed_string_array_bug]].           }
+    SchList, PCBList : TStringList;
     SchJson, PCBJson, SchOnlyJson, PCBOnlyJson, Key : String;
     FirstS, FirstP, FirstSO, FirstPO, InPCB, InSch, InSync : Boolean;
     SchOnlyCount, PCBOnlyCount, MatchCount : Integer;
+    EnvelopeData, ResponseStr : String;
 Begin
     NetName := ExtractJsonValue(Params, 'net_name');
     If NetName = '' Then
@@ -6168,12 +6171,14 @@ Begin
         Exit;
     End;
 
-    SchCount := 0;
-    PCBCount := 0;
     DiagBoardNil := 0;
     DiagIterVisited := 0;
     DiagPadNetNil := 0;
     DiagNameRaise := 0;
+
+    SchList := TStringList.Create;
+    PCBList := TStringList.Create;
+    Try
 
     { --- Schematic side: compile project, walk every component's pins,     }
     { collect "designator.pin_number" for every pin whose flattened net    }
@@ -6198,13 +6203,9 @@ Begin
                     Begin
                         Pin := Comp.DM_Pins(K);
                         If Pin = Nil Then Continue;
-                        If SchCount > 999 Then Break;
                         Try
                             If Pin.DM_FlattenedNetName = NetName Then
-                            Begin
-                                SchList[SchCount] := Comp.DM_PhysicalDesignator + '.' + Pin.DM_PinNumber;
-                                SchCount := SchCount + 1;
-                            End;
+                                SchList.Add(Comp.DM_PhysicalDesignator + '.' + Pin.DM_PinNumber);
                         Except End;
                     End;
                 End;
@@ -6223,23 +6224,13 @@ Begin
     { source of the original pcb_pin_count:0 bug. Fall back to iterating }
     { the project's documents, find the first .PcbDoc, resolve it via   }
     { PCBServer.GetPCBBoardByPath which doesn't care about focus.         }
+    { GetPCBBoardAnywhere already walks the project's PCB docs internally,    }
+    { its result is the single source of truth. Older code duplicated the     }
+    { iteration with a direct PCBServer.GetPCBBoardByPath call - that symbol  }
+    { is undeclared on some Altium builds and Try/Except cannot catch         }
+    { undeclared identifiers (see [[delphiscript_api_quirks]]), so the inline }
+    { fallback would crash the script instead of just returning Nil.          }
     Board := GetPCBBoardAnywhere;
-    If (Board = Nil) And (Workspace <> Nil) And (Project <> Nil) Then
-    Begin
-        For I := 0 To Project.DM_LogicalDocumentCount - 1 Do
-        Begin
-            Doc := Project.DM_LogicalDocuments(I);
-            If Doc = Nil Then Continue;
-            Try
-                If (UpperCase(Doc.DM_DocumentKind) = 'PCB')
-                    Or (Pos('.PCBDOC', UpperCase(Doc.DM_FullPath)) > 0) Then
-                Begin
-                    Board := PCBServer.GetPCBBoardByPath(Doc.DM_FullPath);
-                    If Board <> Nil Then Break;
-                End;
-            Except End;
-        End;
-    End;
 
     If Board = Nil Then
         DiagBoardNil := 1
@@ -6251,7 +6242,7 @@ Begin
             Iter.AddFilter_LayerSet(AllLayers);
             Iter.AddFilter_Method(eProcessAll);
             Pad := Iter.FirstPCBObject;
-            While (Pad <> Nil) And (PCBCount <= 999) Do
+            While Pad <> Nil Do
             Begin
                 DiagIterVisited := DiagIterVisited + 1;
                 NetReadOk := False;
@@ -6278,8 +6269,7 @@ Begin
                     Except End;
                     If Key = '' Then Key := '?.';
                     Try Key := Key + Pad.Name; Except End;
-                    PCBList[PCBCount] := Key;
-                    PCBCount := PCBCount + 1;
+                    PCBList.Add(Key);
                 End;
 
                 Pad := Iter.NextPCBObject;
@@ -6290,10 +6280,11 @@ Begin
     End;
 
     { Build JSON arrays + diff (sch_only = in sch but not pcb, etc.). O(N*M) }
-    { is fine at our scale (nets with 1000+ pins are rare).                   }
+    { is fine at our scale (nets with 1000+ pins are rare). PCBList.IndexOf  }
+    { gives us the set membership check without a manual loop.               }
     SchJson := '';
     FirstS := True;
-    For I := 0 To SchCount - 1 Do
+    For I := 0 To SchList.Count - 1 Do
     Begin
         If Not FirstS Then SchJson := SchJson + ',';
         FirstS := False;
@@ -6302,7 +6293,7 @@ Begin
 
     PCBJson := '';
     FirstP := True;
-    For I := 0 To PCBCount - 1 Do
+    For I := 0 To PCBList.Count - 1 Do
     Begin
         If Not FirstP Then PCBJson := PCBJson + ',';
         FirstP := False;
@@ -6312,15 +6303,9 @@ Begin
     SchOnlyJson := '';
     FirstSO := True;
     SchOnlyCount := 0;
-    For I := 0 To SchCount - 1 Do
+    For I := 0 To SchList.Count - 1 Do
     Begin
-        InPCB := False;
-        For N := 0 To PCBCount - 1 Do
-            If SchList[I] = PCBList[N] Then
-            Begin
-                InPCB := True;
-                Break;
-            End;
+        InPCB := PCBList.IndexOf(SchList[I]) >= 0;
         If Not InPCB Then
         Begin
             If Not FirstSO Then SchOnlyJson := SchOnlyJson + ',';
@@ -6333,15 +6318,9 @@ Begin
     PCBOnlyJson := '';
     FirstPO := True;
     PCBOnlyCount := 0;
-    For I := 0 To PCBCount - 1 Do
+    For I := 0 To PCBList.Count - 1 Do
     Begin
-        InSch := False;
-        For N := 0 To SchCount - 1 Do
-            If PCBList[I] = SchList[N] Then
-            Begin
-                InSch := True;
-                Break;
-            End;
+        InSch := SchList.IndexOf(PCBList[I]) >= 0;
         If Not InSch Then
         Begin
             If Not FirstPO Then PCBOnlyJson := PCBOnlyJson + ',';
@@ -6351,14 +6330,13 @@ Begin
         End;
     End;
 
-    MatchCount := SchCount - SchOnlyCount;
+    MatchCount := SchList.Count - SchOnlyCount;
     InSync := (SchOnlyCount = 0) And (PCBOnlyCount = 0) And
-              ((SchCount > 0) Or (PCBCount > 0));
+              ((SchList.Count > 0) Or (PCBList.Count > 0));
 
-    Result := BuildSuccessResponse(RequestId,
-        '{"net_name":"' + EscapeJsonString(NetName) + '",'
-        + '"sch_pin_count":' + IntToStr(SchCount) + ','
-        + '"pcb_pin_count":' + IntToStr(PCBCount) + ','
+    EnvelopeData := '{"net_name":"' + EscapeJsonString(NetName) + '",'
+        + '"sch_pin_count":' + IntToStr(SchList.Count) + ','
+        + '"pcb_pin_count":' + IntToStr(PCBList.Count) + ','
         + '"matched":' + IntToStr(MatchCount) + ','
         + '"sch_only_count":' + IntToStr(SchOnlyCount) + ','
         + '"pcb_only_count":' + IntToStr(PCBOnlyCount) + ','
@@ -6372,7 +6350,14 @@ Begin
         + '"iter_visited":' + IntToStr(DiagIterVisited) + ','
         + '"pad_net_nil":' + IntToStr(DiagPadNetNil) + ','
         + '"name_read_raised":' + IntToStr(DiagNameRaise)
-        + '}}');
+        + '}}';
+
+    ResponseStr := BuildSuccessResponse(RequestId, EnvelopeData);
+    Result := ResponseStr;
+    Finally
+        PCBList.Free;
+        SchList.Free;
+    End;
 End;
 
 {..............................................................................}

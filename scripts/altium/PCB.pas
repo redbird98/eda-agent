@@ -1038,9 +1038,11 @@ Var
     Board : IPCB_Board;
     Comp : IPCB_Component;
     MovesStr, MoveStr, Remaining : String;
-    PipePos, CommaPos, Applied, Failed, I : Integer;
-    FieldVals : Array[0..3] Of String;
-    Desig, XStr, YStr, RotStr : String;
+    PipePos, CommaPos, Applied, Failed, FieldIdx : Integer;
+    { 4 named locals instead of `Array[0..3] Of String` - fixed-size       }
+    { string arrays as function locals corrupt the function return slot   }
+    { in DelphiScript, see [[delphiscript_fixed_string_array_bug]].       }
+    Desig, XStr, YStr, RotStr, Token : String;
     NewX, NewY : Integer;
     NewRot : Double;
     HasX, HasY, HasRot : Boolean;
@@ -1079,28 +1081,32 @@ Begin
 
         If MoveStr = '' Then Continue;
 
-        For I := 0 To 3 Do FieldVals[I] := '';
-        I := 0;
-        While (MoveStr <> '') And (I <= 3) Do
+        Desig := '';
+        XStr := '';
+        YStr := '';
+        RotStr := '';
+        FieldIdx := 0;
+        While (MoveStr <> '') And (FieldIdx <= 3) Do
         Begin
             CommaPos := Pos(',', MoveStr);
             If CommaPos = 0 Then
             Begin
-                FieldVals[I] := MoveStr;
+                Token := MoveStr;
                 MoveStr := '';
             End
             Else
             Begin
-                FieldVals[I] := Copy(MoveStr, 1, CommaPos - 1);
+                Token := Copy(MoveStr, 1, CommaPos - 1);
                 MoveStr := Copy(MoveStr, CommaPos + 1, Length(MoveStr));
             End;
-            I := I + 1;
+            Case FieldIdx Of
+                0: Desig := Token;
+                1: XStr := Token;
+                2: YStr := Token;
+                3: RotStr := Token;
+            End;
+            FieldIdx := FieldIdx + 1;
         End;
-
-        Desig := FieldVals[0];
-        XStr := FieldVals[1];
-        YStr := FieldVals[2];
-        RotStr := FieldVals[3];
 
         If Desig = '' Then
         Begin
@@ -1162,14 +1168,16 @@ Var
     Arc : IPCB_Arc;
     Obj : IPCB_Primitive;
     NetName, FilterNet : String;
-    JsonItems : String;
+    JsonItems, EnvelopeData, ResponseStr : String;
     First : Boolean;
-    Count : Integer;
-    // Use parallel arrays for net names and lengths
-    NetNames : Array[0..999] Of String;
-    NetLengths : Array[0..999] Of Double;
-    NetCount, I, FoundIdx : Integer;
-    SegLen, DX, DY, ArcAngle, RadiusMils : Double;
+    { Parallel heap-allocated lists. ANY fixed-size local array (String,    }
+    { Integer, Double, interface, all of them) corrupts the function's     }
+    { return slot in DelphiScript, see                                      }
+    { [[delphiscript_fixed_string_array_bug]] for the (now-broader) rule.  }
+    { Lengths are stored as stringified floats and parsed back on update.  }
+    NetNames, NetLengthStrs : TStringList;
+    I, FoundIdx : Integer;
+    SegLen, DX, DY, ArcAngle, RadiusMils, Accum : Double;
 Begin
     Board := GetPCBBoardAnywhere;
     If Board = Nil Then
@@ -1179,88 +1187,82 @@ Begin
     End;
 
     FilterNet := ExtractJsonValue(Params, 'net');
-    NetCount := 0;
 
-    // Include tracks AND arcs, routed nets use both. Arc length =
-    // radius * sweepAngle(radians). AnglesRange is SweepAngle for
-    // IPCB_Arc (StartAngle/EndAngle also available but sweep is the
-    // pre-computed arc extent in degrees).
-    Iterator := Board.BoardIterator_Create;
-    Iterator.AddFilter_ObjectSet(MkSet(eTrackObject, eArcObject));
-    Iterator.AddFilter_LayerSet(AllLayers);
-    Iterator.AddFilter_Method(eProcessAll);
+    NetNames := TStringList.Create;
+    NetLengthStrs := TStringList.Create;
+    Try
+        Iterator := Board.BoardIterator_Create;
+        Iterator.AddFilter_ObjectSet(MkSet(eTrackObject, eArcObject));
+        Iterator.AddFilter_LayerSet(AllLayers);
+        Iterator.AddFilter_Method(eProcessAll);
 
-    Obj := Iterator.FirstPCBObject;
-    While Obj <> Nil Do
-    Begin
-        NetName := '';
-        Try
-            If Obj.Net <> Nil Then NetName := Obj.Net.Name;
-        Except End;
-
-        // Filter by net name if specified
-        If (FilterNet <> '') And (NetName <> FilterNet) Then
+        Obj := Iterator.FirstPCBObject;
+        While Obj <> Nil Do
         Begin
-            Obj := Iterator.NextPCBObject;
-            Continue;
-        End;
-
-        SegLen := 0;
-        If Obj.ObjectId = eTrackObject Then
-        Begin
-            Track := Obj;
-            DX := CoordToMils(Track.x2) - CoordToMils(Track.x1);
-            DY := CoordToMils(Track.y2) - CoordToMils(Track.y1);
-            SegLen := Sqrt(DX * DX + DY * DY);
-        End
-        Else If Obj.ObjectId = eArcObject Then
-        Begin
-            Arc := Obj;
+            NetName := '';
             Try
-                RadiusMils := CoordToMils(Arc.Radius);
-                ArcAngle := Arc.EndAngle - Arc.StartAngle;
-                If ArcAngle < 0 Then ArcAngle := ArcAngle + 360;
-                SegLen := RadiusMils * ArcAngle * 3.14159265358979 / 180.0;
-            Except SegLen := 0; End;
-        End;
+                If Obj.Net <> Nil Then NetName := Obj.Net.Name;
+            Except End;
 
-        // Find or add net in array
-        FoundIdx := -1;
-        For I := 0 To NetCount - 1 Do
-        Begin
-            If NetNames[I] = NetName Then
+            If (FilterNet <> '') And (NetName <> FilterNet) Then
             Begin
-                FoundIdx := I;
-                Break;
+                Obj := Iterator.NextPCBObject;
+                Continue;
             End;
-        End;
 
-        If FoundIdx >= 0 Then
-            NetLengths[FoundIdx] := NetLengths[FoundIdx] + SegLen
-        Else If NetCount < 1000 Then
+            SegLen := 0;
+            If Obj.ObjectId = eTrackObject Then
+            Begin
+                Track := Obj;
+                DX := CoordToMils(Track.x2) - CoordToMils(Track.x1);
+                DY := CoordToMils(Track.y2) - CoordToMils(Track.y1);
+                SegLen := Sqrt(DX * DX + DY * DY);
+            End
+            Else If Obj.ObjectId = eArcObject Then
+            Begin
+                Arc := Obj;
+                Try
+                    RadiusMils := CoordToMils(Arc.Radius);
+                    ArcAngle := Arc.EndAngle - Arc.StartAngle;
+                    If ArcAngle < 0 Then ArcAngle := ArcAngle + 360;
+                    SegLen := RadiusMils * ArcAngle * 3.14159265358979 / 180.0;
+                Except SegLen := 0; End;
+            End;
+
+            FoundIdx := NetNames.IndexOf(NetName);
+            If FoundIdx >= 0 Then
+            Begin
+                Accum := StrToFloatDef(NetLengthStrs[FoundIdx], 0) + SegLen;
+                NetLengthStrs[FoundIdx] := FloatToStr(Accum);
+            End
+            Else
+            Begin
+                NetNames.Add(NetName);
+                NetLengthStrs.Add(FloatToStr(SegLen));
+            End;
+
+            Obj := Iterator.NextPCBObject;
+        End;
+        Board.BoardIterator_Destroy(Iterator);
+
+        JsonItems := '';
+        First := True;
+        For I := 0 To NetNames.Count - 1 Do
         Begin
-            NetNames[NetCount] := NetName;
-            NetLengths[NetCount] := SegLen;
-            Inc(NetCount);
+            If Not First Then JsonItems := JsonItems + ',';
+            First := False;
+            JsonItems := JsonItems + '{"net":"' + EscapeJsonString(NetNames[I]) + '",'
+                + '"length_mils":' + FloatToJsonStr(StrToFloatDef(NetLengthStrs[I], 0)) + '}';
         End;
 
-        Obj := Iterator.NextPCBObject;
+        EnvelopeData := '{"trace_lengths":[' + JsonItems + '],"net_count":'
+            + IntToStr(NetNames.Count) + '}';
+        ResponseStr := BuildSuccessResponse(RequestId, EnvelopeData);
+        Result := ResponseStr;
+    Finally
+        NetLengthStrs.Free;
+        NetNames.Free;
     End;
-    Board.BoardIterator_Destroy(Iterator);
-
-    // Build JSON output
-    JsonItems := '';
-    First := True;
-    For I := 0 To NetCount - 1 Do
-    Begin
-        If Not First Then JsonItems := JsonItems + ',';
-        First := False;
-        JsonItems := JsonItems + '{"net":"' + EscapeJsonString(NetNames[I]) + '",'
-            + '"length_mils":' + FloatToJsonStr(NetLengths[I]) + '}';
-    End;
-
-    Result := BuildSuccessResponse(RequestId,
-        '{"trace_lengths":[' + JsonItems + '],"net_count":' + IntToStr(NetCount) + '}');
 End;
 
 {..............................................................................}
@@ -1932,11 +1934,14 @@ Var
     Board : IPCB_Board;
     Track : IPCB_Track;
     TracksStr, TrackStr, Remaining, Field : String;
-    PipePos, CommaPos, Placed, Failed, I : Integer;
+    PipePos, CommaPos, Placed, Failed, FieldIdx : Integer;
     TX1, TY1, TX2, TY2, TWidth : Integer;
     LayerStr, NetStr : String;
     FoundNet : IPCB_Net;
-    FieldVals : Array[0..6] Of String;
+    { 7 named locals instead of `Array[0..6] Of String` - fixed-size       }
+    { string arrays as function locals corrupt the function return slot   }
+    { in DelphiScript, see [[delphiscript_fixed_string_array_bug]].       }
+    F0, F1, F2, F3, F4, F5, F6, Token : String;
 Begin
     Board := GetPCBBoardAnywhere;
     If Board = Nil Then
@@ -1974,32 +1979,46 @@ Begin
 
             If TrackStr = '' Then Continue;
 
-            { Split on commas into up to 7 fields. }
-            For I := 0 To 6 Do FieldVals[I] := '';
-            I := 0;
-            While (TrackStr <> '') And (I <= 6) Do
+            F0 := '';
+            F1 := '';
+            F2 := '';
+            F3 := '';
+            F4 := '';
+            F5 := '';
+            F6 := '';
+            FieldIdx := 0;
+            While (TrackStr <> '') And (FieldIdx <= 6) Do
             Begin
                 CommaPos := Pos(',', TrackStr);
                 If CommaPos = 0 Then
                 Begin
-                    FieldVals[I] := TrackStr;
+                    Token := TrackStr;
                     TrackStr := '';
                 End
                 Else
                 Begin
-                    FieldVals[I] := Copy(TrackStr, 1, CommaPos - 1);
+                    Token := Copy(TrackStr, 1, CommaPos - 1);
                     TrackStr := Copy(TrackStr, CommaPos + 1, Length(TrackStr));
                 End;
-                Inc(I);
+                Case FieldIdx Of
+                    0: F0 := Token;
+                    1: F1 := Token;
+                    2: F2 := Token;
+                    3: F3 := Token;
+                    4: F4 := Token;
+                    5: F5 := Token;
+                    6: F6 := Token;
+                End;
+                Inc(FieldIdx);
             End;
 
-            TX1 := StrToIntDef(FieldVals[0], 0);
-            TY1 := StrToIntDef(FieldVals[1], 0);
-            TX2 := StrToIntDef(FieldVals[2], 0);
-            TY2 := StrToIntDef(FieldVals[3], 0);
-            TWidth := StrToIntDef(FieldVals[4], 10);
-            LayerStr := FieldVals[5];
-            NetStr := FieldVals[6];
+            TX1 := StrToIntDef(F0, 0);
+            TY1 := StrToIntDef(F1, 0);
+            TX2 := StrToIntDef(F2, 0);
+            TY2 := StrToIntDef(F3, 0);
+            TWidth := StrToIntDef(F4, 10);
+            LayerStr := F5;
+            NetStr := F6;
 
             Track := PCBServer.PCBObjectFactory(eTrackObject, eNoDimension, eCreate_Default);
             If Track = Nil Then
@@ -2718,9 +2737,15 @@ Var
     Board : IPCB_Board;
     DesStr, AlignStr, Remaining, OneDesig : String;
     Comp : IPCB_Component;
-    CommaPos, I, CompCount : Integer;
-    Comps : Array[0..99] Of IPCB_Component;
-    MinX, MaxX, MinY, MaxY, CenterX, CenterY, AlignTarget : Integer;
+    CommaPos, I, CX, CY : Integer;
+    { Heap-allocated list of resolved designators. The original code held }
+    { IPCB_Component pointers in `Array[0..99] Of IPCB_Component`, which  }
+    { is a fixed-size local array of a managed type - that triggers the   }
+    { return-slot corruption documented in                                 }
+    { [[delphiscript_fixed_string_array_bug]]. The fix walks twice:        }
+    { first pass to validate + measure bounds, second pass to apply.      }
+    Resolved : TStringList;
+    MinX, MaxX, MinY, MaxY, CenterX, CenterY : Integer;
 Begin
     Board := GetPCBBoardAnywhere;
     If Board = Nil Then
@@ -2740,88 +2765,95 @@ Begin
 
     If AlignStr = '' Then AlignStr := 'left';
 
-    // Parse designators and find components
-    CompCount := 0;
-    Remaining := DesStr;
-    While (Remaining <> '') And (CompCount < 100) Do
-    Begin
-        CommaPos := Pos(',', Remaining);
-        If CommaPos > 0 Then
+    Resolved := TStringList.Create;
+    Try
+        Remaining := DesStr;
+        While Remaining <> '' Do
         Begin
-            OneDesig := Copy(Remaining, 1, CommaPos - 1);
-            Remaining := Copy(Remaining, CommaPos + 1, Length(Remaining));
-        End
-        Else
-        Begin
-            OneDesig := Remaining;
-            Remaining := '';
-        End;
-        If OneDesig <> '' Then
-        Begin
-            Comp := Board.GetPcbComponentByRefDes(OneDesig);
-            If Comp <> Nil Then
+            CommaPos := Pos(',', Remaining);
+            If CommaPos > 0 Then
             Begin
-                Comps[CompCount] := Comp;
-                Inc(CompCount);
+                OneDesig := Copy(Remaining, 1, CommaPos - 1);
+                Remaining := Copy(Remaining, CommaPos + 1, Length(Remaining));
+            End
+            Else
+            Begin
+                OneDesig := Remaining;
+                Remaining := '';
+            End;
+            If OneDesig <> '' Then
+            Begin
+                Comp := Board.GetPcbComponentByRefDes(OneDesig);
+                If Comp <> Nil Then Resolved.Add(OneDesig);
             End;
         End;
-    End;
 
-    If CompCount < 2 Then
-    Begin
-        Result := BuildErrorResponse(RequestId, 'INSUFFICIENT', 'Need at least 2 valid components to align');
-        Exit;
-    End;
-
-    // Calculate bounding extents
-    MinX := CoordToMils(Comps[0].x);
-    MaxX := MinX;
-    MinY := CoordToMils(Comps[0].y);
-    MaxY := MinY;
-    For I := 1 To CompCount - 1 Do
-    Begin
-        If CoordToMils(Comps[I].x) < MinX Then MinX := CoordToMils(Comps[I].x);
-        If CoordToMils(Comps[I].x) > MaxX Then MaxX := CoordToMils(Comps[I].x);
-        If CoordToMils(Comps[I].y) < MinY Then MinY := CoordToMils(Comps[I].y);
-        If CoordToMils(Comps[I].y) > MaxY Then MaxY := CoordToMils(Comps[I].y);
-    End;
-    CenterX := (MinX + MaxX) Div 2;
-    CenterY := (MinY + MaxY) Div 2;
-
-    // Apply alignment
-    PCBServer.PreProcess;
-    Try
-        For I := 0 To CompCount - 1 Do
+        If Resolved.Count < 2 Then
         Begin
-            PCBServer.SendMessageToRobots(Comps[I].I_ObjectAddress, c_Broadcast,
-                PCBM_BeginModify, c_NoEventData);
-
-            If AlignStr = 'left' Then
-                Comps[I].x := MilsToCoord(MinX)
-            Else If AlignStr = 'right' Then
-                Comps[I].x := MilsToCoord(MaxX)
-            Else If AlignStr = 'top' Then
-                Comps[I].y := MilsToCoord(MaxY)
-            Else If AlignStr = 'bottom' Then
-                Comps[I].y := MilsToCoord(MinY)
-            Else If AlignStr = 'center_x' Then
-                Comps[I].x := MilsToCoord(CenterX)
-            Else If AlignStr = 'center_y' Then
-                Comps[I].y := MilsToCoord(CenterY);
-
-            PCBServer.SendMessageToRobots(Comps[I].I_ObjectAddress, c_Broadcast,
-                PCBM_EndModify, c_NoEventData);
+            Result := BuildErrorResponse(RequestId, 'INSUFFICIENT',
+                'Need at least 2 valid components to align');
+            Exit;
         End;
+
+        { First pass: bounding extents. }
+        Comp := Board.GetPcbComponentByRefDes(Resolved[0]);
+        MinX := CoordToMils(Comp.x);
+        MaxX := MinX;
+        MinY := CoordToMils(Comp.y);
+        MaxY := MinY;
+        For I := 1 To Resolved.Count - 1 Do
+        Begin
+            Comp := Board.GetPcbComponentByRefDes(Resolved[I]);
+            If Comp = Nil Then Continue;
+            CX := CoordToMils(Comp.x);
+            CY := CoordToMils(Comp.y);
+            If CX < MinX Then MinX := CX;
+            If CX > MaxX Then MaxX := CX;
+            If CY < MinY Then MinY := CY;
+            If CY > MaxY Then MaxY := CY;
+        End;
+        CenterX := (MinX + MaxX) Div 2;
+        CenterY := (MinY + MaxY) Div 2;
+
+        { Second pass: apply alignment. }
+        PCBServer.PreProcess;
+        Try
+            For I := 0 To Resolved.Count - 1 Do
+            Begin
+                Comp := Board.GetPcbComponentByRefDes(Resolved[I]);
+                If Comp = Nil Then Continue;
+                PCBServer.SendMessageToRobots(Comp.I_ObjectAddress, c_Broadcast,
+                    PCBM_BeginModify, c_NoEventData);
+
+                If AlignStr = 'left' Then
+                    Comp.x := MilsToCoord(MinX)
+                Else If AlignStr = 'right' Then
+                    Comp.x := MilsToCoord(MaxX)
+                Else If AlignStr = 'top' Then
+                    Comp.y := MilsToCoord(MaxY)
+                Else If AlignStr = 'bottom' Then
+                    Comp.y := MilsToCoord(MinY)
+                Else If AlignStr = 'center_x' Then
+                    Comp.x := MilsToCoord(CenterX)
+                Else If AlignStr = 'center_y' Then
+                    Comp.y := MilsToCoord(CenterY);
+
+                PCBServer.SendMessageToRobots(Comp.I_ObjectAddress, c_Broadcast,
+                    PCBM_EndModify, c_NoEventData);
+            End;
+        Finally
+            PCBServer.PostProcess;
+        End;
+
+        SaveDocByPath(Board.FileName);
+
+        Result := BuildSuccessResponse(RequestId,
+            '{"aligned":true,'
+            + '"alignment":"' + EscapeJsonString(AlignStr) + '",'
+            + '"component_count":' + IntToStr(Resolved.Count) + '}');
     Finally
-        PCBServer.PostProcess;
+        Resolved.Free;
     End;
-
-    SaveDocByPath(Board.FileName);
-
-    Result := BuildSuccessResponse(RequestId,
-        '{"aligned":true,'
-        + '"alignment":"' + EscapeJsonString(AlignStr) + '",'
-        + '"component_count":' + IntToStr(CompCount) + '}');
 End;
 
 {..............................................................................}
@@ -3401,13 +3433,16 @@ Var
     Board : IPCB_Board;
     Iterator : IPCB_BoardIterator;
     Obj : IPCB_Primitive;
-    JsonItems, NetName : String;
+    JsonItems, NetName, CountStr : String;
     FinalResp : String;
     First : Boolean;
-    Count, I, FoundIdx : Integer;
-    NetNames : Array[0..127] Of String;
-    NetCounts : Array[0..127] Of Integer;
-    NetTotal : Integer;
+    Count, I, FoundIdx, NewCount : Integer;
+    { Heap-allocated parallel lists. Function-local `Array[0..N] Of T`     }
+    { where T is any type (String, Integer, ...) silently corrupts this    }
+    { function's return slot in DelphiScript - both array-of-string AND   }
+    { array-of-int trigger it, the originally-documented narrower theory   }
+    { was wrong. See [[delphiscript_fixed_string_array_bug]].              }
+    NetNames, NetCounts : TStringList;
 Begin
     Board := GetPCBBoardAnywhere;
     If Board = Nil Then
@@ -3416,72 +3451,64 @@ Begin
         Exit;
     End;
 
-    NetTotal := 0;
-    Count := 0;
+    NetNames := TStringList.Create;
+    NetCounts := TStringList.Create;
+    Try
+        Count := 0;
 
-    { Filtering only on eConnectionObject hangs because Altium treats it as a  }
-    { request for a fresh ratsnest, it rebuilds connectivity from scratch.    }
-    { Using the multi-type filter (same as PCB_GetBoardStatistics) is ~1000x  }
-    { faster, only walks primitives Altium already holds in memory.           }
-    Iterator := Board.BoardIterator_Create;
-    Iterator.AddFilter_ObjectSet(MkSet(eTrackObject, eViaObject, ePadObject,
-        eComponentObject, eFillObject, eTextObject, ePolyObject, eConnectionObject));
-    Iterator.AddFilter_LayerSet(AllLayers);
-    Iterator.AddFilter_Method(eProcessAll);
+        Iterator := Board.BoardIterator_Create;
+        Iterator.AddFilter_ObjectSet(MkSet(eTrackObject, eViaObject, ePadObject,
+            eComponentObject, eFillObject, eTextObject, ePolyObject, eConnectionObject));
+        Iterator.AddFilter_LayerSet(AllLayers);
+        Iterator.AddFilter_Method(eProcessAll);
 
-    Obj := Iterator.FirstPCBObject;
-    While Obj <> Nil Do
-    Begin
-        If Obj.ObjectId = eConnectionObject Then
+        Obj := Iterator.FirstPCBObject;
+        While Obj <> Nil Do
         Begin
-            NetName := '';
-            Try
-                { Use Obj directly (late-bound); casting to IPCB_Connection via a }
-                { local variable somehow corrupted the function Result string on  }
-                { return in DelphiScript and the caller got only an empty object. }
-                If Obj.Net <> Nil Then NetName := Obj.Net.Name;
-            Except End;
-
-            FoundIdx := -1;
-            For I := 0 To NetTotal - 1 Do
+            If Obj.ObjectId = eConnectionObject Then
             Begin
-                If NetNames[I] = NetName Then
+                NetName := '';
+                Try
+                    If Obj.Net <> Nil Then NetName := Obj.Net.Name;
+                Except End;
+
+                FoundIdx := NetNames.IndexOf(NetName);
+                If FoundIdx >= 0 Then
                 Begin
-                    FoundIdx := I;
-                    Break;
+                    NewCount := StrToIntDef(NetCounts[FoundIdx], 0) + 1;
+                    NetCounts[FoundIdx] := IntToStr(NewCount);
+                End
+                Else
+                Begin
+                    NetNames.Add(NetName);
+                    NetCounts.Add('1');
                 End;
-            End;
 
-            If FoundIdx >= 0 Then
-                NetCounts[FoundIdx] := NetCounts[FoundIdx] + 1
-            Else If NetTotal < 128 Then
-            Begin
-                NetNames[NetTotal] := NetName;
-                NetCounts[NetTotal] := 1;
-                Inc(NetTotal);
+                Inc(Count);
             End;
-
-            Inc(Count);
+            Obj := Iterator.NextPCBObject;
         End;
-        Obj := Iterator.NextPCBObject;
-    End;
-    Board.BoardIterator_Destroy(Iterator);
+        Board.BoardIterator_Destroy(Iterator);
 
-    // Build JSON output
-    JsonItems := '';
-    First := True;
-    For I := 0 To NetTotal - 1 Do
-    Begin
-        If Not First Then JsonItems := JsonItems + ',';
-        First := False;
-        JsonItems := JsonItems + '{"net":"' + EscapeJsonString(NetNames[I]) + '",'
-            + '"unrouted_connections":' + IntToStr(NetCounts[I]) + '}';
-    End;
+        JsonItems := '';
+        First := True;
+        For I := 0 To NetNames.Count - 1 Do
+        Begin
+            If Not First Then JsonItems := JsonItems + ',';
+            First := False;
+            CountStr := NetCounts[I];
+            JsonItems := JsonItems + '{"net":"' + EscapeJsonString(NetNames[I]) + '",'
+                + '"unrouted_connections":' + CountStr + '}';
+        End;
 
-    FinalResp := BuildSuccessResponse(RequestId,
-        '{"unrouted_nets":[' + JsonItems + '],"net_count":' + IntToStr(NetTotal)
-        + ',"total_unrouted":' + IntToStr(Count) + '}');
-    Result := FinalResp;
+        FinalResp := BuildSuccessResponse(RequestId,
+            '{"unrouted_nets":[' + JsonItems + '],"net_count":' + IntToStr(NetNames.Count)
+            + ',"total_unrouted":' + IntToStr(Count) + '}');
+        Result := FinalResp;
+    Finally
+        NetCounts.Free;
+        NetNames.Free;
+    End;
 End;
 
 {..............................................................................}

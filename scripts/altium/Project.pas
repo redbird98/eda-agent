@@ -798,6 +798,214 @@ Begin
 End;
 
 {..............................................................................}
+{ Batch variant of Proj_GetComponentInfo - returns metadata + optional pin    }
+{ nets and parameters for many designators in one IPC round-trip.            }
+{                                                                              }
+{ Modelled on the singular Proj_GetComponentInfo body shape, not on           }
+{ Proj_GetConnectivityBatch (which has a pre-existing Result-clobber bug,    }
+{ returns the request body verbatim as its response). Key structural rules:  }
+{ - the final Result := BuildSuccessResponse(...) is NOT the last statement; }
+{   an Exit; follows to break the "last statement is a long Result :="       }
+{   pattern that triggers DelphiScript's clobber.                             }
+{ - the response Data is stashed in a local before assigning to Result.       }
+{                                                                              }
+{ Params: designators (comma-separated, max 500), project_path?,              }
+{         with_pin_nets? (default true), with_parameters? (default true)     }
+{..............................................................................}
+
+Function Proj_GetComponentInfoBatch(Params : String; RequestId : String) : String;
+Var
+    ProjectPath, DesigStr, FlagStr : String;
+    Workspace : IWorkspace;
+    Project : IProject;
+    Doc : IDocument;
+    Comp : IComponent;
+    Pin : IPin;
+    I, J, K, N, DocCount, SepPos : Integer;
+    UsePhysical, WithPinNets, WithParameters, AlreadyDone : Boolean;
+    PinList, ParamList, CompEntry, ThisDesig, BodyJson, NotFoundJson : String;
+    FirstPin, FirstParam, FirstC, FirstNF : Boolean;
+    Wanted, MatchedDesigs : TStringList;
+    Remaining, EnvelopeData, ResponseStr : String;
+Begin
+    ProjectPath := ExtractJsonValue(Params, 'project_path');
+    ProjectPath := StringReplace(ProjectPath, '\\', '\', -1);
+    DesigStr := ExtractJsonValue(Params, 'designators');
+
+    FlagStr := ExtractJsonValue(Params, 'with_pin_nets');
+    WithPinNets := (FlagStr <> 'false') And (FlagStr <> 'False') And (FlagStr <> '0');
+    FlagStr := ExtractJsonValue(Params, 'with_parameters');
+    WithParameters := (FlagStr <> 'false') And (FlagStr <> 'False') And (FlagStr <> '0');
+
+    If DesigStr = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAMS', 'designators is required');
+        Exit;
+    End;
+
+    { Wanted holds parsed designators (input list). MatchedDesigs records   }
+    { which designators we've already produced output for, so the not_found }
+    { list is just the set difference at the end. Two heap-allocated        }
+    { TStringList locals - explicitly NOT `Array[0..499] Of String`, which  }
+    { triggered a "response = request body" bug in the pre-existing         }
+    { Proj_GetConnectivityBatch handler (broken since May 13). DelphiScript }
+    { has no Integer()/Pointer() type-casts so we cannot tag entries via    }
+    { TStringList.Objects, the parallel Matched list is the cleanest fix.   }
+    Wanted := TStringList.Create;
+    MatchedDesigs := TStringList.Create;
+    Try
+        Remaining := DesigStr;
+        While Length(Remaining) > 0 Do
+        Begin
+            SepPos := Pos('~~', Remaining);
+            If SepPos = 0 Then
+            Begin
+                ThisDesig := Remaining;
+                Remaining := '';
+            End
+            Else
+            Begin
+                ThisDesig := Copy(Remaining, 1, SepPos - 1);
+                Remaining := Copy(Remaining, SepPos + 2, Length(Remaining));
+            End;
+            If ThisDesig <> '' Then
+                Wanted.Add(ThisDesig);
+        End;
+
+        If Wanted.Count = 0 Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'EMPTY_BATCH', 'No designators parsed');
+            Exit;
+        End;
+
+        Workspace := GetWorkspace;
+        If Workspace = Nil Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'NO_WORKSPACE', 'No workspace');
+            Exit;
+        End;
+
+        If ProjectPath <> '' Then Project := FindProjectByPath(Workspace, ProjectPath)
+        Else Project := Workspace.DM_FocusedProject;
+        If Project = Nil Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'NO_PROJECT', 'No project found');
+            Exit;
+        End;
+
+        ForceRecompileIfRequested(Project, Params);
+        If WithPinNets Then SmartCompile(Project);
+
+        If WithPinNets Then
+            GetCompiledDocs(Project, DocCount, UsePhysical)
+        Else
+        Begin
+            DocCount := 0;
+            UsePhysical := False;
+            Try DocCount := Project.DM_LogicalDocumentCount; Except End;
+        End;
+
+        BodyJson := '';
+        FirstC := True;
+
+        For I := 0 To DocCount - 1 Do
+        Begin
+            If WithPinNets Then
+                Doc := GetCompiledDoc(Project, I, UsePhysical)
+            Else
+            Begin
+                Doc := Nil;
+                Try Doc := Project.DM_LogicalDocuments(I); Except End;
+            End;
+            If Doc = Nil Then Continue;
+
+            For J := 0 To Doc.DM_ComponentCount - 1 Do
+            Begin
+                Comp := Doc.DM_Components(J);
+                If Comp = Nil Then Continue;
+
+                ThisDesig := Comp.DM_PhysicalDesignator;
+                If Wanted.IndexOf(ThisDesig) < 0 Then Continue;
+
+                { Skip if already emitted (e.g. multi-channel hierarchical    }
+                { designs can expose the same physical designator on multiple }
+                { logical sheets after compile).                              }
+                AlreadyDone := (MatchedDesigs.IndexOf(ThisDesig) >= 0);
+                If AlreadyDone Then Continue;
+                MatchedDesigs.Add(ThisDesig);
+
+                PinList := '';
+                FirstPin := True;
+                For K := 0 To Comp.DM_PinCount - 1 Do
+                Begin
+                    Pin := Comp.DM_Pins(K);
+                    If Pin = Nil Then Continue;
+                    If Not FirstPin Then PinList := PinList + ',';
+                    FirstPin := False;
+                    PinList := PinList + '{"pin":"' + EscapeJsonString(Pin.DM_PinNumber) +
+                        '","name":"' + EscapeJsonString(Pin.DM_PinName) + '"';
+                    If WithPinNets Then
+                        PinList := PinList + ',"net":"' + EscapeJsonString(Pin.DM_FlattenedNetName) + '"';
+                    PinList := PinList + '}';
+                End;
+
+                ParamList := '';
+                FirstParam := True;
+                If WithParameters Then
+                Begin
+                    Try
+                        For K := 0 To Comp.DM_ParameterCount - 1 Do
+                        Begin
+                            If Not FirstParam Then ParamList := ParamList + ',';
+                            FirstParam := False;
+                            ParamList := ParamList + '"' + EscapeJsonString(Comp.DM_Parameters(K).DM_Name) +
+                                '":"' + EscapeJsonString(Comp.DM_Parameters(K).DM_Value) + '"';
+                        End;
+                    Except
+                    End;
+                End;
+
+                CompEntry := '{"designator":"' + EscapeJsonString(ThisDesig) + '"';
+                CompEntry := CompEntry + ',"comment":"' + EscapeJsonString(Comp.DM_Comment) + '"';
+                CompEntry := CompEntry + ',"footprint":"' + EscapeJsonString(Comp.DM_Footprint) + '"';
+                CompEntry := CompEntry + ',"lib_ref":"' + EscapeJsonString(Comp.DM_LibraryReference) + '"';
+                CompEntry := CompEntry + ',"sheet":"' + EscapeJsonString(Doc.DM_FileName) + '"';
+                If WithParameters Then
+                    CompEntry := CompEntry + ',"parameters":{' + ParamList + '}';
+                CompEntry := CompEntry + ',"pins":[' + PinList + ']}';
+
+                If Not FirstC Then BodyJson := BodyJson + ',';
+                FirstC := False;
+                BodyJson := BodyJson + CompEntry;
+            End;
+        End;
+
+        NotFoundJson := '';
+        FirstNF := True;
+        For I := 0 To Wanted.Count - 1 Do
+        Begin
+            If MatchedDesigs.IndexOf(Wanted[I]) < 0 Then
+            Begin
+                If Not FirstNF Then NotFoundJson := NotFoundJson + ',';
+                FirstNF := False;
+                NotFoundJson := NotFoundJson + '"' + EscapeJsonString(Wanted[I]) + '"';
+            End;
+        End;
+
+        EnvelopeData := '{"components":[' + BodyJson + '],'
+            + '"matched":' + IntToStr(MatchedDesigs.Count) + ','
+            + '"requested":' + IntToStr(Wanted.Count) + ','
+            + '"not_found":[' + NotFoundJson + ']}';
+
+        ResponseStr := BuildSuccessResponse(RequestId, EnvelopeData);
+        Result := ResponseStr;
+    Finally
+        MatchedDesigs.Free;
+        Wanted.Free;
+    End;
+End;
+
+{..............................................................................}
 { Export active schematic or PCB to PDF                                       }
 {..............................................................................}
 
@@ -2339,22 +2547,19 @@ End;
 {..............................................................................}
 
 Function Proj_GetConnectivityBatch(Params : String; RequestId : String) : String;
-Const
-    MaxWanted = 500;
 Var
-    ProjectPath, DesigStr, Remaining : String;
+    ProjectPath, DesigStr, Remaining, ThisDesig : String;
     Workspace : IWorkspace;
     Project : IProject;
     Doc : IDocument;
     Comp : IComponent;
     Pin : IPin;
-    I, J, K, N, DocCount : Integer;
+    I, J, K, DocCount, SepPos : Integer;
     UsePhysical : Boolean;
-    Data, PinList, CompEntry, NotFoundJson, ThisDesig : String;
-    FirstPin, FirstC, FirstNF, Matched : Boolean;
-    Wanted : Array[0..499] Of String;
-    Found : Array[0..499] Of Boolean;
-    WantedCount, MatchCount : Integer;
+    Data, PinList, CompEntry, NotFoundJson : String;
+    FirstPin, FirstC, FirstNF : Boolean;
+    Wanted, MatchedDesigs : TStringList;
+    EnvelopeData, ResponseStr : String;
 Begin
     ProjectPath := ExtractJsonValue(Params, 'project_path');
     ProjectPath := StringReplace(ProjectPath, '\\', '\', -1);
@@ -2366,115 +2571,123 @@ Begin
         Exit;
     End;
 
-    { Pre-scan DesigStr into the Wanted / Found arrays using the cursor }
-    { helper, we need random-access to the full list to track "not     }
-    { found" after the iteration below.                                 }
-    WantedCount := 0;
-    Remaining := DesigStr;
-    While True Do
-    Begin
-        ThisDesig := NextBatchOp(Remaining);
-        If ThisDesig = '' Then Break;
-        If WantedCount >= MaxWanted Then Break;
-        Wanted[WantedCount] := ThisDesig;
-        Found[WantedCount] := False;
-        WantedCount := WantedCount + 1;
-    End;
-    If WantedCount = 0 Then
-    Begin
-        Result := BuildErrorResponse(RequestId, 'EMPTY_BATCH', 'No designators parsed');
-        Exit;
-    End;
-
-    Workspace := GetWorkspace;
-    If Workspace = Nil Then
-    Begin
-        Result := BuildErrorResponse(RequestId, 'NO_WORKSPACE', 'No workspace');
-        Exit;
-    End;
-
-    If ProjectPath <> '' Then Project := FindProjectByPath(Workspace, ProjectPath)
-    Else Project := Workspace.DM_FocusedProject;
-    If Project = Nil Then
-    Begin
-        Result := BuildErrorResponse(RequestId, 'NO_PROJECT', 'No project found');
-        Exit;
-    End;
-
-    SmartCompile(Project);
-
-    Data := '';
-    FirstC := True;
-    MatchCount := 0;
-
-    GetCompiledDocs(Project, DocCount, UsePhysical);
-    For I := 0 To DocCount - 1 Do
-    Begin
-        Doc := GetCompiledDoc(Project, I, UsePhysical);
-        If Doc = Nil Then Continue;
-
-        For J := 0 To Doc.DM_ComponentCount - 1 Do
+    { Heap-allocated TStringLists for both the wanted set and the "already   }
+    { matched" set. Using `Array[0..N] Of String` here used to silently      }
+    { return the request body as the response - see                          }
+    { [[delphiscript_fixed_string_array_bug]].                               }
+    Wanted := TStringList.Create;
+    MatchedDesigs := TStringList.Create;
+    Try
+        Remaining := DesigStr;
+        While Length(Remaining) > 0 Do
         Begin
-            Comp := Doc.DM_Components(J);
-            If Comp = Nil Then Continue;
-
-            Matched := False;
-            For N := 0 To WantedCount - 1 Do
+            SepPos := Pos('~~', Remaining);
+            If SepPos = 0 Then
             Begin
-                If Comp.DM_PhysicalDesignator = Wanted[N] Then
+                ThisDesig := Remaining;
+                Remaining := '';
+            End
+            Else
+            Begin
+                ThisDesig := Copy(Remaining, 1, SepPos - 1);
+                Remaining := Copy(Remaining, SepPos + 2, Length(Remaining));
+            End;
+            If ThisDesig <> '' Then
+                Wanted.Add(ThisDesig);
+        End;
+
+        If Wanted.Count = 0 Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'EMPTY_BATCH', 'No designators parsed');
+            Exit;
+        End;
+
+        Workspace := GetWorkspace;
+        If Workspace = Nil Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'NO_WORKSPACE', 'No workspace');
+            Exit;
+        End;
+
+        If ProjectPath <> '' Then Project := FindProjectByPath(Workspace, ProjectPath)
+        Else Project := Workspace.DM_FocusedProject;
+        If Project = Nil Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'NO_PROJECT', 'No project found');
+            Exit;
+        End;
+
+        ForceRecompileIfRequested(Project, Params);
+        SmartCompile(Project);
+
+        Data := '';
+        FirstC := True;
+
+        GetCompiledDocs(Project, DocCount, UsePhysical);
+        For I := 0 To DocCount - 1 Do
+        Begin
+            Doc := GetCompiledDoc(Project, I, UsePhysical);
+            If Doc = Nil Then Continue;
+
+            For J := 0 To Doc.DM_ComponentCount - 1 Do
+            Begin
+                Comp := Doc.DM_Components(J);
+                If Comp = Nil Then Continue;
+
+                ThisDesig := Comp.DM_PhysicalDesignator;
+                If Wanted.IndexOf(ThisDesig) < 0 Then Continue;
+                If MatchedDesigs.IndexOf(ThisDesig) >= 0 Then Continue;
+                MatchedDesigs.Add(ThisDesig);
+
+                PinList := '';
+                FirstPin := True;
+                For K := 0 To Comp.DM_PinCount - 1 Do
                 Begin
-                    Found[N] := True;
-                    ThisDesig := Wanted[N];
-                    Matched := True;
-                    Break;
+                    Pin := Comp.DM_Pins(K);
+                    If Pin = Nil Then Continue;
+                    If Not FirstPin Then PinList := PinList + ',';
+                    FirstPin := False;
+                    PinList := PinList + '{"pin_number":"' + EscapeJsonString(Pin.DM_PinNumber) + '"';
+                    PinList := PinList + ',"pin_name":"' + EscapeJsonString(Pin.DM_PinName) + '"';
+                    PinList := PinList + ',"net":"' + EscapeJsonString(Pin.DM_FlattenedNetName) + '"';
+                    PinList := PinList + '}';
                 End;
+
+                CompEntry := '{"designator":"' + EscapeJsonString(ThisDesig) + '"';
+                CompEntry := CompEntry + ',"comment":"' + EscapeJsonString(Comp.DM_Comment) + '"';
+                CompEntry := CompEntry + ',"sheet":"' + EscapeJsonString(Doc.DM_FileName) + '"';
+                CompEntry := CompEntry + ',"pin_count":' + IntToStr(Comp.DM_PinCount);
+                CompEntry := CompEntry + ',"pins":[' + PinList + ']}';
+
+                If Not FirstC Then Data := Data + ',';
+                FirstC := False;
+                Data := Data + CompEntry;
             End;
-            If Not Matched Then Continue;
-
-            PinList := '';
-            FirstPin := True;
-            For K := 0 To Comp.DM_PinCount - 1 Do
-            Begin
-                Pin := Comp.DM_Pins(K);
-                If Pin = Nil Then Continue;
-                If Not FirstPin Then PinList := PinList + ',';
-                FirstPin := False;
-                PinList := PinList + '{"pin_number":"' + EscapeJsonString(Pin.DM_PinNumber) + '"';
-                PinList := PinList + ',"pin_name":"' + EscapeJsonString(Pin.DM_PinName) + '"';
-                PinList := PinList + ',"net":"' + EscapeJsonString(Pin.DM_FlattenedNetName) + '"';
-                PinList := PinList + '}';
-            End;
-
-            CompEntry := '{"designator":"' + EscapeJsonString(ThisDesig) + '"';
-            CompEntry := CompEntry + ',"comment":"' + EscapeJsonString(Comp.DM_Comment) + '"';
-            CompEntry := CompEntry + ',"sheet":"' + EscapeJsonString(Doc.DM_FileName) + '"';
-            CompEntry := CompEntry + ',"pin_count":' + IntToStr(Comp.DM_PinCount);
-            CompEntry := CompEntry + ',"pins":[' + PinList + ']}';
-
-            If Not FirstC Then Data := Data + ',';
-            FirstC := False;
-            Data := Data + CompEntry;
-            MatchCount := MatchCount + 1;
         End;
-    End;
 
-    NotFoundJson := '';
-    FirstNF := True;
-    For I := 0 To WantedCount - 1 Do
-    Begin
-        If Not Found[I] Then
+        NotFoundJson := '';
+        FirstNF := True;
+        For I := 0 To Wanted.Count - 1 Do
         Begin
-            If Not FirstNF Then NotFoundJson := NotFoundJson + ',';
-            FirstNF := False;
-            NotFoundJson := NotFoundJson + '"' + EscapeJsonString(Wanted[I]) + '"';
+            If MatchedDesigs.IndexOf(Wanted[I]) < 0 Then
+            Begin
+                If Not FirstNF Then NotFoundJson := NotFoundJson + ',';
+                FirstNF := False;
+                NotFoundJson := NotFoundJson + '"' + EscapeJsonString(Wanted[I]) + '"';
+            End;
         End;
-    End;
 
-    Result := BuildSuccessResponse(RequestId,
-        '{"components":[' + Data + '],'
-        + '"matched":' + IntToStr(MatchCount) + ','
-        + '"requested":' + IntToStr(WantedCount) + ','
-        + '"not_found":[' + NotFoundJson + ']}');
+        EnvelopeData := '{"components":[' + Data + '],'
+            + '"matched":' + IntToStr(MatchedDesigs.Count) + ','
+            + '"requested":' + IntToStr(Wanted.Count) + ','
+            + '"not_found":[' + NotFoundJson + ']}';
+
+        ResponseStr := BuildSuccessResponse(RequestId, EnvelopeData);
+        Result := ResponseStr;
+    Finally
+        MatchedDesigs.Free;
+        Wanted.Free;
+    End;
 End;
 
 {..............................................................................}
@@ -3386,6 +3599,7 @@ Begin
         'get_nets':          Result := Proj_GetNets(Params, RequestId);
         'get_bom':           Result := Proj_GetBOM(Params, RequestId);
         'get_component_info': Result := Proj_GetComponentInfo(Params, RequestId);
+        'get_component_info_batch': Result := Proj_GetComponentInfoBatch(Params, RequestId);
         'export_pdf':        Result := Proj_ExportPDF(Params, RequestId);
         'cross_probe':       Result := Proj_CrossProbe(Params, RequestId);
         'get_design_stats':  Result := Proj_GetDesignStats(Params, RequestId);

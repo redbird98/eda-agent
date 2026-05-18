@@ -38,6 +38,14 @@ class TestExpensiveThreshold:
         assert second["bulk_tool"] == "get_connectivity_many"
         assert "get_connectivity_many" in second["hint"]
 
+    def test_get_component_info_trips_at_second_call(self):
+        first = BulkHintTracker.record_and_hint("get_component_info")
+        assert first is None
+        second = BulkHintTracker.record_and_hint("get_component_info")
+        assert second is not None
+        assert second["bulk_tool"] == "get_component_info_many"
+        assert "get_component_info_many" in second["hint"]
+
     def test_get_nets_trips_at_second_call_and_points_to_unfiltered(self):
         BulkHintTracker.record_and_hint("get_nets")
         hint = BulkHintTracker.record_and_hint("get_nets")
@@ -150,3 +158,112 @@ class TestGetConnectivityManyOrchestration:
         )
         # Whitespace stripped, empties dropped.
         assert captured["params"]["designators"] == "U1~~R1"
+
+
+class TestGetComponentInfoManyOrchestration:
+    @pytest.mark.asyncio
+    async def test_packs_designators_and_routes_to_batch_command(self, monkeypatch):
+        captured: dict = {}
+
+        class FakeBridge:
+            async def send_command_async(self, command, params=None, timeout=None):
+                captured["command"] = command
+                captured["params"] = params
+                captured["timeout"] = timeout
+                return {
+                    "components": [
+                        {"designator": "U1", "comment": "MCU", "pins": []},
+                        {"designator": "R1", "comment": "10k", "pins": []},
+                    ],
+                    "matched": 2,
+                    "requested": 3,
+                    "not_found": ["Q99"],
+                }
+
+        monkeypatch.setattr(
+            "eda_agent.tools.project.get_bridge", lambda: FakeBridge()
+        )
+        from eda_agent.tools import project
+
+        captured_tools = {}
+
+        class DummyMcp:
+            def tool(self):
+                def decorator(fn):
+                    captured_tools[fn.__name__] = fn
+                    return fn
+                return decorator
+
+        project.register_project_tools(DummyMcp())
+        result = await captured_tools["get_component_info_many"](
+            designators=["U1", "R1", "Q99"],
+        )
+        assert captured["command"] == "project.get_component_info_batch"
+        assert captured["params"]["designators"] == "U1~~R1~~Q99"
+        # Default flags omitted from the wire payload.
+        assert "with_pin_nets" not in captured["params"]
+        assert "with_parameters" not in captured["params"]
+        assert result["matched"] == 2
+        assert "Q99" in result["not_found"]
+
+    @pytest.mark.asyncio
+    async def test_empty_list_returns_error(self, monkeypatch):
+        class FakeBridge:
+            async def send_command_async(self, command, params=None, timeout=None):
+                raise AssertionError("bridge should not be called")
+
+        monkeypatch.setattr(
+            "eda_agent.tools.project.get_bridge", lambda: FakeBridge()
+        )
+        from eda_agent.tools import project
+
+        captured_tools = {}
+
+        class DummyMcp:
+            def tool(self):
+                def decorator(fn):
+                    captured_tools[fn.__name__] = fn
+                    return fn
+                return decorator
+
+        project.register_project_tools(DummyMcp())
+        result = await captured_tools["get_component_info_many"](designators=[])
+        assert "error" in result
+
+    @pytest.mark.asyncio
+    async def test_strips_whitespace_and_propagates_flags(self, monkeypatch):
+        captured: dict = {}
+
+        class FakeBridge:
+            async def send_command_async(self, command, params=None, timeout=None):
+                captured["params"] = params
+                captured["timeout"] = timeout
+                return {"matched": 1, "requested": 1, "not_found": []}
+
+        monkeypatch.setattr(
+            "eda_agent.tools.project.get_bridge", lambda: FakeBridge()
+        )
+        from eda_agent.tools import project
+
+        captured_tools = {}
+
+        class DummyMcp:
+            def tool(self):
+                def decorator(fn):
+                    captured_tools[fn.__name__] = fn
+                    return fn
+                return decorator
+
+        project.register_project_tools(DummyMcp())
+        await captured_tools["get_component_info_many"](
+            designators=["U1", "", "  ", "R1 "],
+            with_pin_nets=False,
+            with_parameters=False,
+            timeout=90.0,
+        )
+        # Whitespace stripped, empties dropped.
+        assert captured["params"]["designators"] == "U1~~R1"
+        # False flags get serialized for Pascal-side parsing.
+        assert captured["params"]["with_pin_nets"] == "false"
+        assert captured["params"]["with_parameters"] == "false"
+        assert captured["timeout"] == 90.0

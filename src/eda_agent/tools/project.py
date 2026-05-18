@@ -347,6 +347,11 @@ def register_project_tools(mcp):
     ) -> dict[str, Any]:
         """Get full information about a single component.
 
+        IMPORTANT, if you need info for MORE THAN ONE component, use
+        `get_component_info_many` (batch). Looping this tool is a
+        large wall-time sink, especially with `with_pin_nets=True`
+        because each call compiles the project.
+
         Performance note: pin nets are the only field that needs a
         project compile, and a stale-cache compile on a multi-sheet
         hierarchical project can take 30-60s. When you only need the
@@ -407,6 +412,9 @@ def register_project_tools(mcp):
         result = await bridge.send_command_async(
             "project.get_component_info", params, timeout=timeout,
         )
+        hint = BulkHintTracker.record_and_hint("get_component_info")
+        if hint and isinstance(result, dict):
+            result["_hint_bulk"] = hint
         if isinstance(result, dict):
             mfr = str(
                 result.get("parameters", {}).get("Manufacturer")
@@ -429,6 +437,104 @@ def register_project_tools(mcp):
                 result,
                 explicit_parts=parts,
                 context="get_component_info",
+            )
+        return result
+
+    @mcp.tool()
+    async def get_component_info_many(
+        designators: list[str],
+        project_path: Optional[str] = None,
+        with_pin_nets: bool = True,
+        with_parameters: bool = True,
+        timeout: Optional[float] = None,
+    ) -> dict[str, Any]:
+        """Full per-component info for MANY designators in ONE round-trip.
+
+        PREFER THIS over looping `get_component_info`. The compile
+        (when `with_pin_nets=True`) happens once for the whole batch,
+        not once per designator.
+
+        Set ``with_pin_nets=False`` to skip the compile entirely for
+        a sub-second metadata-only response (footprint, lib_ref,
+        parameters, pin numbers/names, sheet). Set
+        ``with_parameters=False`` for the cheapest possible probe.
+
+        DATASHEET DISCIPLINE: parameters / comment / library metadata
+        in the response are NOT authoritative. Before reasoning about
+        any component's pin function, voltage rating, timing, or
+        electrical behavior, fetch its manufacturer datasheet. The
+        response carries `_datasheet_guidance` + `_datasheet_parts`.
+
+        Args:
+            designators: List of component designators.
+            project_path: Optional project path. If None, uses active.
+            with_pin_nets: When True (default) compile once and emit
+                the flattened net for each pin on every component.
+                Set False to skip the compile.
+            with_parameters: When True (default) include each
+                component's parameter dict.
+            timeout: Optional bridge poll-timeout override (seconds).
+                Raise this when keeping `with_pin_nets=True` on large
+                hierarchical projects.
+
+        Returns:
+            Dict with components[], matched, requested, not_found[],
+            plus `_datasheet_guidance` + `_datasheet_parts`.
+        """
+        bridge = get_bridge()
+        cleaned = [str(d).strip() for d in (designators or []) if str(d).strip()]
+        if not cleaned:
+            return {"error": "No designators provided", "matched": 0}
+        params: dict[str, Any] = {"designators": "~~".join(cleaned)}
+        if project_path:
+            params["project_path"] = project_path
+        if not with_pin_nets:
+            params["with_pin_nets"] = "false"
+        if not with_parameters:
+            params["with_parameters"] = "false"
+        result = await bridge.send_command_async(
+            "project.get_component_info_batch", params, timeout=timeout,
+        )
+        if isinstance(result, dict):
+            comps = result.get("components") or []
+            explicit = []
+            seen_keys: set[tuple[str, str]] = set()
+            for c in comps:
+                if not isinstance(c, dict):
+                    continue
+                desig = str(c.get("designator") or "").strip()
+                params_dict = c.get("parameters") or {}
+                mfr = ""
+                pn = ""
+                if isinstance(params_dict, dict):
+                    mfr = str(
+                        params_dict.get("Manufacturer")
+                        or params_dict.get("manufacturer")
+                        or ""
+                    )
+                    pn = str(
+                        params_dict.get("Manufacturer Part Number")
+                        or params_dict.get("ManufacturerPartNumber")
+                        or params_dict.get("PartNumber")
+                        or ""
+                    ).strip()
+                if not pn:
+                    pn = str(c.get("comment") or "").strip()
+                if not pn:
+                    continue
+                key = (pn.lower(), desig.lower())
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                explicit.append({
+                    "manufacturer": mfr,
+                    "part_number": pn,
+                    "designators": desig,
+                })
+            return tag_response(
+                result,
+                explicit_parts=explicit,
+                context="get_component_info_many",
             )
         return result
 

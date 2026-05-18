@@ -82,6 +82,10 @@ class BulkHintTracker:
             "get_connectivity_many",
             "Pass a list of designators to get_connectivity_many to pull them all in one round-trip instead of ~700 ms per call.",
         ),
+        "get_component_info": (
+            "get_component_info_many",
+            "Pass a list of designators to get_component_info_many to pull them all in one round-trip. The compile (when with_pin_nets=True) happens once for the whole batch, not once per designator.",
+        ),
         "get_nets": (
             "get_nets",
             "Call get_nets ONCE with no filters (component='', net_name='', raise limit) to pull the entire pin-net table, then filter locally. Each filtered call is ~700 ms and compiles the project.",

@@ -13,7 +13,7 @@ Const
     // returns, mismatch means Altium is running a stale compiled script
     // (DelphiScript caches compiled units until the script project is
     // reopened or Altium is restarted).
-    SCRIPT_VERSION = '2026.05.17.2';
+    SCRIPT_VERSION = '2026.05.18.28';
 
     // Wire protocol version. Bumped whenever the request/response JSON shape
     // changes incompatibly. Python and Pascal must agree; mismatch returns
@@ -292,37 +292,57 @@ Var
     Workspace : IWorkspace;
     Project : IProject;
     Doc : IDocument;
-    I : Integer;
+    ServerDoc : IServerDocument;
+    PrevView : IServerDocumentView;
     Path : String;
+    I : Integer;
 Begin
     Result := Nil;
 
-    { Note: an earlier implementation tried PCBServer.GetCurrentPCBBoard as a }
-    { fast path for the focused-PCB case. Some Altium builds flag that symbol }
-    { as "Undeclared identifier: GetCurrentPCBBoard" in the script IDE, even }
-    { though the SDK reference documents it as part of IPCB_ServerInterface.  }
-    { The iterator-based walk below covers every case the fast path covered, }
-    { so dropping the symbol reference avoids the parse-time IDE error.       }
+    { Fast path: PCB tab already focused. `PCBServer.GetCurrentPCBBoard` is }
+    { the documented entry point and on this build is declared at runtime, }
+    { the IDE flags it at compile time on some builds but the runtime      }
+    { resolves it. (`PCBServer.GetPCBBoardByPath` is genuinely undeclared  }
+    { on this build, so we cannot use the path-based lookup.)              }
+    Result := PCBServer.GetCurrentPCBBoard;
+    If Result <> Nil Then Exit;
 
+    { Fallback: no PCB tab is focused. Find the project's PCB doc, open it }
+    { (which moves focus to it), grab the board pointer, and restore the   }
+    { user's previous view so they don't blink away from where they were.  }
+    { The IPCB_Board pointer stays valid after focus moves back.            }
     Workspace := GetWorkspace;
     If Workspace = Nil Then Exit;
     Project := Workspace.DM_FocusedProject;
     If Project = Nil Then Exit;
 
+    PrevView := Nil;
+    Try
+        If (Client <> Nil) Then PrevView := Client.GetCurrentView;
+    Except End;
+
     For I := 0 To Project.DM_LogicalDocumentCount - 1 Do
     Begin
         Doc := Project.DM_LogicalDocuments(I);
         If Doc = Nil Then Continue;
-        Try
-            Path := Doc.DM_FullPath;
-            If (UpperCase(Doc.DM_DocumentKind) = 'PCB') Or
-               (Pos('.PCBDOC', UpperCase(Path)) > 0) Then
-            Begin
-                Result := PCBServer.GetPCBBoardByPath(Path);
-                If Result <> Nil Then Exit;
-            End;
-        Except End;
+        Path := '';
+        Try Path := Doc.DM_FullPath; Except End;
+        If Path = '' Then Continue;
+        If (UpperCase(Doc.DM_DocumentKind) <> 'PCB') And
+           (Pos('.PCBDOC', UpperCase(Path)) <= 0) Then Continue;
+
+        ServerDoc := Nil;
+        Try ServerDoc := Client.OpenDocument('PCB', Path); Except End;
+        If ServerDoc = Nil Then Continue;
+
+        Try Client.ShowDocument(ServerDoc); Except End;
+        Try Result := PCBServer.GetCurrentPCBBoard; Except End;
+        If Result <> Nil Then Break;
     End;
+
+    { Restore the user's prior view so the focus blink is invisible. }
+    If (PrevView <> Nil) And (Client <> Nil) Then
+        Try Client.ShowDocument(PrevView.OwnerDocument); Except End;
 End;
 
 { Save every modified IServerDocument the workspace knows about, both     }

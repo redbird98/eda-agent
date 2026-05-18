@@ -1826,8 +1826,12 @@ Var
     Component : ISch_Component;
     Polygon : ISch_Polygon;
     Remaining : String;
-    CommaPos, VertexCount, X, Y, I : Integer;
-    XValues, YValues : Array[0..99] Of Integer;
+    CommaPos, X, Y, I : Integer;
+    { Parallel TStringLists of stringified coords. Fixed-size local arrays }
+    { of any type corrupt the return slot, see                              }
+    { [[delphiscript_fixed_string_array_bug]] - originally documented for  }
+    { Array of String, now confirmed for Array of Integer/Double too.      }
+    XValues, YValues : TStringList;
 Begin
     VerticesStr := ExtractJsonValue(Params, 'vertices');
 
@@ -1851,68 +1855,69 @@ Begin
         Exit;
     End;
 
-    // Parse comma-separated x,y pairs
-    VertexCount := 0;
-    Remaining := VerticesStr;
-    While Remaining <> '' Do
-    Begin
-        // Get X
-        CommaPos := Pos(',', Remaining);
-        If CommaPos = 0 Then Break;
-        Token := Copy(Remaining, 1, CommaPos - 1);
-        Remaining := Copy(Remaining, CommaPos + 1, Length(Remaining));
-        X := StrToIntDef(Token, 0);
-
-        // Get Y
-        CommaPos := Pos(',', Remaining);
-        If CommaPos > 0 Then
+    XValues := TStringList.Create;
+    YValues := TStringList.Create;
+    Try
+        Remaining := VerticesStr;
+        While Remaining <> '' Do
         Begin
+            CommaPos := Pos(',', Remaining);
+            If CommaPos = 0 Then Break;
             Token := Copy(Remaining, 1, CommaPos - 1);
             Remaining := Copy(Remaining, CommaPos + 1, Length(Remaining));
+            X := StrToIntDef(Token, 0);
+
+            CommaPos := Pos(',', Remaining);
+            If CommaPos > 0 Then
+            Begin
+                Token := Copy(Remaining, 1, CommaPos - 1);
+                Remaining := Copy(Remaining, CommaPos + 1, Length(Remaining));
+            End
+            Else
+            Begin
+                Token := Remaining;
+                Remaining := '';
+            End;
+            Y := StrToIntDef(Token, 0);
+
+            XValues.Add(IntToStr(X));
+            YValues.Add(IntToStr(Y));
+        End;
+
+        If XValues.Count < 3 Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'INVALID_PARAMS', 'At least 3 vertices are required');
+            Exit;
+        End;
+
+        Polygon := SchServer.SchObjectFactory(ePolygon, eCreate_Default);
+        If Polygon <> Nil Then
+        Begin
+            Polygon.VerticesCount := XValues.Count;
+            Polygon.IsSolid := True;
+            Polygon.LineWidth := eSmall;
+
+            For I := 1 To XValues.Count Do
+                Polygon.Vertex[I] := Point(
+                    MilsToCoord(StrToIntDef(XValues[I-1], 0)),
+                    MilsToCoord(StrToIntDef(YValues[I-1], 0)));
+
+            SchServer.ProcessControl.PreProcess(SchLib, '');
+            SetOwnerPart(Polygon, Component);
+            Component.AddSchObject(Polygon);
+            SchRegisterObject(Component, Polygon);
+            SchServer.ProcessControl.PostProcess(SchLib, 'Edit');
+
+            MarkLibDirty(SchLib);
+            Result := BuildSuccessResponse(RequestId,
+                '{"success":true,"vertices":' + IntToStr(XValues.Count) + '}');
         End
         Else
-        Begin
-            Token := Remaining;
-            Remaining := '';
-        End;
-        Y := StrToIntDef(Token, 0);
-
-        If VertexCount < 100 Then
-        Begin
-            XValues[VertexCount] := X;
-            YValues[VertexCount] := Y;
-            Inc(VertexCount);
-        End;
+            Result := BuildErrorResponse(RequestId, 'CREATE_FAILED', 'Failed to create polygon');
+    Finally
+        YValues.Free;
+        XValues.Free;
     End;
-
-    If VertexCount < 3 Then
-    Begin
-        Result := BuildErrorResponse(RequestId, 'INVALID_PARAMS', 'At least 3 vertices are required');
-        Exit;
-    End;
-
-    Polygon := SchServer.SchObjectFactory(ePolygon, eCreate_Default);
-    If Polygon <> Nil Then
-    Begin
-        Polygon.VerticesCount := VertexCount;
-        Polygon.IsSolid := True;
-        Polygon.LineWidth := eSmall;
-
-        For I := 1 To VertexCount Do
-            Polygon.Vertex[I] := Point(MilsToCoord(XValues[I-1]), MilsToCoord(YValues[I-1]));
-
-        SchServer.ProcessControl.PreProcess(SchLib, '');
-        SetOwnerPart(Polygon, Component);
-        Component.AddSchObject(Polygon);
-        SchRegisterObject(Component, Polygon);
-        SchServer.ProcessControl.PostProcess(SchLib, 'Edit');
-
-        MarkLibDirty(SchLib);
-        Result := BuildSuccessResponse(RequestId,
-            '{"success":true,"vertices":' + IntToStr(VertexCount) + '}');
-    End
-    Else
-        Result := BuildErrorResponse(RequestId, 'CREATE_FAILED', 'Failed to create polygon');
 End;
 
 {..............................................................................}
