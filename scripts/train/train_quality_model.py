@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2026 George Saliba
+# Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """Bradley-Terry trainer: pairwise preferences -> quality model.
 
 Reads the JSONL log produced by the vote UI (or the

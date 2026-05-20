@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2026 George Saliba
+# Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """Stress tests for the EDA Agent bridge.
 
 Focus: real stress on the IPC boundary -- large payloads, encoding edge

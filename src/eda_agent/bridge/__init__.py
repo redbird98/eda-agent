@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2026 George Saliba
+# Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """Altium Bridge - Communication layer between Python and Altium Designer."""
 
 from .altium_bridge import AltiumBridge, get_bridge, reset_bridge, PROTOCOL_VERSION

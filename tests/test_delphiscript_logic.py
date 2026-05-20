@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2026 George Saliba
+# Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """Python reimplementations of DelphiScript pure functions, tested against
 identical inputs/outputs. These validate the LOGIC is correct without needing
 Altium Designer.

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2026 George Saliba
+# Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """Capture user placement edits as training data.
 
 After ``design_execute_plan`` emits a schematic, the user opens it in

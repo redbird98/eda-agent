@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2026 George Saliba
+# Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """Orthogonal wire routing primitives for schematic generation.
 
 Pure-functional helpers used by the executor to draw Manhattan wires

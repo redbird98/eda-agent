@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2026 George Saliba
+# Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """Apply learned placement priors as a post-Sugiyama bias.
 
 The v1 "model" is just a dict: ``(part_role, anchor_role)`` ->

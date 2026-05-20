@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2026 George Saliba
+# Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """Generic motif recognition for schematic layout.
 
 Detects canonical sub-circuit patterns in a ``DesignPlan``'s netlist

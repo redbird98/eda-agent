@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2026 George Saliba
+# Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """Design-agent MCP tools, surfaces the design discipline + primitives.
 
 Claude Code is the planner. It calls ``design.get_discipline`` to read
@@ -75,7 +75,18 @@ def register_design_tools(mcp) -> None:
         """
         paths = [Path(p) for p in library_paths]
         inventory = snapshot_live(paths)
-        return inventory.model_dump()
+        payload = inventory.model_dump()
+        # Cache the latest snapshot so the web dashboard's Libraries tab
+        # can render it without re-running the (slow) live scan.
+        try:
+            from ..config import get_config
+            cache_path = get_config().workspace_dir / "inventory.json"
+            cache_path.write_text(
+                json.dumps(payload, indent=2), encoding="utf-8",
+            )
+        except OSError:
+            pass
+        return payload
 
     @mcp.tool()
     async def design_validate_plan(plan_json: Union[str, dict]) -> dict[str, Any]:
@@ -253,9 +264,21 @@ def register_design_tools(mcp) -> None:
             counts {placements, wires, labels, power_ports, junctions} /
             notes / failures.
         """
-        return preview_plan_from_json(
+        result = preview_plan_from_json(
             plan_json, output_svg_path, placement_hints=placement_hints,
         )
+        # Cache the most recent plan input for the dashboard's Plan tab.
+        try:
+            from ..config import get_config
+            cache_path = get_config().workspace_dir / "plan.json"
+            payload = plan_json if isinstance(plan_json, dict) else json.loads(plan_json)
+            cache_path.write_text(
+                json.dumps({"plan": payload, "preview": result}, indent=2),
+                encoding="utf-8",
+            )
+        except (OSError, json.JSONDecodeError, TypeError):
+            pass
+        return result
 
     @mcp.tool()
     async def design_audit_schematic(

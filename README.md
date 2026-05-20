@@ -14,7 +14,10 @@ Claude Code reviewing a buck converter through eda-agent. The feedback resistor 
 
 <img src="assets/dashboard.png" alt="eda-agent dashboard inside Altium Designer" width="320">
 
-A floating Altium-side window shows live status, request count, cumulative Altium-side time, auto-shutdown countdown, and a per-command log with durations. `Hide pings` filters the 30 s keep-alive traffic; `Only >100ms` isolates slow calls. The **Detach** button saves all dirty docs and exits the polling loop cleanly.
+Two dashboards ship with eda-agent:
+
+- **In-Altium status window** — a floating Altium-side window showing live status, request count, cumulative Altium-side time, auto-shutdown countdown, and a per-command log with durations. `Hide pings` filters the 30 s keep-alive traffic; `Only >100ms` isolates slow calls. The **Detach** button saves all dirty docs and exits the polling loop cleanly.
+- **Web dashboard** — a local browser dashboard at `http://127.0.0.1:8766`, focused on design review. A **Review** tab surfaces datasheet / MPN / manufacturer / footprint coverage gauges and an actionable issue queue (missing datasheet, missing MPN, orphan nets, ...); **Project**, **Components**, **Nets**, **Libraries** and **Plan** tabs give live structured views. Click any component or net to drill into a detail drawer; one click cross-probes it into Altium. Light / dark theme, server-sent-events live feed. It is auto-started by the MCP server — the **Open Dashboard** button on the in-Altium status window launches the browser.
 
 ## How it works
 
@@ -40,7 +43,8 @@ This is **not** a batch tool that opens a project, runs a script, and exits. It'
 - **Persistent polling loop**: one script start, then ~10 ms per tool call in active mode
 - **Annotation runs silently**: `annotate` designates components without popping the annotate dialog
 - **Deferred save for speed**: mutations mark documents as modified in memory; disk writes happen on explicit `save_all` (or automatically on `detach_from_altium`). Before this, every edit triggered a full project save, which dominated latency
-- **Live dashboard**: a floating Altium-side window shows status, request count, per-command performance stats, and a command log. Detach button exits the loop cleanly; `Hide pings` / `Only >100ms` checkboxes filter noise
+- **Two dashboards**: an in-Altium floating status window (status, request count, per-command performance, command log, Detach button) and a browser-based **web dashboard** (`127.0.0.1:8766`) for design review — datasheet / MPN / footprint coverage gauges, an actionable issue queue, component / net drill-in, one-click cross-probe into Altium, light / dark theme. The whole project view loads in one bundled IPC round-trip (`project.dashboard_snapshot`); the web dashboard auto-starts with the MCP server
+- **DelphiScript trap linter**: `scripts/altium/lint.py` (wired into `build.py`) scans the Pascal sources for known parser hazards — `Cardinal()` casts, malformed hex literals, empty `.Add('')` arguments, braces inside comments, fixed-size arrays as function locals, reserved-word identifiers — and fails the build before a bad deploy
 - **Activity logs**: every command is appended to `workspace/activity.log` (CSV with timestamps, durations, command name, response size). The bridge also writes `bridge_trace.log` for IPC-level diagnostics
 - **Bulk-tool nudge**: when a singular tool is hit 2 to 3 times in 10 s, the response carries a `_hint_bulk` field pointing at the batch variant. Clients that missed the bulk tool in the docstring learn about it at runtime
 - **Design agent surface**: six MCP tools (`design_get_discipline`, `design_snapshot_inventory`, `design_validate_plan`, `design_execute_plan`, `design_audit_schematic`, `design_validate`) that let an MCP-client LLM produce a structured `DesignPlan` JSON, instantiate it on a fresh sheet (parts + wires + labels + rail glyphs), audit the result for layout problems, and validate ERC + connectivity. Datasheet-first, NDA-isolated by construction
@@ -266,7 +270,7 @@ These six tools cover most day-to-day work. They accept any object type supporte
 
 **Scope values:** `active_doc`, `project`, `project:<path>`, `doc:<path>`.
 
-### Application (14 tools)
+### Application (15 tools)
 
 | Tool | Purpose |
 |---|---|
@@ -284,6 +288,7 @@ These six tools cover most day-to-day work. They accept any object type supporte
 | `execute_menu` | Run a menu command by path (e.g., `Tools|Design Rule Check`) |
 | `get_clipboard_text` | Read text from Windows clipboard |
 | `diag_workspace` | Diagnostic: enumerate the IPC workspace directory and report pending request files. Useful when investigating IPC plumbing |
+| `set_intent` | Record the current conversation's intent so the web dashboard can display what the agent is working on |
 
 ### Project (47 tools)
 

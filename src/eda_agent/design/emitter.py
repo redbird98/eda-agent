@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2026 George Saliba
+# Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """SchematicCanvas -> Altium, one-shot batched IPC.
 
 The emitter is intentionally dumb: it makes zero layout decisions and

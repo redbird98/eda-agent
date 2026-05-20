@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2026 George Saliba
+# Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """Composer tests: motif splatting + Sugiyama fallback + role filter.
 
 The composer is the production placement entrypoint (see

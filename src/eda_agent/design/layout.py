@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2026 George Saliba
+# Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """Placement orchestrator + audits + motif splat + rotation pass.
 
 ``compute_layout`` is the public entry point. It branches:

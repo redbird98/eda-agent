@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2026 George Saliba
+# Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """SchematicCanvas: the pure-Python representation of a schematic.
 
 The canvas holds every visual+electrical element the executor would have

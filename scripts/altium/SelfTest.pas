@@ -1,5 +1,5 @@
 { SPDX-License-Identifier: Apache-2.0                                   }
-{ Copyright (c) 2026 George Saliba                                      }
+{ Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>                                      }
 {..............................................................................}
 { SelfTest.pas - Self-test script for the Altium integration bridge                          }
 { Run inside Altium Designer to validate every command handler.                }

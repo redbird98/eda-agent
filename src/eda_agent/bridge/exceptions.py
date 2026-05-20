@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2026 George Saliba
+# Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """Custom exceptions for Altium Bridge.
 
 Errors carry a code (programmatic dispatch), a message (user display), and

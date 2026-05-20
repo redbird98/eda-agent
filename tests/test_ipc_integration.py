@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2026 George Saliba
+# Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """End-to-end IPC integration tests.
 
 These tests validate the file-based IPC protocol between Python and Altium

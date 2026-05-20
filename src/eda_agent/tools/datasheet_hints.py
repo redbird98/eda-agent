@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2026 George Saliba
+# Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """Datasheet-discipline guidance injected into component-touching responses.
 
 The agent's job in any design task is to ground conclusions in the

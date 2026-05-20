@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2026 George Saliba
+# Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """Aggregate placement edits into a relative-anchor priors file.
 
 Reads the JSONL log produced by ``design_learn_from_layout`` and

@@ -1,5 +1,5 @@
 { SPDX-License-Identifier: Apache-2.0                                   }
-{ Copyright (c) 2026 George Saliba                                      }
+{ Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>                                      }
 {..............................................................................}
 { Main.pas - Constants, IPC primitives and JSON helpers for the Altium bridge   }
 { The script polls for request_<id>.json files, processes commands, writes      }
@@ -13,7 +13,7 @@ Const
     // returns, mismatch means Altium is running a stale compiled script
     // (DelphiScript caches compiled units until the script project is
     // reopened or Altium is restarted).
-    SCRIPT_VERSION = '2026.05.18.28';
+    SCRIPT_VERSION = '2026.05.20.2';
 
     // Wire protocol version. Bumped whenever the request/response JSON shape
     // changes incompatibly. Python and Pascal must agree; mismatch returns
@@ -79,8 +79,8 @@ Var
 Procedure InitDefaultConfig;
 Begin
     PollIntervalActiveMs := 10;
-    PollIntervalIdleMs   := 100;
-    IdleThreshold        := 20;
+    PollIntervalIdleMs   := 30;
+    IdleThreshold        := 150;
     AutoShutdownMs       := 600000;  { 10 min }
     YieldIterations      := 5;
     YieldEveryNActive    := 5;
@@ -661,6 +661,8 @@ Var
     SearchKey : String;
     BraceCount : Integer;
     BackslashCount, TempPos : Integer;
+    InStr : Boolean;
+    Ch : String;
 Begin
     Result := '';
     SearchKey := '"' + Key + '"';
@@ -698,17 +700,42 @@ Begin
                 End;
                 Result := UnescapeJsonString(Copy(Json, StartPos, EndPos - StartPos));
             End
-            Else If Copy(Json, StartPos, 1) = '{' Then
+            Else If (Copy(Json, StartPos, 1) = '{') Or
+                    (Copy(Json, StartPos, 1) = '[') Then
             Begin
-                // Object value - find matching brace
+                // Container value (object or array). Depth-count braces AND
+                // brackets together, skipping string literals so a '}' or
+                // ']' inside a "string" can't close the container early.
                 EndPos := StartPos;
-                BraceCount := 1;
-                Inc(EndPos);
-                While (EndPos <= Length(Json)) And (BraceCount > 0) Do
+                BraceCount := 0;
+                InStr := False;
+                While EndPos <= Length(Json) Do
                 Begin
-                    If Copy(Json, EndPos, 1) = '{' Then Inc(BraceCount)
-                    Else If Copy(Json, EndPos, 1) = '}' Then Dec(BraceCount);
+                    Ch := Copy(Json, EndPos, 1);
+                    If InStr Then
+                    Begin
+                        If Ch = '"' Then
+                        Begin
+                            // Real close-quote only after an even run of '\'.
+                            BackslashCount := 0;
+                            TempPos := EndPos - 1;
+                            While (TempPos >= StartPos) And
+                                  (Copy(Json, TempPos, 1) = '\') Do
+                            Begin
+                                Inc(BackslashCount);
+                                Dec(TempPos);
+                            End;
+                            If (BackslashCount Mod 2) = 0 Then InStr := False;
+                        End;
+                    End
+                    Else
+                    Begin
+                        If Ch = '"' Then InStr := True
+                        Else If (Ch = '{') Or (Ch = '[') Then Inc(BraceCount)
+                        Else If (Ch = '}') Or (Ch = ']') Then Dec(BraceCount);
+                    End;
                     Inc(EndPos);
+                    If (Not InStr) And (BraceCount = 0) Then Break;
                 End;
                 Result := Copy(Json, StartPos, EndPos - StartPos);
             End

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2026 George Saliba
+# Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """Pydantic-backed schemas for the wire protocol.
 
 Pydantic models on the Python side are the source of truth. JSON Schema

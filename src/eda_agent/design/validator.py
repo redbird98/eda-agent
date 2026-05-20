@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2026 George Saliba
+# Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """Validator, ERC + connectivity sanity report on the focused project.
 
 Slice C.1 scope: schematic-only checks. Bundles three reads:

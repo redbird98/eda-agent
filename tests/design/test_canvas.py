@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2026 George Saliba
+# Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """Tests for design.canvas: SchematicCanvas, SymbolInstance pin_world math.
 
 Pin-world rotation is the core math the pipeline depends on; getting

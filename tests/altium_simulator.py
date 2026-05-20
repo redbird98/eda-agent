@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2026 George Saliba
+# Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """Altium Designer Simulator for end-to-end integration testing.
 
 Replaces step 4 of the IPC pipeline: instead of real Altium Designer

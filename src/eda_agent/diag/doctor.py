@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2026 George Saliba
+# Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """Full-preflight checks that talk to a running Altium.
 
 Runs all the health checks first, then a series of canaries that exercise

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2026 George Saliba
+# Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """Tests for the v1 priors aggregator + apply pass.
 
 The aggregator (``scripts/train/build_placement_priors.py``) is exercised

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2026 George Saliba
+# Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """Score a SchematicCanvas's layout quality.
 
 The pipeline used to produce one canvas and emit it. With this module

@@ -1,5 +1,5 @@
 { SPDX-License-Identifier: Apache-2.0                                   }
-{ Copyright (c) 2026 George Saliba                                      }
+{ Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>                                      }
 {..............................................................................}
 { Project.pas - Project management functions for the Altium integration bridge                }
 {..............................................................................}
@@ -3579,6 +3579,50 @@ Begin
 End;
 
 {..............................................................................}
+{ Dashboard snapshot - bundles every read the web dashboard needs into ONE     }
+{ IPC round-trip. The dashboard used to fire 6-7 separate requests; each paid  }
+{ the full poll + file-IO tax and queued behind the others (Pascal processes   }
+{ one request at a time). This collapses them to a single request.            }
+{                                                                              }
+{ Each sub-handler returns a full success/data/error envelope; we pull the     }
+{ data field out of each and re-assemble under one envelope. A failed          }
+{ sub-handler contributes "null" for its section, the rest still populate.     }
+{..............................................................................}
+Function Proj_DashboardSnapshot(RequestId : String) : String;
+Var
+    Focused, Docs, Stats, Bom, Nets, Msgs, ProjPath : String;
+    DataStr, EnvOut : String;
+Begin
+    Focused  := ExtractJsonValue(Proj_GetFocused(RequestId), 'data');
+    Docs     := ExtractJsonValue(Proj_GetDocuments('', RequestId), 'data');
+    Stats    := ExtractJsonValue(Proj_GetDesignStats('', RequestId), 'data');
+    Bom      := ExtractJsonValue(Proj_GetBOM('', RequestId), 'data');
+    Nets     := ExtractJsonValue(Proj_GetNets('', RequestId), 'data');
+    Msgs     := ExtractJsonValue(Proj_GetMessages('', RequestId), 'data');
+    ProjPath := ExtractJsonValue(Proj_GetProjectPath(RequestId), 'data');
+
+    If Focused  = '' Then Focused  := 'null';
+    If Docs     = '' Then Docs     := 'null';
+    If Stats    = '' Then Stats    := 'null';
+    If Bom      = '' Then Bom      := 'null';
+    If Nets     = '' Then Nets     := 'null';
+    If Msgs     = '' Then Msgs     := 'null';
+    If ProjPath = '' Then ProjPath := 'null';
+
+    DataStr := '{'
+        + '"focused":'   + Focused  + ','
+        + '"documents":' + Docs     + ','
+        + '"stats":'     + Stats    + ','
+        + '"bom":'       + Bom      + ','
+        + '"nets":'      + Nets     + ','
+        + '"messages":'  + Msgs     + ','
+        + '"path":'      + ProjPath
+        + '}';
+    EnvOut := BuildSuccessResponse(RequestId, DataStr);
+    Result := EnvOut;
+End;
+
+{..............................................................................}
 { Command Handler - must be at end so all functions are declared               }
 {..............................................................................}
 
@@ -3625,6 +3669,7 @@ Begin
         'get_compile_freshness': Result := Proj_GetCompileFreshness(Params, RequestId);
         'import_document':   Result := Proj_ImportDocument(Params, RequestId);
         'get_project_path':  Result := Proj_GetProjectPath(RequestId);
+        'dashboard_snapshot': Result := Proj_DashboardSnapshot(RequestId);
         'set_document_parameter': Result := Proj_SetDocumentParameter(Params, RequestId);
         'compare_sch_pcb':   Result := Proj_CompareSchPcb(Params, RequestId);
         'update_pcb':        Result := Proj_UpdatePCB(Params, RequestId);

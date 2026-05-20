@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2026 George Saliba
+# Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """Application-level tools for Altium Designer MCP Server."""
 
 import re
@@ -425,6 +425,39 @@ def register_application_tools(mcp):
         if isinstance(result, dict):
             return {"success": True, **result}
         return result or {"success": True, "menu_path": menu_path}
+
+    @mcp.tool()
+    async def set_intent(intent: str) -> dict[str, Any]:
+        """Tell the dashboard what high-level task the agent is working on.
+
+        The text is written to ``workspace/intent.txt`` where the web
+        dashboard polls it and shows a banner. Purely informational --
+        does not affect tool dispatch in any way. Call this once at the
+        start of a long task ("reviewing buck-converter feedback divider",
+        "auto-placing the analog front-end on sheet B") so the user
+        watching the dashboard knows what's happening between IPC
+        events. Pass an empty string to clear the banner.
+
+        Args:
+            intent: Short human-readable description (one line, <=240 chars).
+
+        Returns:
+            ``{"ok": true, "intent": "<truncated text>"}``.
+        """
+        from ..config import get_config
+        text = (intent or "").strip()
+        if len(text) > 240:
+            text = text[:240]
+        path = get_config().workspace_dir / "intent.txt"
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if text:
+                path.write_text(text, encoding="utf-8")
+            elif path.exists():
+                path.unlink()
+        except OSError as e:
+            return {"ok": False, "error": str(e)}
+        return {"ok": True, "intent": text}
 
     @mcp.tool()
     async def get_clipboard_text() -> dict[str, Any]:

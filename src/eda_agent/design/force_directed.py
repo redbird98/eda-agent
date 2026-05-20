@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2026 George Saliba
+# Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """Force-directed placement + audit-aware hard-shove pass.
 
 Split out of ``layout.py`` so the spring/repulsion solver and its

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2026 George Saliba
+# Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """Design plan schema, the contract between planner and executor.
 
 A DesignPlan is the structured output of the planner. The executor reads it

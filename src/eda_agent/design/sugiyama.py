@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2026 George Saliba
+# Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """From-scratch Sugiyama-style layered graph drawing for schematics.
 
 A pure-Python implementation of the Sugiyama framework (Sugiyama,

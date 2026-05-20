@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2026 George Saliba
+# Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """Structured scope parameter for object-iterating commands.
 
 The wire form is a JSON object the Pascal side parses via ParseScope:

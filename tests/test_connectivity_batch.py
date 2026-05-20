@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2026 George Saliba
+# Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """Tests for the connectivity-batching work:
 - get_connectivity_many Python tool
 - BulkHintTracker aggressive threshold for expensive tools

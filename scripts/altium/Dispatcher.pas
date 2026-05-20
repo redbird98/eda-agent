@@ -1,5 +1,5 @@
 { SPDX-License-Identifier: Apache-2.0                                   }
-{ Copyright (c) 2026 George Saliba                                      }
+{ Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>                                      }
 {..............................................................................}
 { Dispatcher.pas - Polling loop and per-request dispatcher.                     }
 { Compiles last so all Handle*Command functions are visible.                   }
@@ -61,6 +61,8 @@ Var
     ExceptionMsg : String;
     StartMs, DurationMs : Cardinal;
     ResultTag : String;
+    DashIsError : Boolean;
+    DashDetail, DashErrPayload, DashCode : String;
 Begin
     Result := False;
     EnsureWorkspaceDir;
@@ -111,9 +113,16 @@ Begin
 
     StatusLastCommand := Command;
     Inc(StatusRequestCount);
-    UpdateStatusHeader('MCP: running ' + Command + '...');
     StartMs := GetTickCount;
     ResultTag := 'OK';
+
+    { MCP liveness: any inbound command (typically application.ping every }
+    { 30 s) keeps the Open Dashboard button enabled.                       }
+    LastPingMs := StartMs;
+
+    { Spinner + in-flight readout on the dashboard. Reset on exit so the }
+    { status pill drops back to idle/paused/green when we're done.       }
+    SetInFlight(Command);
 
     ExceptionMsg := '';
     { Heartbeat: write progress_<id>.json so Python can distinguish "still      }
@@ -149,7 +158,33 @@ Begin
 
     AppendLog(FormatLogStamp + ',' + IntToStr(DurationMs) + ',' + Command + ',' + ResultTag
               + ',' + IntToStr(Length(ResponseContent)) + ',' + Copy(ResponseContent, 1, 200));
-    AppendLogLine(Command, DurationMs, ResultTag = 'EXCEPTION');
+
+    { Surface the error message to the dashboard (inline detail row + last- }
+    { error banner) when the response is success=false. ExtractJsonValue   }
+    { handles the nested error/code/message path via two successive calls. }
+    DashIsError := (ResultTag = 'EXCEPTION');
+    DashErrPayload := ExtractJsonValue(ResponseContent, 'error');
+    DashDetail := '';
+    DashCode := '';
+    If (DashErrPayload <> '') And (DashErrPayload <> 'null') Then
+    Begin
+        DashIsError := True;
+        DashCode    := ExtractJsonValue(DashErrPayload, 'code');
+        DashDetail  := ExtractJsonValue(DashErrPayload, 'message');
+        { Explicit Begin/End around each branch, DelphiScript parser   }
+        { trips on `Else If` without them.                               }
+        If (DashCode <> '') And (DashDetail <> '') Then
+        Begin
+            DashDetail := DashCode + ': ' + DashDetail;
+        End
+        Else
+        Begin
+            If (DashCode <> '') Then DashDetail := DashCode;
+        End;
+    End;
+    AppendLogLine(Command, DurationMs, DashIsError, RequestId, DashDetail);
+
+    ResetInFlight;
 
     Result := True;
 End;
@@ -239,7 +274,10 @@ Begin
                 Break;
             End;
 
-            // Auto-shutdown after prolonged inactivity
+            // Auto-shutdown after prolonged inactivity. Paused sessions
+            // never auto-shutdown so the user can step away indefinitely.
+            If PausedFlag Then
+                LastActivityMs := GetTickCount;
             If AutoShutdownMs > 0 Then
             Begin
                 NowMs := GetTickCount;
@@ -251,6 +289,20 @@ Begin
                         Break;
                     End;
                 End;
+            End;
+
+            If PausedFlag Then
+            Begin
+                { Skip dispatch entirely while paused, but still yield and    }
+                { refresh stats so the dashboard countdown stays alive.       }
+                UpdateStatsLine(
+                    (GetTickCount - StatusStartTick) Div 1000,
+                    StatusRequestCount,
+                    StatusTotalAltiumMs,
+                    AutoShutdownMs Div 1000);
+                Application.ProcessMessages;
+                Sleep(PollIntervalIdleMs);
+                Continue;
             End;
 
             HadRequest := ProcessSingleRequest;

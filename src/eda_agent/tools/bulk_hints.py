@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2026 George Saliba
+# Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """Response-time nudge that steers callers toward bulk tools.
 
 Each singular tool that has a bulk equivalent registers every call

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2026 George Saliba
+# Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 r"""CLI subcommands for eda-agent.
 
 Exposed via the `eda-agent` console script. The default subcommand

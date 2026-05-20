@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2026 George Saliba
+# Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """Cross-validation tests: run SAME inputs through Free Pascal and Python,
 verify IDENTICAL outputs.
 

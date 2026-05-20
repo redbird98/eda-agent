@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2026 George Saliba
+# Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """Tests for the agent-in-loop placement_hints API.
 
 The hints API lets an agent (or any caller) override specific refdes

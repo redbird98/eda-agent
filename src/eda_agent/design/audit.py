@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2026 George Saliba
+# Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """Schematic audit, structured visual/layout violation report.
 
 Slice C.2 scope: visual layout checks on the active schematic. Reads the

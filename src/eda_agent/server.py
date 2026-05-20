@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2026 George Saliba
+# Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """EDA Agent MCP Server - Main entry point + CLI subcommands."""
 
 import argparse
@@ -32,6 +32,49 @@ mcp = FastMCP("eda-agent")
 register_all_tools(mcp)
 
 
+def _spawn_dashboard_background(host: str, port: int) -> None:
+    """Start the local web dashboard on a background thread.
+
+    Run in-process with the MCP server so the user never has to launch a
+    separate ``eda-agent dashboard`` command. The Flask app shares the
+    same workspace dir as the MCP server (read from get_config()), so
+    its log tailer + sentinel watcher pick up activity immediately.
+
+    Failures are swallowed: a port conflict, a missing Flask install, or
+    any other startup error must NOT block the MCP server -- stdio is
+    the critical path. A note in the log lets the user know we tried.
+    """
+    import os
+    import threading
+
+    if os.environ.get("EDA_AGENT_NO_DASHBOARD") == "1":
+        logger.info("dashboard disabled via EDA_AGENT_NO_DASHBOARD=1")
+        return
+
+    def _run():
+        try:
+            from .web.dashboard import create_app
+            app = create_app()
+            # Werkzeug emits its own startup banner to stderr that the MCP
+            # client treats as protocol noise. Silence it without losing
+            # actual error logs.
+            import logging as _log
+            _log.getLogger("werkzeug").setLevel(_log.WARNING)
+            # threaded=True so SSE doesn't block other endpoints.
+            app.run(host=host, port=port, debug=False, threaded=True,
+                    use_reloader=False)
+        except OSError as e:
+            logger.warning("dashboard could not bind %s:%s (%s); "
+                           "Open Dashboard button will be a no-op",
+                           host, port, e)
+        except Exception as e:
+            logger.warning("dashboard background thread crashed: %s", e)
+
+    t = threading.Thread(target=_run, name="dashboard-server", daemon=True)
+    t.start()
+    logger.info("dashboard scheduled on http://%s:%s/", host, port)
+
+
 def serve_mcp() -> int:
     """Start the MCP server on stdio. This is the default mode -- it's
     what an MCP-compatible client calls when it invokes `eda-agent` with no args."""
@@ -41,6 +84,11 @@ def serve_mcp() -> int:
     config = get_config()
     config.ensure_workspace()
     logger.info("Workspace directory: %s", config.workspace_dir)
+
+    # Auto-launch the web dashboard in-process. The Altium-side
+    # "Open Dashboard" button writes a sentinel that this app's background
+    # watcher picks up and opens in the user's default browser.
+    _spawn_dashboard_background(host="127.0.0.1", port=8766)
 
     mcp.run(transport="stdio")
     return 0
@@ -121,6 +169,20 @@ def main() -> int:
         help="Emit machine-readable JSON instead of the text report.",
     )
 
+    # dashboard -- local web UI for the MCP bridge
+    dash_p = subparsers.add_parser(
+        "dashboard",
+        help=(
+            "Launch the local web dashboard. Open http://127.0.0.1:8766 "
+            "to see live MCP activity, performance, and health. The "
+            "in-Altium status form has an 'Open Dashboard' button that "
+            "auto-launches this server's URL via a workspace sentinel."
+        ),
+    )
+    dash_p.add_argument("--host", default="127.0.0.1")
+    dash_p.add_argument("--port", type=int, default=8766)
+    dash_p.add_argument("--debug", action="store_true")
+
     # vote -- pairwise-preference vote UI in the browser
     vote_p = subparsers.add_parser(
         "vote",
@@ -151,6 +213,13 @@ def main() -> int:
         return cli.cmd_scripts_path()
     if args.command == "install-scripts":
         return cli.cmd_install_scripts(dest=args.dest, force=args.force)
+    if args.command == "dashboard":
+        from .web.dashboard import main as dashboard_main
+        return dashboard_main([
+            "--host", args.host,
+            "--port", str(args.port),
+            *(["--debug"] if args.debug else []),
+        ])
     if args.command == "vote":
         from .web.server import main as vote_main
         return vote_main([

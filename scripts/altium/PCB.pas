@@ -1,5 +1,5 @@
 { SPDX-License-Identifier: Apache-2.0                                   }
-{ Copyright (c) 2026 George Saliba                                      }
+{ Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>                                      }
 {..............................................................................}
 { PCB.pas - PCB-specific operations for the Altium integration bridge                        }
 { Provides high-level PCB commands: net classes, design rules, DRC,           }

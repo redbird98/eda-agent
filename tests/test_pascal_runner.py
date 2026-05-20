@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2026 George Saliba
+# Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """Run the standalone Free Pascal test programs end-to-end.
 
 ``test_pascal_logic.pas`` and ``test_real_pascal.pas`` are self-contained

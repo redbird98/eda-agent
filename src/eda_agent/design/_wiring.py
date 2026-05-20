@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2026 George Saliba
+# Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """Pure-Python helpers shared by executor.py and pipeline.py.
 
 The legacy ``executor.py`` and the new canvas-based ``pipeline.py``

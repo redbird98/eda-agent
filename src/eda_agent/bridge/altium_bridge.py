@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2026 George Saliba
+# Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """Communication bridge between Python and Altium Designer via file-based IPC.
 
 Per-request file scheme: Python writes ``request_<id>.json``, Altium scans the
@@ -11,6 +11,7 @@ user tool calls.
 
 import json
 import logging
+import sys
 import time
 import uuid
 import asyncio
@@ -55,6 +56,93 @@ def _trace_log(workspace_dir: Path, msg: str) -> None:
         path = workspace_dir / "bridge_trace.log"
         with open(path, "a", encoding="utf-8") as f:
             f.write(f"{time.time():.3f} {msg}\n")
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Event-driven response pickup (Windows).
+#
+# The response-poll loop used to sleep a fixed poll_interval between checks,
+# adding up to that interval of latency to every call. FindFirstChangeNotification
+# lets us BLOCK until the workspace directory changes, so the instant Pascal
+# writes response_<id>.json we wake and read it -- the Python half of the
+# round-trip drops to ~0. Pascal still has to poll (it can't block without
+# freezing Altium's UI), but this removes our side of the latency.
+#
+# All of this degrades gracefully: if kernel32 isn't available the helpers
+# return None / False and the caller falls back to time.sleep.
+# ---------------------------------------------------------------------------
+
+_FILE_NOTIFY_CHANGE_FILE_NAME = 0x00000001
+_WAIT_OBJECT_0 = 0x00000000
+
+_kernel32 = None
+if sys.platform == "win32":
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        _kernel32.FindFirstChangeNotificationW.restype = wintypes.HANDLE
+        _kernel32.FindFirstChangeNotificationW.argtypes = [
+            wintypes.LPCWSTR, wintypes.BOOL, wintypes.DWORD]
+        _kernel32.FindNextChangeNotification.restype = wintypes.BOOL
+        _kernel32.FindNextChangeNotification.argtypes = [wintypes.HANDLE]
+        _kernel32.FindCloseChangeNotification.restype = wintypes.BOOL
+        _kernel32.FindCloseChangeNotification.argtypes = [wintypes.HANDLE]
+        _kernel32.WaitForSingleObject.restype = wintypes.DWORD
+        _kernel32.WaitForSingleObject.argtypes = [
+            wintypes.HANDLE, wintypes.DWORD]
+    except Exception as _e:  # pragma: no cover - platform dependent
+        _kernel32 = None
+        logger.debug("directory-watch unavailable, falling back to sleep: %s", _e)
+
+_INVALID_HANDLE = ctypes.c_void_p(-1).value if _kernel32 is not None else None
+
+
+def _make_dir_watcher(directory: Path):
+    """Open a change-notification handle for ``directory``.
+
+    Returns the handle, or None if change-notification is unavailable
+    (the caller then falls back to time.sleep polling).
+    """
+    if _kernel32 is None:
+        return None
+    try:
+        handle = _kernel32.FindFirstChangeNotificationW(
+            str(directory), False, _FILE_NOTIFY_CHANGE_FILE_NAME)
+        if not handle or handle == _INVALID_HANDLE:
+            return None
+        return handle
+    except Exception:
+        return None
+
+
+def _wait_dir_change(handle, timeout_ms: float) -> bool:
+    """Block until the watched directory changes or the timeout elapses.
+
+    Re-arms the notification on a real change. Returns True on a change,
+    False on timeout or error. A False return is harmless -- the caller's
+    loop just re-checks the response file and waits again.
+    """
+    if _kernel32 is None or handle is None:
+        return False
+    try:
+        res = _kernel32.WaitForSingleObject(handle, int(timeout_ms))
+        if res == _WAIT_OBJECT_0:
+            _kernel32.FindNextChangeNotification(handle)
+            return True
+        return False
+    except Exception:
+        return False
+
+
+def _close_dir_watcher(handle) -> None:
+    if _kernel32 is None or handle is None:
+        return
+    try:
+        _kernel32.FindCloseChangeNotification(handle)
     except Exception:
         pass
 
@@ -131,10 +219,37 @@ class AltiumBridge:
         # write and the pointer write. The polling itself is per-response-ID
         # so the lock is only held for the brief request-publish step.
         self._publish_lock = threading.Lock()
+        # The heavy workspace prep -- pointer file, runtime config, and the
+        # Pydantic-schema export -- only needs to run once. Doing it on every
+        # _publish_request added 1s+ of disk I/O per IPC call. This flag
+        # gates it to a single run; per-request we only ensure the dir.
+        self._workspace_prepared = False
 
     def ensure_workspace(self) -> None:
         self.config.ensure_workspace()
         self._sweep_orphan_responses()
+        self._workspace_prepared = True
+
+    def _ensure_workspace_fast(self) -> None:
+        """Per-request workspace guard. Cheap by design.
+
+        The full ``ensure_workspace`` re-exports JSON schemas and rewrites
+        the pointer/config files -- ~1s of disk I/O. That belongs at attach
+        time, not on every IPC call. Here we only guarantee the directory
+        exists; the one-time heavy prep runs lazily on the first request if
+        ``attach()`` somehow hasn't run yet.
+        """
+        if not self._workspace_prepared:
+            try:
+                self.ensure_workspace()
+            except Exception as e:
+                logger.debug("one-time workspace prep failed: %s", e)
+                # Fall through to the cheap mkdir so the request can still go.
+            self._workspace_prepared = True
+        try:
+            self.config.workspace_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            logger.debug("workspace mkdir failed: %s", e)
 
     def _sweep_orphan_responses(self, max_age_seconds: float = 60.0) -> None:
         """Delete response_*.json files older than ``max_age_seconds``.
@@ -250,14 +365,55 @@ class AltiumBridge:
         self._keepalive_thread = None
 
     def _keepalive_loop(self) -> None:
-        while not self._keepalive_stop.wait(self.KEEPALIVE_INTERVAL):
+        # The keep-alive thread also drives the "Open Dashboard" sentinel:
+        # the in-Altium status form drops workspace/open_dashboard.url whose
+        # contents are a URL, and we open it in the user's default browser.
+        # Sentinel checks run on a faster cadence than the 30s keep-alive
+        # ping so the button feels responsive (~1s to react).
+        sentinel_interval = 1.0
+        ticks_per_ping = max(1, int(self.KEEPALIVE_INTERVAL / sentinel_interval))
+        tick = 0
+        while not self._keepalive_stop.wait(sentinel_interval):
             if not self._attached:
                 break
-            try:
-                self.send_command("application.ping", timeout=5.0)
-            except Exception:
-                logger.debug("Keep-alive ping failed, Altium may have stopped")
-                break
+            self._maybe_open_dashboard_sentinel()
+            tick += 1
+            if tick >= ticks_per_ping:
+                tick = 0
+                try:
+                    self.send_command("application.ping", timeout=5.0)
+                except Exception:
+                    logger.debug("Keep-alive ping failed, Altium may have stopped")
+                    break
+
+    def _maybe_open_dashboard_sentinel(self) -> None:
+        """If the Altium status form dropped open_dashboard.url, open it.
+
+        The sentinel file's content is a URL (anything starting with http:// or
+        https:// is accepted). The file is removed after the open call so the
+        same trigger doesn't fire twice. Any error is logged and swallowed --
+        a missing sentinel is the common case on every tick.
+        """
+        sentinel = self.config.workspace_dir / "open_dashboard.url"
+        if not sentinel.exists():
+            return
+        try:
+            url = sentinel.read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            return
+        try:
+            sentinel.unlink()
+        except OSError:
+            pass
+        if not url.startswith("http://") and not url.startswith("https://"):
+            logger.debug("dashboard sentinel had bad URL: %r", url[:80])
+            return
+        try:
+            import webbrowser
+            webbrowser.open(url)
+            logger.info("opened dashboard URL: %s", url)
+        except Exception as e:
+            logger.debug("webbrowser.open failed: %s", e)
 
     def _response_path(self, request_id: str) -> Path:
         return self.config.workspace_dir / f"response_{request_id}.json"
@@ -284,7 +440,7 @@ class AltiumBridge:
         violation when its Reset() collides with Python's still-open
         write handle.
         """
-        self.ensure_workspace()
+        self._ensure_workspace_fast()
         request_path = self._request_path(request.id)
         tmp_path = request_path.with_suffix(".json.tmp")
         with open(tmp_path, "w", encoding="utf-8") as f:
@@ -318,10 +474,6 @@ class AltiumBridge:
         workspace_dir = self.config.workspace_dir
         poll_interval = self.config.poll_interval
         deadline = time.monotonic() + timeout
-        extensions = 0
-        poll_count = 0
-        first_appearance: Optional[float] = None
-        parse_errors = 0
         start = time.monotonic()
 
         _trace_log(
@@ -329,6 +481,30 @@ class AltiumBridge:
             f"POLL_START id={request_id[:8]} timeout={timeout}s "
             f"interval={poll_interval}s",
         )
+
+        # Event-driven wait: wake the instant Pascal writes our response
+        # file instead of sleeping a fixed poll_interval. The watcher is
+        # closed in the finally below; if it couldn't be created the loop
+        # falls back to time.sleep transparently.
+        watcher = _make_dir_watcher(workspace_dir)
+        try:
+            return self._poll_loop(
+                request_id, response_path, progress_path, workspace_dir,
+                poll_interval, deadline, timeout, start, watcher,
+            )
+        finally:
+            _close_dir_watcher(watcher)
+
+    def _poll_loop(self, request_id, response_path, progress_path,
+                   workspace_dir, poll_interval, deadline, timeout,
+                   start, watcher) -> CommandResponse:
+        """Inner poll loop for _poll_response. Split out so the watcher
+        handle can be closed via a single try/finally regardless of which
+        exit path (match / timeout / break) the loop takes."""
+        extensions = 0
+        poll_count = 0
+        first_appearance: Optional[float] = None
+        parse_errors = 0
 
         while True:
             poll_count += 1
@@ -392,7 +568,14 @@ class AltiumBridge:
                     continue
                 break
 
-            time.sleep(poll_interval)
+            # Wait for the workspace directory to change (Pascal writing
+            # our response file is exactly such a change) -- wakes us
+            # immediately instead of after a fixed poll_interval. Falls
+            # back to a plain sleep when the watcher is unavailable.
+            if watcher is not None:
+                _wait_dir_change(watcher, poll_interval * 1000.0)
+            else:
+                time.sleep(poll_interval)
 
         elapsed = (time.monotonic() - start) * 1000
         _trace_log(

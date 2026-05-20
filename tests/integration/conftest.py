@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2026 George Saliba
+# Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """Pytest fixtures for real-Altium integration tests.
 
 Unlike the simulator-based tests in the parent ``tests/`` directory, these

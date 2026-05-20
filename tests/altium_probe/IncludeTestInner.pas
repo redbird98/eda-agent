@@ -1,3 +1,5 @@
+{ SPDX-License-Identifier: Apache-2.0 }
+{ Copyright (c) 2026 George Saliba <george.saliba@salitronic.com> }
 { Probe: this file is NOT listed in IncludeTest.PrjScr. It is pulled  }
 { into IncludeTestParent.pas via the {$I ...} directive at compile    }
 { time. If DelphiScript honours $I, the proc below is callable from   }

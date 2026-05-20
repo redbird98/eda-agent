@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2026 George Saliba
+# Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """Plan -> SchematicCanvas, pure Python.
 
 The pipeline takes a validated DesignPlan plus an extracted symbol library

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2026 George Saliba
+# Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """Library inventory snapshot, what the planner sees as 'available parts'.
 
 The planner reads this to bias its part choices toward libs the user

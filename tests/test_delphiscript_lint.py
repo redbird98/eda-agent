@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2026 George Saliba
+# Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """Static lint for Altium DelphiScript .pas files.
 
 DelphiScript under Altium is a RemObjects PascalScript variant with specific

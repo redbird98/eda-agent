@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2026 George Saliba
+# Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """Regression tests for the routing-safety pieces of the pipeline.
 
 These cover a class of failure where power-port spoke routing

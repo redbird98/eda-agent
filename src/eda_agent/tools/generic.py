@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2026 George Saliba
+# Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """Generic primitive tools for Altium Designer MCP Server.
 
 These primitives provide a thin, generic interface to Altium objects.

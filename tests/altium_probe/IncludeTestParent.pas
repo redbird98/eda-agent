@@ -1,3 +1,5 @@
+{ SPDX-License-Identifier: Apache-2.0 }
+{ Copyright (c) 2026 George Saliba <george.saliba@salitronic.com> }
 { Probe: this is the ONLY .pas listed in IncludeTest.PrjScr.          }
 { It pulls in IncludeTestInner.pas via the {$I ...} directive.        }
 { The expected dialog behaviour after Altium opens IncludeTest.PrjScr }

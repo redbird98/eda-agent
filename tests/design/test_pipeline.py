@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2026 George Saliba
+# Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """Tests for design.pipeline: plan -> SchematicCanvas, pure Python.
 
 The pipeline is the orchestrator; these tests check it produces a

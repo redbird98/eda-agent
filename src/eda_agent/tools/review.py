@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2026 George Saliba
+# Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """Design-review orchestration tools.
 
 One call to ``design_review_snapshot`` bundles 8-12 separate reads

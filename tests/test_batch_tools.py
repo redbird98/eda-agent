@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2026 George Saliba
+# Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """Tests for the new batch tools (batch_create, batch_delete, place_wires,
 place_sch_components_from_library, sch_attach_spice_primitives,
 lib_add_pins).

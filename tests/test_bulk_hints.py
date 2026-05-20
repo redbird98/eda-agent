@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2026 George Saliba
+# Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """Tests for BulkHintTracker, the response-time nudge that steers
 callers toward bulk tools when the same singular tool is hit repeatedly.
 """

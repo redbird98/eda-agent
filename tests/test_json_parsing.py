@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2026 George Saliba
+# Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """Exhaustive tests of JSON parsing/building logic.
 
 Each function here is an EXACT mirror of the corresponding DelphiScript function.

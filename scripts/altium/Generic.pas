@@ -1,5 +1,5 @@
 { SPDX-License-Identifier: Apache-2.0                                   }
-{ Copyright (c) 2026 George Saliba                                      }
+{ Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>                                      }
 {..............................................................................}
 { Generic.pas - Generic primitives for the Altium integration bridge                        }
 { 5 primitives: run_process, query_objects, modify_objects,                  }

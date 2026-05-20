@@ -1,5 +1,5 @@
 { SPDX-License-Identifier: Apache-2.0                                   }
-{ Copyright (c) 2026 George Saliba                                      }
+{ Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>                                      }
 {..............................................................................}
 { PCBGeneric.pas - PCB object primitives for the Altium integration bridge                  }
 { Parallel to Generic.pas but for PCBServer / IPCB_* objects.               }

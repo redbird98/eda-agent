@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2026 George Saliba
+# Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """Executor, instantiate a DesignPlan in Altium.
 
 Slice B.1 scope: parts placement. Opens or creates the project, creates

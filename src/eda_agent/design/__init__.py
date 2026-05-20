@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2026 George Saliba
+# Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """Design agent primitives, exposed to Claude Code via MCP tools.
 
 The MCP server provides the building blocks:

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2026 George Saliba
+# Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """Configuration management for EDA Agent MCP Server.
 
 Single source of truth: ``mcp_config.json`` lives in the workspace directory
@@ -58,8 +58,14 @@ class MCPRuntimeConfig(BaseModel):
 
     # Pascal-side polling tunables (milliseconds)
     poll_interval_active_ms: int = 10
-    poll_interval_idle_ms: int = 100
-    idle_threshold: int = 20
+    # Idle poll cadence. Worst-case request-pickup latency when the loop
+    # has gone idle. 30 ms keeps the dashboard feeling responsive without
+    # meaningfully loading Altium (one FindFiles glob per tick).
+    poll_interval_idle_ms: int = 30
+    # Empty-poll count before dropping to the idle cadence. At 10 ms active
+    # this keeps the loop in fast mode for ~1.5 s after the last request,
+    # so a burst of dashboard calls all get 10 ms pickup.
+    idle_threshold: int = 150
     auto_shutdown_ms: int = 600_000  # 10 min
     yield_iterations: int = 5
     yield_every_n_active: int = 5

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2026 George Saliba
+# Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """Re-export the structured scope schema from eda_agent.scope.
 
 The scope helper lives at the top-level so callers can import it without

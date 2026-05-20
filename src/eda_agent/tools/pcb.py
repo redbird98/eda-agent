@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2026 George Saliba
+# Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """PCB-specific tools for Altium Designer MCP Server.
 
 Provides high-level PCB operations: net classes, design rules, DRC,
