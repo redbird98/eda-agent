@@ -198,39 +198,25 @@ End;
 { SchLib editor stays pointed at whatever was last manually clicked (or     }
 { the first component on load), so modify_objects silently hits the wrong  }
 { component when the caller thinks they switched.                          }
-Function Lib_SetCurrentComponent(Params : String; RequestId : String) : String;
+{ Switch the active SchLib's current component to the named symbol and      }
+{ return it (Nil on any failure: no SchServer, no active SchLib, or no      }
+{ component with that lib-ref). Shared by Lib_SetCurrentComponent and the   }
+{ lib_component scope handling in the generic primitives, so a caller can   }
+{ target a library symbol without a separate set_current_component round-   }
+{ trip.                                                                      }
+Function SelectLibComponent(Name : String) : ISch_Component;
 Var
-    Name : String;
     SchLib : ISch_Lib;
     Component : ISch_Component;
 Begin
-    Name := ExtractJsonValue(Params, 'name');
-    If Name = '' Then
-    Begin
-        Result := BuildErrorResponse(RequestId, 'MISSING_NAME', 'name is required');
-        Exit;
-    End;
-
-    If SchServer = Nil Then
-    Begin
-        Result := BuildErrorResponse(RequestId, 'NO_SCHLIB', 'No schematic library is active');
-        Exit;
-    End;
+    Result := Nil;
+    If (Name = '') Or (SchServer = Nil) Then Exit;
 
     SchLib := SchServer.GetCurrentSchDocument;
-    If (SchLib = Nil) Or (SchLib.ObjectId <> eSchLib) Then
-    Begin
-        Result := BuildErrorResponse(RequestId, 'NO_SCHLIB', 'No schematic library is active');
-        Exit;
-    End;
+    If (SchLib = Nil) Or (SchLib.ObjectId <> eSchLib) Then Exit;
 
     Component := SchLib.GetState_SchComponentByLibRef(Name);
-    If Component = Nil Then
-    Begin
-        Result := BuildErrorResponse(RequestId, 'NOT_FOUND',
-            'Component not found in active library: ' + Name);
-        Exit;
-    End;
+    If Component = Nil Then Exit;
 
     SchLib.CurrentSchComponent := Component;
     LastCreatedLibComponent := Component;
@@ -243,6 +229,28 @@ Begin
     Try Component.CurrentPartID := 1; Except End;
     Try Component.DisplayMode := 0; Except End;
     Try SchLib.GraphicallyInvalidate; Except End;
+    Result := Component;
+End;
+
+Function Lib_SetCurrentComponent(Params : String; RequestId : String) : String;
+Var
+    Name : String;
+    Component : ISch_Component;
+Begin
+    Name := ExtractJsonValue(Params, 'name');
+    If Name = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_NAME', 'name is required');
+        Exit;
+    End;
+
+    Component := SelectLibComponent(Name);
+    If Component = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NOT_FOUND',
+            'Component not found in active library: ' + Name);
+        Exit;
+    End;
 
     Result := BuildSuccessResponse(RequestId,
         '{"success":true,"name":"' + EscapeJsonString(Name) + '"}');

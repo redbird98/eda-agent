@@ -44,6 +44,7 @@ def register_generic_tools(mcp):
                 "project", all SCH sheets in focused project
                 "doc:C:\\path\\to\\Sheet.SchDoc", specific sheet by path (no focus change)
                 "project:C:\\path\\to\\Project.PrjPcb", specific project by path
+                "lib_component:NAME", a named symbol in the active SchLib
             filter: Pipe-separated property=value conditions (AND logic), e.g.:
                 "Text=VCC", match net labels with Text equal to VCC
                 "Designator.Text=R1", match component with designator R1
@@ -97,6 +98,9 @@ def register_generic_tools(mcp):
                 "active_doc", current sheet only (default)
                 "project", all SCH sheets in focused project
                 "doc:C:\\path\\to\\Sheet.SchDoc", specific sheet by path (no focus change)
+                "lib_component:NAME", a named symbol in the active SchLib
+                    -- selects that component first, so there is no need
+                    for a separate set_current_component call
             filter: Pipe-separated property=value conditions (AND logic)
 
         Returns:
@@ -115,6 +119,13 @@ def register_generic_tools(mcp):
                 scope="doc:C:\\path\\USB_LANBridge.SchDoc",
                 filter="Name=Title",
                 set="Text=USB-Ethernet Bridge"
+            )
+        Example - edit a pin inside one SchLib symbol (no set_current_component):
+            modify_objects(
+                object_type="ePin",
+                scope="lib_component:R_0402",
+                filter="Designator=1",
+                set="Name=A"
             )
         """
         bridge = get_bridge()
@@ -175,7 +186,8 @@ def register_generic_tools(mcp):
 
         Args:
             object_type: Altium object type constant (see query_objects)
-            scope: "active_doc" or "project"
+            scope: "active_doc", "project", "doc:PATH", or
+                "lib_component:NAME" (a named symbol in the active SchLib)
             filter: Pipe-separated property=value conditions (AND logic).
                     WARNING: empty filter deletes ALL objects of the type.
             confirm_delete_all: Must be True to delete all objects when filter is empty.
@@ -342,8 +354,12 @@ def register_generic_tools(mcp):
 
         Args:
             operations: List of operation dicts, each with:
-                - scope: "active_doc" (default), "project", or
-                  "doc:C:\\path\\to\\file.SchDoc"
+                - scope: "active_doc" (default), "project",
+                  "doc:C:\\path\\to\\file.SchDoc", or
+                  "lib_component:NAME" -- a named symbol in the active
+                  SchLib. Mixing lib_component scopes across ops edits
+                  many library symbols in ONE call, no per-symbol
+                  set_current_component round-trip.
                 - object_type: Altium object type (e.g., "ePin", "eParameter",
                   "eSchComponent", "eNetLabel")
                 - filter: Pipe-separated filter conditions
@@ -353,6 +369,16 @@ def register_generic_tools(mcp):
 
         Returns:
             Dictionary with operations_processed count
+
+        Example, edit pins across THREE different library symbols in ONE call:
+            batch_modify(operations=[
+                {"scope": "lib_component:R_0402", "object_type": "ePin",
+                 "filter": "Designator=1", "set": "Name=A"},
+                {"scope": "lib_component:C_0402", "object_type": "ePin",
+                 "filter": "Designator=1", "set": "Name=+"},
+                {"scope": "lib_component:LED_0603", "object_type": "ePin",
+                 "filter": "Designator=1", "set": "Name=K"},
+            ])
 
         Example, reposition 10 pins on a library symbol in ONE call
         (vs. 10 separate modify_objects calls, each a full LLM turn):

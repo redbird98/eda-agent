@@ -814,8 +814,32 @@ Begin
         ScopePath := Copy(Scope, 9, Length(Scope));
         ScopePath := StringReplace(ScopePath, '\\', '\', -1);
     End
+    Else If Copy(Scope, 1, 14) = 'lib_component:' Then
+    Begin
+        { Target a named symbol inside the active SchLib. ScopePath carries }
+        { the lib-ref name (not a file path). Used by batch-op strings.     }
+        ScopeType := 'lib_component';
+        ScopePath := Copy(Scope, 15, Length(Scope));
+    End
     Else
         ScopeType := Scope;
+End;
+
+{..............................................................................}
+{ If ScopeType is 'lib_component', switch the active SchLib to the named      }
+{ symbol (ScopePath holds the lib-ref) and rewrite ScopeType to 'active_doc'  }
+{ so the normal active-doc path then iterates that symbol's primitives. This  }
+{ folds what used to be a separate set_current_component call into the same   }
+{ request. Returns False if no such component exists in the active library.  }
+{..............................................................................}
+Function ApplyLibComponentScope(Var ScopeType : String; ScopePath : String) : Boolean;
+Begin
+    Result := True;
+    If ScopeType <> 'lib_component' Then Exit;
+    If SelectLibComponent(ScopePath) = Nil Then
+        Result := False
+    Else
+        ScopeType := 'active_doc';
 End;
 
 {..............................................................................}
@@ -836,6 +860,12 @@ Begin
 
     If PropsStr = '' Then PropsStr := 'Location.X,Location.Y';
     ParseScope(Scope, ScopeType, ScopePath);
+    If Not ApplyLibComponentScope(ScopeType, ScopePath) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NOT_FOUND',
+            'Library component not found in active library: ' + ScopePath);
+        Exit;
+    End;
 
     ObjTypeInt := ObjectTypeFromString(ObjTypeStr);
     If ObjTypeInt <> -1 Then
@@ -881,6 +911,12 @@ Begin
     End;
 
     ParseScope(Scope, ScopeType, ScopePath);
+    If Not ApplyLibComponentScope(ScopeType, ScopePath) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NOT_FOUND',
+            'Library component not found in active library: ' + ScopePath);
+        Exit;
+    End;
 
     ObjTypeInt := ObjectTypeFromString(ObjTypeStr);
     If ObjTypeInt <> -1 Then
@@ -999,6 +1035,12 @@ Begin
     FilterStr := ExtractJsonValue(Params, 'filter');
 
     ParseScope(Scope, ScopeType, ScopePath);
+    If Not ApplyLibComponentScope(ScopeType, ScopePath) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NOT_FOUND',
+            'Library component not found in active library: ' + ScopePath);
+        Exit;
+    End;
 
     ObjTypeInt := ObjectTypeFromString(ObjTypeStr);
     If ObjTypeInt <> -1 Then
@@ -1302,6 +1344,8 @@ Begin
         If (ObjTypeStr = '') Or (SetStr = '') Then Continue;
 
         ParseScope(Scope, ScopeType, ScopePath);
+        { lib_component scope: select the symbol; skip the op if it's gone. }
+        If Not ApplyLibComponentScope(ScopeType, ScopePath) Then Continue;
         ObjTypeInt := ObjectTypeFromString(ObjTypeStr);
         If ObjTypeInt = -1 Then Continue;
 

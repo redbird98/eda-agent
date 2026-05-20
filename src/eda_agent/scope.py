@@ -21,11 +21,16 @@ from typing import Literal, Optional, Union
 from pydantic import BaseModel, Field
 
 
-ScopeType = Literal["active_doc", "project", "doc"]
+ScopeType = Literal["active_doc", "project", "doc", "lib_component"]
 
 
 class Scope(BaseModel):
-    """Structured scope. Always serialises to the wire form."""
+    """Structured scope. Always serialises to the wire form.
+
+    For ``type == "lib_component"`` the ``file_path`` slot carries the
+    component's lib-ref name (not a path) -- it reuses the generic string
+    slot the Pascal ParseScope already reads.
+    """
 
     type: ScopeType = "active_doc"
     file_path: Optional[str] = Field(default=None)
@@ -66,6 +71,12 @@ def to_wire(scope: ScopeInput) -> dict:
         if scope.startswith("project:"):
             path = scope[8:]
             return Scope(type="project", file_path=path).model_dump(exclude_none=True)
+        if scope.startswith("lib_component:"):
+            # Target a named symbol inside the active SchLib; the name
+            # rides in file_path (see Scope docstring).
+            name = scope[len("lib_component:"):]
+            return Scope(type="lib_component",
+                         file_path=name).model_dump(exclude_none=True)
         if scope in ("active_doc", "project", "doc"):
             return Scope(type=scope).model_dump(exclude_none=True)
         # Unknown bare string, surface as-is so Pascal returns a clear
