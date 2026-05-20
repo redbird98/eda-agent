@@ -4,6 +4,29 @@
 { Library.pas - Library management functions for the Altium integration bridge                }
 {..............................................................................}
 
+{ Return a component's first linked implementation (the footprint model in   }
+{ the common case). Altium does not expose a "current implementation"         }
+{ getter, GetState_CurrentImplementation is not a real method, implementations}
+{ are reached only through the component's child-object iterator. Nil when    }
+{ the component has no implementations.                                        }
+Function GetFirstSchImplementation(Comp : ISch_Component) : ISch_Implementation;
+Var
+    ImplIter : ISch_Iterator;
+Begin
+    Result := Nil;
+    If Comp = Nil Then Exit;
+    Try
+        ImplIter := Comp.SchIterator_Create;
+        If ImplIter <> Nil Then
+        Begin
+            ImplIter.AddFilter_ObjectSet(MkSet(eImplementation));
+            Result := ImplIter.FirstSchObject;
+            Comp.SchIterator_Destroy(ImplIter);
+        End;
+    Except
+    End;
+End;
+
 { Set the part ownership fields on a primitive so the lib editor knows     }
 { which part of the component it belongs to. Per Altium's official         }
 { createcomp_in_lib.pas reference, primitives without OwnerPartId /        }
@@ -715,7 +738,7 @@ Var
     Component : ISch_Component;
     ParamIterator : ISch_Iterator;
     Param : ISch_Parameter;
-    Impl : IComponentImplementation;
+    Impl : ISch_Implementation;
     Workspace : IWorkspace;
     Doc : IDocument;
     LibPath, Data, CompName, ParamList, WithParamsStr : String;
@@ -842,12 +865,10 @@ Begin
                     End;
                     Component.SchIterator_Destroy(ParamIterator);
 
-                    // Current implementation = the linked footprint model
+                    // First implementation = the linked footprint model
                     // (see Lib_LinkFootprint, which writes Impl.ModelName).
-                    // Wrapped in Try because a symbol with zero
-                    // implementations returns Nil here.
-                    Impl := Nil;
-                    Try Impl := Component.GetState_CurrentImplementation; Except End;
+                    // Nil when the symbol has zero implementations.
+                    Impl := GetFirstSchImplementation(Component);
                     If Impl <> Nil Then
                         Try FootprintName := Impl.ModelName; Except End;
                 End;

@@ -4443,8 +4443,7 @@ Begin
         Comp := Obj;
         If Comp.Designator.Text = Designator Then
         Begin
-            Impl := Nil;
-            Try Impl := Comp.GetState_CurrentImplementation; Except End;
+            Impl := GetFirstSchImplementation(Comp);
             If Impl <> Nil Then
             Begin
                 SchServer.ProcessControl.PreProcess(SchDoc, 'Add datafile link');
@@ -5115,10 +5114,9 @@ Begin
                     SetCompParamText(Comp, 'SimulationKind', 'Subcircuit');
                     SetCompParamText(Comp, 'SimulationFile', FilePath);
 
-                    { Also add a datafile link on the current implementation so  }
+                    { Also add a datafile link on the first implementation so   }
                     { the file is tracked as a design asset.                     }
-                    Impl := Nil;
-                    Try Impl := Comp.GetState_CurrentImplementation; Except End;
+                    Impl := GetFirstSchImplementation(Comp);
                     If Impl <> Nil Then
                     Begin
                         Try Link := Impl.AddDataFileLink; Except End;
