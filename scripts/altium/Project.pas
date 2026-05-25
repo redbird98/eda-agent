@@ -1075,15 +1075,21 @@ End;
 { Design statistics from compiled project                                    }
 {..............................................................................}
 
+{ "sheets" is the count of SCH documents only (the schematic sheets the      }
+{ engineer actually drew on). The earlier implementation counted every       }
+{ logical document -- PcbDoc, OutJob, Annotation, PCBDwf, etc. -- which     }
+{ inflated the figure. "documents" still reports the unfiltered total so the }
+{ number is not lost. Component / pin counts come from SCH docs only, which }
+{ matches BOM semantics (placed components are owned by their schematic).    }
 Function Proj_GetDesignStats(Params : String; RequestId : String) : String;
 Var
-    ProjectPath : String;
+    ProjectPath, DocKind : String;
     Workspace : IWorkspace;
     Project : IProject;
     Doc : IDocument;
     Comp : IComponent;
     I, J : Integer;
-    CompCount, PinCount, DocCount : Integer;
+    CompCount, PinCount, DocCount, SheetCount : Integer;
     Data : String;
 Begin
     ProjectPath := ExtractJsonValue(Params, 'project_path');
@@ -1098,12 +1104,16 @@ Begin
 
     SmartCompile(Project);
 
-    CompCount := 0; PinCount := 0; DocCount := 0;
+    CompCount := 0; PinCount := 0; DocCount := 0; SheetCount := 0;
     For I := 0 To Project.DM_LogicalDocumentCount - 1 Do
     Begin
         Doc := Project.DM_LogicalDocuments(I);
         If Doc = Nil Then Continue;
         Inc(DocCount);
+        DocKind := '';
+        Try DocKind := UpperCase(Doc.DM_DocumentKind); Except End;
+        If DocKind <> 'SCH' Then Continue;
+        Inc(SheetCount);
         For J := 0 To Doc.DM_ComponentCount - 1 Do
         Begin
             Comp := Doc.DM_Components(J);
@@ -1113,7 +1123,8 @@ Begin
         End;
     End;
 
-    Data := '{"sheets":' + IntToStr(DocCount);
+    Data := '{"sheets":' + IntToStr(SheetCount);
+    Data := Data + ',"documents":' + IntToStr(DocCount);
     Data := Data + ',"components":' + IntToStr(CompCount);
     Data := Data + ',"pins":' + IntToStr(PinCount) + '}';
     Result := BuildSuccessResponse(RequestId, Data);

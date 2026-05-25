@@ -8,6 +8,93 @@
 {..............................................................................}
 
 {..............................................................................}
+{ Property-write diagnostics                                                  }
+{                                                                              }
+{ SetSchProperty appends here every time a property name is not recognised  }
+{ or a write throws, so batch_modify can stop silently swallowing            }
+{ "set=Description=..." style mis-spellings. The bridge is single-request,   }
+{ so a module-level buffer is safe. Other handlers that call SetSchProperty }
+{ via ApplySetProperties simply ignore it.                                   }
+{..............................................................................}
+
+Var
+    _PropertyDiagStr : String;
+
+{ Buffer is a String, not a TStringList. DelphiScript drops class-method  }
+{ visibility on TStringList declared at module scope (Undeclared          }
+{ identifier: Count on `_Buf.Count`), and on TStringList returned by a    }
+{ Function, even though the equivalent declared as a Function local works.}
+{ A pipe-delimited String avoids the entire trap.                          }
+{                                                                            }
+{ Each record is "kind:propname"; records are joined with '|'.            }
+
+Procedure ResetPropertyDiag;
+Begin
+    _PropertyDiagStr := '';
+End;
+
+Procedure NotePropertyDiag(Kind : String; PropName : String);
+{ Dedup so a 50-row modify with one bad prop name records it once, not 50x. }
+Var
+    Entry : String;
+Begin
+    Entry := Kind + ':' + PropName;
+    { Bracket the buffer with '|' on both sides so a Pos check finds an      }
+    { exact record (and not e.g. "unknown:Foo" matching inside "...Foobar"). }
+    If Pos('|' + Entry + '|', '|' + _PropertyDiagStr + '|') > 0 Then Exit;
+    If _PropertyDiagStr = '' Then
+        _PropertyDiagStr := Entry
+    Else
+        _PropertyDiagStr := _PropertyDiagStr + '|' + Entry;
+End;
+
+Function RenderPropertyDiagJson : String;
+Var
+    UJson, FJson, Remaining, Entry, Kind, Nm : String;
+    UCount, FCount, P : Integer;
+Begin
+    UJson := '['; UCount := 0;
+    FJson := '['; FCount := 0;
+    Remaining := _PropertyDiagStr;
+    While Length(Remaining) > 0 Do
+    Begin
+        P := Pos('|', Remaining);
+        If P = 0 Then
+        Begin
+            Entry := Remaining;
+            Remaining := '';
+        End
+        Else
+        Begin
+            Entry := Copy(Remaining, 1, P - 1);
+            Remaining := Copy(Remaining, P + 1, Length(Remaining));
+        End;
+        P := Pos(':', Entry);
+        If P = 0 Then Continue;
+        Kind := Copy(Entry, 1, P - 1);
+        Nm := Copy(Entry, P + 1, Length(Entry));
+        If Kind = 'unknown' Then
+        Begin
+            If UCount > 0 Then UJson := UJson + ',';
+            UJson := UJson + '"' + EscapeJsonString(Nm) + '"';
+            Inc(UCount);
+        End
+        Else If Kind = 'failed' Then
+        Begin
+            If FCount > 0 Then FJson := FJson + ',';
+            FJson := FJson + '"' + EscapeJsonString(Nm) + '"';
+            Inc(FCount);
+        End;
+    End;
+    UJson := UJson + ']';
+    FJson := FJson + ']';
+    Result := '{"unknown_count":' + IntToStr(UCount)
+            + ',"unknown":' + UJson
+            + ',"failed_count":' + IntToStr(FCount)
+            + ',"failed":' + FJson + '}';
+End;
+
+{..............................................................................}
 { Object Type Mapping                                                         }
 {..............................................................................}
 
@@ -233,12 +320,17 @@ End;
 { Coordinates are expected in mils. Caller handles BeginModify/EndModify.    }
 {..............................................................................}
 
-Procedure SetSchProperty(Obj : ISch_GraphicalObject; PropName : String; Value : String);
+Function SetSchProperty(Obj : ISch_GraphicalObject; PropName : String; Value : String) : Integer;
+{ Returns: 1 = handled, 0 = unknown property name, -1 = write threw.        }
+{ Unknown and failed names are appended to the module-level _PropertyDiag   }
+{ so Gen_BatchModify can surface them in the response. Existing callers     }
+{ that discard the return value still get the old behaviour.                }
 Var
     Loc : TLocation;
     Crn : TLocation;
     R : ISch_Rectangle;
     L : ISch_Line;
+    Matched : Boolean;
 Begin
     { GOTCHA observed 2026-05-16: callers using modify_objects / batch_modify }
     { with a pipe-combined set like `Location.X=200|Orientation=2` on an ePin }
@@ -248,6 +340,8 @@ Begin
     { in an Altium-safe order (Orientation first, then Location): split the   }
     { combined set into two separate ops, the second filtering on the NEW    }
     { Location.X so it still matches the moved pin.                          }
+    Result := 0;
+    Matched := True;
     Try
         // Coordinates (expected in mils). `Obj.Location` returns a copy of
         // the TLocation record via the GetState_Location reader; writing
@@ -297,7 +391,11 @@ Begin
         Else If PropName = 'Text'        Then Obj.Text := Value
         Else If PropName = 'Name'        Then Obj.Name := Value
         Else If PropName = 'LibReference'       Then Obj.LibReference := Value
-        Else If PropName = 'ComponentDescription' Then Obj.ComponentDescription := Value
+        // `Description` is the natural name (matches get_component_info /
+        // BOM column / lib_set_component_description); `ComponentDescription`
+        // is what ISch_Component actually exposes -- both accepted.
+        Else If (PropName = 'ComponentDescription') Or (PropName = 'Description') Then
+            Obj.ComponentDescription := Value
 
         // Sub-object string properties (compound interfaces, typed cast required)
         Else If (PropName = 'Designator') Or (PropName = 'Designator.Text') Then
@@ -328,10 +426,17 @@ Begin
         Else If PropName = 'IsHidden'    Then Obj.IsHidden := StrToBool(Value)
         Else If PropName = 'IsSolid'     Then Obj.IsSolid := StrToBool(Value)
         Else If PropName = 'IsMirrored'  Then Obj.IsMirrored := StrToBool(Value)
-        Else If PropName = 'Selection'   Then Obj.Selection := StrToBool(Value);
+        Else If PropName = 'Selection'   Then Obj.Selection := StrToBool(Value)
+        Else Matched := False;
+
+        If Matched Then Result := 1
+        Else Result := 0;
     Except
-        // Property doesn't exist on this object type, silently skip
+        Result := -1;
     End;
+
+    If Result = 0 Then NotePropertyDiag('unknown', PropName)
+    Else If Result = -1 Then NotePropertyDiag('failed', PropName);
 End;
 
 {..............................................................................}
@@ -1307,6 +1412,10 @@ Begin
     ResultJson := '';
     Remaining := Operations;
 
+    { Clear the property-write diagnostics buffer so this call only       }
+    { surfaces issues raised by THIS batch, not anything left over.       }
+    ResetPropertyDiag;
+
     While Length(Remaining) > 0 Do
     Begin
         // Split on pipe to get next operation
@@ -1367,8 +1476,11 @@ Begin
         Inc(OpCount);
     End;
 
-    Result := BuildSuccessResponse(RequestId,
-        '{"operations_processed":' + IntToStr(OpCount) + '}');
+    { Surface unknown / failed property writes so they stop being silent. }
+    ResultJson :=
+        '{"operations_processed":' + IntToStr(OpCount) +
+        ',"properties":' + RenderPropertyDiagJson + '}';
+    Result := BuildSuccessResponse(RequestId, ResultJson);
 End;
 
 {..............................................................................}

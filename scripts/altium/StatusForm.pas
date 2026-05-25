@@ -656,7 +656,7 @@ Begin
     Try
         SentinelPath := WorkspaceDir + 'open_dashboard.url';
         WriteFileContent(SentinelPath, 'http://127.0.0.1:8766/');
-        Try lbl_LastErr.Caption := 'opening dashboard in browser...'; Except End;
+        Try lbl_LastErr.Caption := ''; Except End;
     Except End;
 End;
 
