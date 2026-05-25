@@ -653,6 +653,243 @@ Begin
     SaveDocByPath(PcbLib.Board.FileName);
 End;
 
+{ Lib_AddFootprintText - Stamp a text primitive onto a PcbLib footprint.       }
+{                                                                              }
+{ Trap baked into this handler: in a PcbLib, Footprint.AddPCBObject on its    }
+{ own does not register the new primitive properly with the placement editor }
+{ -- the text shows up only after a save+reload. The reference DelphiScript  }
+{ (PcbLib/FootPrintText_2.pas) shows the working pattern: add to BOTH the    }
+{ footprint AND the underlying Board, then broadcast PCBM_BoardRegisteration }
+{ to both. We replicate that exactly.                                          }
+{                                                                              }
+{ Params:                                                                      }
+{   text        (required) - the string to place                              }
+{   x, y                   - coordinates in mils, relative to board origin    }
+{   size                   - text height in mils (default 50)                 }
+{   width                  - stroke width in mils (default 8)                 }
+{   rotation               - degrees, default 0                                }
+{   layer                  - GetLayerFromString name, default 'TopOverlay'   }
+{   use_ttfont=true|false  - default false (stroke font)                      }
+{   library_path           - optional .PcbLib to focus first                  }
+{   component_name         - optional footprint name; switches active fp     }
+Function Lib_AddFootprintText(Params : String; RequestId : String) : String;
+Var
+    TextStr, LayerStr, CompName, LibPath, FocusedPath, FlagStr, RespJson : String;
+    Workspace : IWorkspace;
+    Doc : IDocument;
+    PcbLib : IPCB_Library;
+    Footprint : IPCB_LibComponent;
+    Text : IPCB_Text;
+    Board : IPCB_Board;
+    Iter : IPCB_LibraryIterator;
+    Layer : TLayer;
+    X, Y, Size, Width, Rotation : Integer;
+    UseTTFont : Boolean;
+Begin
+    TextStr := ExtractJsonValue(Params, 'text');
+    If TextStr = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAMS', 'text is required');
+        Exit;
+    End;
+    X := StrToIntDef(ExtractJsonValue(Params, 'x'), 0);
+    Y := StrToIntDef(ExtractJsonValue(Params, 'y'), 0);
+    Size := StrToIntDef(ExtractJsonValue(Params, 'size'), 50);
+    Width := StrToIntDef(ExtractJsonValue(Params, 'width'), 8);
+    Rotation := StrToIntDef(ExtractJsonValue(Params, 'rotation'), 0);
+    LayerStr := ExtractJsonValue(Params, 'layer');
+    If LayerStr = '' Then LayerStr := 'TopOverlay';
+    FlagStr := ExtractJsonValue(Params, 'use_ttfont');
+    UseTTFont := (FlagStr = 'true') Or (FlagStr = 'True') Or (FlagStr = '1');
+    LibPath := ExtractJsonValue(Params, 'library_path');
+    LibPath := StringReplace(LibPath, '\\', '\', -1);
+    CompName := ExtractJsonValue(Params, 'component_name');
+
+    If LibPath <> '' Then
+    Begin
+        Workspace := GetWorkspace;
+        If Workspace = Nil Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'NO_WORKSPACE', 'No workspace');
+            Exit;
+        End;
+        FocusedPath := '';
+        Doc := Workspace.DM_FocusedDocument;
+        If Doc <> Nil Then Try FocusedPath := Doc.DM_FullPath; Except End;
+        If (FocusedPath = '') Or (UpperCase(FocusedPath) <> UpperCase(LibPath)) Then
+        Begin
+            ResetParameters;
+            AddStringParameter('ObjectKind', 'Document');
+            AddStringParameter('FileName', LibPath);
+            RunProcess('WorkspaceManager:OpenObject');
+        End;
+    End;
+
+    PcbLib := PCBServer.GetCurrentPCBLibrary;
+    If PcbLib = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCBLIB', 'No PCB library is active');
+        Exit;
+    End;
+
+    { Switch to a named footprint if asked, otherwise use the active one.  }
+    If CompName <> '' Then
+    Begin
+        Footprint := Nil;
+        Iter := PcbLib.LibraryIterator_Create;
+        Try
+            Footprint := Iter.FirstPCBObject;
+            While Footprint <> Nil Do
+            Begin
+                If Footprint.Name = CompName Then Break;
+                Footprint := Iter.NextPCBObject;
+            End;
+        Finally
+            PcbLib.LibraryIterator_Destroy(Iter);
+        End;
+        If Footprint = Nil Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'FOOTPRINT_NOT_FOUND',
+                'Footprint not found in library: ' + CompName);
+            Exit;
+        End;
+        Try PcbLib.SetState_CurrentComponent(Footprint); Except End;
+    End
+    Else
+        Footprint := PcbLib.CurrentComponent;
+
+    If Footprint = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_FOOTPRINT',
+            'No footprint is selected (pass component_name to choose one)');
+        Exit;
+    End;
+
+    Board := PcbLib.Board;
+    Layer := GetLayerFromString(LayerStr);
+
+    PCBServer.PreProcess;
+    Try
+        Text := PCBServer.PCBObjectFactory(eTextObject, eNoDimension, eCreate_Default);
+        If Text = Nil Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'CREATE_FAILED',
+                'PCBObjectFactory returned Nil for eTextObject');
+            Exit;
+        End;
+        Text.XLocation := Board.XOrigin + MilsToCoord(X);
+        Text.YLocation := Board.YOrigin + MilsToCoord(Y);
+        Text.Layer := Layer;
+        Text.UseTTFonts := UseTTFont;
+        Text.UnderlyingString := TextStr;
+        Text.Size := MilsToCoord(Size);
+        Text.Width := MilsToCoord(Width);
+        Try Text.Rotation := Rotation; Except End;
+
+        { The reference's working pattern: add to footprint AND to its      }
+        { underlying Board, then broadcast registration to both. Footprint  }
+        { alone is not enough -- the placement editor will not see the new }
+        { primitive until a save+reload.                                    }
+        Footprint.AddPCBObject(Text);
+        Board.AddPCBObject(Text);
+        PCBServer.SendMessageToRobots(Footprint.I_ObjectAddress,
+            c_Broadcast, PCBM_BoardRegisteration, Text.I_ObjectAddress);
+        PCBServer.SendMessageToRobots(Board.I_ObjectAddress,
+            c_Broadcast, PCBM_BoardRegisteration, Text.I_ObjectAddress);
+    Finally
+        PCBServer.PostProcess;
+    End;
+
+    RespJson :=
+        '{"success":true' +
+        ',"footprint":"' + EscapeJsonString(Footprint.Name) + '"' +
+        ',"text":"' + EscapeJsonString(TextStr) + '"' +
+        ',"layer":"' + EscapeJsonString(LayerStr) + '"' +
+        ',"x":' + IntToStr(X) +
+        ',"y":' + IntToStr(Y) + '}';
+    Result := BuildSuccessResponse(RequestId, RespJson);
+End;
+
+{ Lib_GetFootprints - Enumerate every footprint in the active (or named)     }
+{ PcbLib. Mirror of lib_get_components (SchLib) for PCB libraries. Uses the }
+{ documented IPCB_LibraryIterator pattern from the reference scripts.        }
+{                                                                              }
+{ Params:                                                                      }
+{   library_path - optional .PcbLib to focus first; defaults to focused doc. }
+Function Lib_GetFootprints(Params : String; RequestId : String) : String;
+Var
+    LibPath, FocusedPath, FpName, FpDescr, FpsJson, RespJson : String;
+    Workspace : IWorkspace;
+    Doc : IDocument;
+    PcbLib : IPCB_Library;
+    Iter : IPCB_LibraryIterator;
+    Footprint : IPCB_LibComponent;
+    Count : Integer;
+Begin
+    LibPath := ExtractJsonValue(Params, 'library_path');
+    LibPath := StringReplace(LibPath, '\\', '\', -1);
+
+    Workspace := GetWorkspace;
+    If Workspace = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_WORKSPACE', 'No workspace');
+        Exit;
+    End;
+    FocusedPath := '';
+    Doc := Workspace.DM_FocusedDocument;
+    If Doc <> Nil Then Try FocusedPath := Doc.DM_FullPath; Except End;
+    If LibPath = '' Then LibPath := FocusedPath;
+    If LibPath = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_LIBRARY',
+            'No library is active and library_path was not supplied');
+        Exit;
+    End;
+    If (FocusedPath = '') Or (UpperCase(FocusedPath) <> UpperCase(LibPath)) Then
+    Begin
+        ResetParameters;
+        AddStringParameter('ObjectKind', 'Document');
+        AddStringParameter('FileName', LibPath);
+        RunProcess('WorkspaceManager:OpenObject');
+    End;
+    PcbLib := PCBServer.GetCurrentPCBLibrary;
+    If PcbLib = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCBLIB',
+            'Failed to focus PCB library at ' + LibPath);
+        Exit;
+    End;
+
+    FpsJson := '[';
+    Count := 0;
+    Iter := PcbLib.LibraryIterator_Create;
+    Try
+        Footprint := Iter.FirstPCBObject;
+        While Footprint <> Nil Do
+        Begin
+            FpName := '';
+            FpDescr := '';
+            Try FpName := Footprint.Name; Except End;
+            Try FpDescr := Footprint.Description; Except End;
+            If Count > 0 Then FpsJson := FpsJson + ',';
+            FpsJson := FpsJson +
+                '{"name":"' + EscapeJsonString(FpName) + '"' +
+                ',"description":"' + EscapeJsonString(FpDescr) + '"}';
+            Inc(Count);
+            Footprint := Iter.NextPCBObject;
+        End;
+    Finally
+        PcbLib.LibraryIterator_Destroy(Iter);
+    End;
+    FpsJson := FpsJson + ']';
+
+    RespJson :=
+        '{"library_path":"' + EscapeJsonString(LibPath) + '"' +
+        ',"count":' + IntToStr(Count) +
+        ',"footprints":' + FpsJson + '}';
+    Result := BuildSuccessResponse(RequestId, RespJson);
+End;
+
 Function Lib_LinkFootprint(Params : String; RequestId : String) : String;
 Var
     FootprintName, LibraryName : String;
@@ -2073,67 +2310,160 @@ Begin
 End;
 
 {..............................................................................}
-{ Duplicate a component within the same library                               }
-{ Params: source_name, new_name                                               }
+{ Duplicate a component within or BETWEEN schematic libraries.                }
+{                                                                              }
+{ Params:                                                                      }
+{   source_name (required) - lib_ref to copy                                  }
+{   new_name              - lib_ref for the clone; defaults to source_name   }
+{   source_library        - .SchLib to read from; defaults to focused doc    }
+{   dest_library          - .SchLib to write to; defaults to source_library  }
+{                           (omit / equal -> same-library duplicate, the     }
+{                           original behaviour)                                }
+{   overwrite=true|false  - if a component named new_name already exists in  }
+{                           the destination, replace it; default false ->    }
+{                           returns NAME_EXISTS                                }
+{                                                                              }
+{ Replicates the source while it is focused (so the clone inherits the       }
+{ source's library context), then switches focus to the destination and     }
+{ AddSchComponent there. Destination ends focused with the new component     }
+{ selected. Save is deferred (MarkLibDirty only) per the project's perf-      }
+{ deferred-save pattern.                                                       }
 {..............................................................................}
 
 Function Lib_CopyComponent(Params : String; RequestId : String) : String;
 Var
-    SourceName, NewName : String;
-    SchLib : ISch_Lib;
-    SourceComp, NewComp : ISch_Component;
+    SourceLibPath, DestLibPath, FocusedPath, SourceName, NewName : String;
+    OverwriteStr, RespJson : String;
+    Workspace : IWorkspace;
+    Doc : IDocument;
+    SourceLib, DestLib : ISch_Lib;
+    SourceComp, NewComp, Existing : ISch_Component;
+    Overwrite, SameLib, Overwrote : Boolean;
 Begin
+    SourceLibPath := ExtractJsonValue(Params, 'source_library');
+    SourceLibPath := StringReplace(SourceLibPath, '\\', '\', -1);
+    DestLibPath := ExtractJsonValue(Params, 'dest_library');
+    DestLibPath := StringReplace(DestLibPath, '\\', '\', -1);
     SourceName := ExtractJsonValue(Params, 'source_name');
     NewName := ExtractJsonValue(Params, 'new_name');
+    OverwriteStr := ExtractJsonValue(Params, 'overwrite');
+    Overwrite := (OverwriteStr = 'true') Or (OverwriteStr = 'True') Or (OverwriteStr = '1');
 
-    If (SourceName = '') Or (NewName = '') Then
+    If SourceName = '' Then
     Begin
-        Result := BuildErrorResponse(RequestId, 'MISSING_PARAMS', 'source_name and new_name are required');
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAMS',
+            'source_name is required');
+        Exit;
+    End;
+    If NewName = '' Then NewName := SourceName;
+
+    Workspace := GetWorkspace;
+    If Workspace = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_WORKSPACE', 'No workspace');
         Exit;
     End;
 
-    SchLib := SchServer.GetCurrentSchDocument;
-    If (SchLib = Nil) Or (SchLib.ObjectId <> eSchLib) Then
+    FocusedPath := '';
+    Doc := Workspace.DM_FocusedDocument;
+    If Doc <> Nil Then Try FocusedPath := Doc.DM_FullPath; Except End;
+    If SourceLibPath = '' Then SourceLibPath := FocusedPath;
+    If SourceLibPath = '' Then
     Begin
-        Result := BuildErrorResponse(RequestId, 'NO_SCHLIB', 'No schematic library is active');
+        Result := BuildErrorResponse(RequestId, 'NO_LIBRARY',
+            'No library is active and source_library was not supplied');
         Exit;
     End;
 
-    SourceComp := SchLib.GetState_SchComponentByLibRef(SourceName);
+    { Focus the source library so Replicate sees it in the right context. }
+    If (FocusedPath = '') Or (UpperCase(FocusedPath) <> UpperCase(SourceLibPath)) Then
+    Begin
+        ResetParameters;
+        AddStringParameter('ObjectKind', 'Document');
+        AddStringParameter('FileName', SourceLibPath);
+        RunProcess('WorkspaceManager:OpenObject');
+    End;
+    SourceLib := SchServer.GetCurrentSchDocument;
+    If (SourceLib = Nil) Or (SourceLib.ObjectId <> eSchLib) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_SCHLIB',
+            'Failed to focus source library at ' + SourceLibPath);
+        Exit;
+    End;
+    SourceComp := SourceLib.GetState_SchComponentByLibRef(SourceName);
     If SourceComp = Nil Then
     Begin
-        Result := BuildErrorResponse(RequestId, 'COMPONENT_NOT_FOUND', 'Source component not found: ' + SourceName);
+        Result := BuildErrorResponse(RequestId, 'COMPONENT_NOT_FOUND',
+            'Source component not found in ' + SourceLibPath + ': ' + SourceName);
         Exit;
     End;
 
-    // Check that new name doesn't already exist
-    NewComp := SchLib.GetState_SchComponentByLibRef(NewName);
-    If NewComp <> Nil Then
-    Begin
-        Result := BuildErrorResponse(RequestId, 'NAME_EXISTS', 'A component named "' + NewName + '" already exists');
-        Exit;
-    End;
+    SameLib := (DestLibPath = '') Or (UpperCase(DestLibPath) = UpperCase(SourceLibPath));
+    If SameLib Then DestLibPath := SourceLibPath;
 
-    // Replicate the component (deep clone)
+    { Replicate while source is focused. The clone is free-floating until    }
+    { AddSchComponent attaches it to the destination library.                 }
     NewComp := SourceComp.Replicate;
     If NewComp = Nil Then
     Begin
-        Result := BuildErrorResponse(RequestId, 'COPY_FAILED', 'Failed to replicate component');
+        Result := BuildErrorResponse(RequestId, 'COPY_FAILED',
+            'Replicate returned Nil for ' + SourceName);
         Exit;
     End;
-
     NewComp.LibReference := NewName;
 
-    SchServer.ProcessControl.PreProcess(SchLib, '');
-    SchLib.AddSchComponent(NewComp);
-    SchServer.ProcessControl.PostProcess(SchLib, 'Edit');
+    If SameLib Then
+        DestLib := SourceLib
+    Else
+    Begin
+        ResetParameters;
+        AddStringParameter('ObjectKind', 'Document');
+        AddStringParameter('FileName', DestLibPath);
+        RunProcess('WorkspaceManager:OpenObject');
+        DestLib := SchServer.GetCurrentSchDocument;
+        If (DestLib = Nil) Or (DestLib.ObjectId <> eSchLib) Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'NO_SCHLIB',
+                'Failed to focus destination library at ' + DestLibPath);
+            Exit;
+        End;
+    End;
 
-    SchLib.CurrentSchComponent := NewComp;
+    Overwrote := False;
+    Existing := DestLib.GetState_SchComponentByLibRef(NewName);
+    If Existing <> Nil Then
+    Begin
+        If Not Overwrite Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'NAME_EXISTS',
+                'A component named "' + NewName + '" already exists in '
+                + DestLibPath + ' (pass overwrite=true to replace)');
+            Exit;
+        End;
+        SchServer.ProcessControl.PreProcess(DestLib, '');
+        DestLib.RemoveSchComponent(Existing);
+        SchServer.ProcessControl.PostProcess(DestLib, 'Edit');
+        Overwrote := True;
+    End;
 
-    MarkLibDirty(SchLib);
-    Result := BuildSuccessResponse(RequestId,
-        '{"success":true,"source":"' + EscapeJsonString(SourceName) +
-        '","new_name":"' + EscapeJsonString(NewName) + '"}');
+    SchServer.ProcessControl.PreProcess(DestLib, '');
+    DestLib.AddSchComponent(NewComp);
+    SchServer.ProcessControl.PostProcess(DestLib, 'Edit');
+    DestLib.CurrentSchComponent := NewComp;
+    MarkLibDirty(DestLib);
+
+    { Stash the response in a local before assigning to Result -- the         }
+    { DelphiScript last-String-arg clobber bug only bites here when the       }
+    { JSON build calls a String helper, but the pattern is cheap insurance.   }
+    RespJson :=
+        '{"success":true' +
+        ',"source_library":"' + EscapeJsonString(SourceLibPath) + '"' +
+        ',"dest_library":"' + EscapeJsonString(DestLibPath) + '"' +
+        ',"source":"' + EscapeJsonString(SourceName) + '"' +
+        ',"new_name":"' + EscapeJsonString(NewName) + '"' +
+        ',"same_library":' + BoolToJsonStr(SameLib) +
+        ',"overwrote":' + BoolToJsonStr(Overwrote) + '}';
+    Result := BuildSuccessResponse(RequestId, RespJson);
 End;
 
 {..............................................................................}
@@ -2900,6 +3230,287 @@ Begin
         ',"truncated":' + BoolToJsonStr(Total >= Limit) + '}');
 End;
 
+{ Lib_SetLabelFormats - apply N (target, style) ops in one library walk.      }
+{                                                                              }
+{ Same semantics as Lib_SetLabelFormat but processes a list of ops in a       }
+{ single IPC round-trip, with one library focus and one walk. Five sequential }
+{ set_label_format calls (one per parameter target) collapse into one trip,   }
+{ which is the dominant cost on large libraries (each call carries the IPC,  }
+{ workspace lookup, doc-focus check and CompInfoReader walk).                  }
+{                                                                              }
+{ Wire format for `ops` matches the project-wide NextBatchOp grammar: ops    }
+{ are separated by ~~ and per-op fields by `;`, key=value. Each op may set    }
+{ target, font_id, color, is_hidden, orientation, justification. The global  }
+{ only_mismatched flag applies to every op.                                   }
+{                                                                              }
+{ Returns object: library_path, scope ("single"|"bulk"), total, limit,        }
+{ truncated, ops array each with target, modified, already_compliant,         }
+{ missing_target, failed.                                                     }
+
+Function ApplyOpToComponent(Component : ISch_Component; Target : String;
+    FontIdStr, ColorStr, IsHiddenStr, OrientationStr, JustificationStr : String;
+    OnlyMismatched : Boolean) : Integer;
+{ Returns 0=already_compliant, 1=modified, 2=missing_target, 3=failed.        }
+Var
+    HasFontId, HasColor, HasIsHidden, HasOrientation, HasJustification : Boolean;
+    NewFontId, NewColor, NewOrientation, NewJustification : Integer;
+    NewIsHidden, Found : Boolean;
+    Lbl : ISch_Label;
+    AR : Integer;
+Begin
+    HasFontId := FontIdStr <> '';
+    NewFontId := StrToIntDef(FontIdStr, 0);
+    HasColor := ColorStr <> '';
+    NewColor := StrToIntDef(ColorStr, 0);
+    HasIsHidden := IsHiddenStr <> '';
+    NewIsHidden := (IsHiddenStr = 'true') Or (IsHiddenStr = 'True') Or (IsHiddenStr = '1');
+    HasOrientation := OrientationStr <> '';
+    NewOrientation := StrToIntDef(OrientationStr, 0);
+    HasJustification := JustificationStr <> '';
+    NewJustification := StrToIntDef(JustificationStr, 0);
+
+    ResolveTargetLabel(Component, Target, Lbl, Found);
+    If Not Found Then
+    Begin
+        Result := 2;
+        Exit;
+    End;
+    AR := ApplyLabelFormat(Lbl, HasFontId, NewFontId,
+        HasColor, NewColor, HasIsHidden, NewIsHidden,
+        HasOrientation, NewOrientation, HasJustification, NewJustification,
+        OnlyMismatched);
+    If AR = 1 Then Result := 1
+    Else If AR = 0 Then Result := 0
+    Else Result := 3;
+End;
+
+Function Lib_SetLabelFormats(Params : String; RequestId : String) : String;
+Var
+    LibPath, FocusedPath, CompName, FlagStr : String;
+    OpsStr, OpStr, Remaining, CurCompName, Target : String;
+    OnlyMismatched : Boolean;
+    Workspace : IWorkspace;
+    Doc : IDocument;
+    SchLib : ISch_Lib;
+    LibReader : ILibCompInfoReader;
+    CompInfo : IComponentInfo;
+    Component : ISch_Component;
+    Limit, Total, NumComps, I, J, NumOps, OpResult : Integer;
+    Scope, OpsJson, RespJson : String;
+    AnyModified : Boolean;
+    { Parallel TStringLists -- DelphiScript Function locals with fixed-size  }
+    { arrays silently corrupt Result, so we use TStringList per the project's }
+    { existing pattern. Counter fields hold IntToStr(N).                       }
+    OpTargets, OpFontIds, OpColors, OpIsHidden,
+        OpOrientation, OpJustification : TStringList;
+    OpModified, OpAlready, OpMissing, OpFailed : TStringList;
+Begin
+    LibPath := ExtractJsonValue(Params, 'library_path');
+    LibPath := StringReplace(LibPath, '\\', '\', -1);
+    CompName := ExtractJsonValue(Params, 'component_name');
+    OpsStr := ExtractJsonValue(Params, 'ops');
+    If OpsStr = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAM',
+            'ops is required (non-empty ~~-separated list)');
+        Exit;
+    End;
+    FlagStr := ExtractJsonValue(Params, 'only_mismatched');
+    OnlyMismatched := (FlagStr <> 'false') And (FlagStr <> 'False') And (FlagStr <> '0');
+    Limit := StrToIntDef(ExtractJsonValue(Params, 'limit'), 5000);
+
+    { Workspace + library focus checks BEFORE allocating TStringLists so an  }
+    { early-exit error path does not leak.                                    }
+    Workspace := GetWorkspace;
+    If Workspace = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_WORKSPACE', 'No workspace');
+        Exit;
+    End;
+    FocusedPath := '';
+    Doc := Workspace.DM_FocusedDocument;
+    If Doc <> Nil Then Try FocusedPath := Doc.DM_FullPath; Except End;
+    If LibPath = '' Then LibPath := FocusedPath;
+    If LibPath = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_LIBRARY',
+            'No library document is active and no library_path was supplied');
+        Exit;
+    End;
+    If (FocusedPath = '') Or (UpperCase(FocusedPath) <> UpperCase(LibPath)) Then
+    Begin
+        ResetParameters;
+        AddStringParameter('ObjectKind', 'Document');
+        AddStringParameter('FileName', LibPath);
+        RunProcess('WorkspaceManager:OpenObject');
+    End;
+    SchLib := SchServer.GetCurrentSchDocument;
+    If (SchLib = Nil) Or (SchLib.ObjectId <> eSchLib) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_SCHLIB',
+            'Failed to focus library at ' + LibPath);
+        Exit;
+    End;
+
+    OpTargets := TStringList.Create;
+    OpFontIds := TStringList.Create;
+    OpColors := TStringList.Create;
+    OpIsHidden := TStringList.Create;
+    OpOrientation := TStringList.Create;
+    OpJustification := TStringList.Create;
+    OpModified := TStringList.Create;
+    OpAlready := TStringList.Create;
+    OpMissing := TStringList.Create;
+    OpFailed := TStringList.Create;
+    Try
+        NumOps := 0;
+        Remaining := OpsStr;
+        While True Do
+        Begin
+            OpStr := NextBatchOp(Remaining);
+            If OpStr = '' Then Break;
+            Target := GetBatchField(OpStr, 'target');
+            If Target = '' Then Target := 'designator';
+            OpTargets.Add(Target);
+            OpFontIds.Add(GetBatchField(OpStr, 'font_id'));
+            OpColors.Add(GetBatchField(OpStr, 'color'));
+            OpIsHidden.Add(GetBatchField(OpStr, 'is_hidden'));
+            OpOrientation.Add(GetBatchField(OpStr, 'orientation'));
+            OpJustification.Add(GetBatchField(OpStr, 'justification'));
+            OpModified.Add('0');
+            OpAlready.Add('0');
+            OpMissing.Add('0');
+            OpFailed.Add('0');
+            Inc(NumOps);
+        End;
+
+        If NumOps = 0 Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'NOTHING_TO_SET',
+                'ops parsed to zero entries');
+            Exit;
+        End;
+
+        Total := 0;
+        SchServer.ProcessControl.PreProcess(SchLib, '');
+        Try
+            If CompName <> '' Then
+            Begin
+                Scope := 'single';
+                Component := SchLib.GetState_SchComponentByLibRef(CompName);
+                If Component = Nil Then
+                Begin
+                    Result := BuildErrorResponse(RequestId, 'COMPONENT_NOT_FOUND',
+                        'Component not found in library: ' + CompName);
+                    Exit;
+                End;
+                Total := 1;
+                For J := 0 To NumOps - 1 Do
+                Begin
+                    OpResult := ApplyOpToComponent(Component, OpTargets[J],
+                        OpFontIds[J], OpColors[J], OpIsHidden[J],
+                        OpOrientation[J], OpJustification[J], OnlyMismatched);
+                    If OpResult = 0 Then
+                        OpAlready[J] := IntToStr(StrToIntDef(OpAlready[J], 0) + 1)
+                    Else If OpResult = 1 Then
+                        OpModified[J] := IntToStr(StrToIntDef(OpModified[J], 0) + 1)
+                    Else If OpResult = 2 Then
+                        OpMissing[J] := IntToStr(StrToIntDef(OpMissing[J], 0) + 1)
+                    Else
+                        OpFailed[J] := IntToStr(StrToIntDef(OpFailed[J], 0) + 1);
+                End;
+            End
+            Else
+            Begin
+                Scope := 'bulk';
+                LibReader := SchServer.CreateLibCompInfoReader(LibPath);
+                If LibReader = Nil Then
+                Begin
+                    Result := BuildErrorResponse(RequestId, 'READER_FAILED',
+                        'Failed to create library reader for ' + LibPath);
+                    Exit;
+                End;
+                Try
+                    LibReader.ReadAllComponentInfo;
+                    NumComps := LibReader.NumComponentInfos;
+                    For I := 0 To NumComps - 1 Do
+                    Begin
+                        If Total >= Limit Then Break;
+                        CompInfo := LibReader.ComponentInfos[I];
+                        CurCompName := '';
+                        Try CurCompName := CompInfo.CompName; Except End;
+                        If CurCompName = '' Then Continue;
+                        Component := SchLib.GetState_SchComponentByLibRef(CurCompName);
+                        If Component = Nil Then Continue;
+                        Inc(Total);
+
+                        For J := 0 To NumOps - 1 Do
+                        Begin
+                            OpResult := ApplyOpToComponent(Component, OpTargets[J],
+                                OpFontIds[J], OpColors[J], OpIsHidden[J],
+                                OpOrientation[J], OpJustification[J], OnlyMismatched);
+                            If OpResult = 0 Then
+                                OpAlready[J] := IntToStr(StrToIntDef(OpAlready[J], 0) + 1)
+                            Else If OpResult = 1 Then
+                                OpModified[J] := IntToStr(StrToIntDef(OpModified[J], 0) + 1)
+                            Else If OpResult = 2 Then
+                                OpMissing[J] := IntToStr(StrToIntDef(OpMissing[J], 0) + 1)
+                            Else
+                                OpFailed[J] := IntToStr(StrToIntDef(OpFailed[J], 0) + 1);
+                        End;
+                    End;
+                Finally
+                    SchServer.DestroyCompInfoReader(LibReader);
+                End;
+            End;
+        Finally
+            SchServer.ProcessControl.PostProcess(SchLib, 'Edit');
+        End;
+
+        AnyModified := False;
+        For J := 0 To NumOps - 1 Do
+            If StrToIntDef(OpModified[J], 0) > 0 Then AnyModified := True;
+        If AnyModified Then MarkLibDirty(SchLib);
+        Try SchLib.GraphicallyInvalidate; Except End;
+
+        OpsJson := '[';
+        For J := 0 To NumOps - 1 Do
+        Begin
+            If J > 0 Then OpsJson := OpsJson + ',';
+            OpsJson := OpsJson +
+                '{"target":"' + EscapeJsonString(OpTargets[J]) + '"' +
+                ',"modified":' + OpModified[J] +
+                ',"already_compliant":' + OpAlready[J] +
+                ',"missing_target":' + OpMissing[J] +
+                ',"failed":' + OpFailed[J] + '}';
+        End;
+        OpsJson := OpsJson + ']';
+
+        { Stash the full JSON in a local before assigning to Result -- the    }
+        { DelphiScript last-arg clobber bug only bites on String returns      }
+        { with a String arg, but the pattern is cheap insurance.              }
+        RespJson :=
+            '{"library_path":"' + EscapeJsonString(LibPath) + '"' +
+            ',"scope":"' + EscapeJsonString(Scope) + '"' +
+            ',"total":' + IntToStr(Total) +
+            ',"limit":' + IntToStr(Limit) +
+            ',"truncated":' + BoolToJsonStr(Total >= Limit) +
+            ',"ops":' + OpsJson + '}';
+        Result := BuildSuccessResponse(RequestId, RespJson);
+    Finally
+        OpTargets.Free;
+        OpFontIds.Free;
+        OpColors.Free;
+        OpIsHidden.Free;
+        OpOrientation.Free;
+        OpJustification.Free;
+        OpModified.Free;
+        OpAlready.Free;
+        OpMissing.Free;
+        OpFailed.Free;
+    End;
+End;
+
 {..............................................................................}
 { Command Handler - must be at end                                             }
 {..............................................................................}
@@ -2917,6 +3528,8 @@ Begin
         'add_footprint_pad':    Result := Lib_AddFootprintPad(Params, RequestId);
         'add_footprint_track':  Result := Lib_AddFootprintTrack(Params, RequestId);
         'add_footprint_arc':    Result := Lib_AddFootprintArc(Params, RequestId);
+        'add_footprint_text':   Result := Lib_AddFootprintText(Params, RequestId);
+        'get_footprints':       Result := Lib_GetFootprints(Params, RequestId);
         'link_footprint':       Result := Lib_LinkFootprint(Params, RequestId);
         'link_3d_model':        Result := Lib_Link3DModel(Params, RequestId);
         'get_components':       Result := Lib_GetComponents(Params, RequestId);
@@ -2932,6 +3545,7 @@ Begin
         'copy_component':     Result := Lib_CopyComponent(Params, RequestId);
         'audit_styles':       Result := Lib_AuditStyles(Params, RequestId);
         'set_label_format':   Result := Lib_SetLabelFormat(Params, RequestId);
+        'set_label_formats':  Result := Lib_SetLabelFormats(Params, RequestId);
         'set_current_component': Result := Lib_SetCurrentComponent(Params, RequestId);
     Else
         Result := BuildErrorResponse(RequestId, 'UNKNOWN_ACTION', 'Unknown library action: ' + Action);

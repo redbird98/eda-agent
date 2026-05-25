@@ -464,6 +464,98 @@ def register_library_tools(mcp):
         )
         return result
 
+    @mcp.tool()
+    async def lib_add_footprint_text(
+        text: str,
+        x: int = 0,
+        y: int = 0,
+        size: int = 50,
+        width: int = 8,
+        rotation: int = 0,
+        layer: str = "TopOverlay",
+        use_ttfont: bool = False,
+        library_path: Optional[str] = None,
+        component_name: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Add a text primitive to a PcbLib footprint.
+
+        Trap baked into this handler: in a PcbLib, adding a primitive
+        only to the footprint does NOT register it with the placement
+        editor -- the text shows up only after a save+reload. This
+        tool adds the text to BOTH the footprint and the underlying
+        board, then broadcasts ``PCBM_BoardRegisteration`` to both, per
+        the reference DelphiScript (``PcbLib/FootPrintText_2.pas``).
+
+        Args:
+            text: The string to place. Required.
+            x, y: Coordinates in mils, relative to the board origin.
+            size: Text height in mils. 50 is a common silkscreen size;
+                drop to 30-40 for tight footprints.
+            width: Stroke width in mils. 8 reads cleanly at 50 mil
+                size; scale with ``size``.
+            rotation: Rotation in degrees (0, 90, 180, 270 typical).
+            layer: Layer name resolved by GetLayerFromString
+                (``TopOverlay``, ``BottomOverlay``, ``TopSolder``,
+                ``BottomSolder``, ``Mechanical1`` ... ``Mechanical32``).
+            use_ttfont: ``True`` for TrueType; default ``False`` is the
+                vector stroke font that fab houses prefer.
+            library_path: Optional .PcbLib to focus before adding.
+                Defaults to the active document.
+            component_name: Optional footprint name to switch to before
+                adding. Defaults to the currently active footprint.
+
+        Returns:
+            Dict with ``success``, ``footprint``, ``text``, ``layer``,
+            ``x``, ``y``.
+        """
+        if not text:
+            raise InvalidParameterError("text is required")
+        bridge = get_bridge()
+        params: dict[str, Any] = {
+            "text": text,
+            "x": x, "y": y,
+            "size": size, "width": width,
+            "rotation": rotation, "layer": layer,
+        }
+        if use_ttfont:
+            params["use_ttfont"] = "true"
+        if library_path:
+            params["library_path"] = library_path
+        if component_name:
+            params["component_name"] = component_name
+        result = await bridge.send_command_async(
+            "library.add_footprint_text", params,
+        )
+        return result
+
+    @mcp.tool()
+    async def lib_get_footprints(
+        library_path: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Enumerate every footprint in a PcbLib.
+
+        PcbLib counterpart to ``lib_get_components`` for SchLibs. Walks
+        the PCB library with ``IPCB_Library.LibraryIterator_Create``
+        and returns one entry per footprint with its name and
+        description.
+
+        Args:
+            library_path: Optional .PcbLib path to focus first.
+                Defaults to the focused document.
+
+        Returns:
+            Dict with ``library_path``, ``count`` and ``footprints``
+            (a list of ``{name, description}``).
+        """
+        bridge = get_bridge()
+        params: dict[str, Any] = {}
+        if library_path:
+            params["library_path"] = library_path
+        result = await bridge.send_command_async(
+            "library.get_footprints", params,
+        )
+        return result
+
     # =========================================================================
     # Component Linking
     # =========================================================================
@@ -905,6 +997,118 @@ def register_library_tools(mcp):
         return result or {}
 
     @mcp.tool()
+    async def lib_set_label_formats(
+        ops: list[dict[str, Any]],
+        component_name: Optional[str] = None,
+        library_path: Optional[str] = None,
+        only_mismatched: bool = True,
+        limit: int = 5000,
+        timeout: Optional[float] = None,
+    ) -> dict[str, Any]:
+        """Multi-target label-style writer for SchLib symbols.
+
+        Same job as ``lib_set_label_format`` but applies SEVERAL
+        target/style ops in one IPC round-trip. The library is
+        opened once and walked once; every op is applied to each
+        component in turn. Five sequential single-target calls
+        collapse into one trip plus one library walk -- which is
+        the dominant cost on large libraries (each individual call
+        runs an IPC, a workspace lookup, a doc-focus check and a
+        CompInfoReader walk).
+
+        Each ``op`` is a dict with the same shape as the
+        single-target tool's args -- no field has a built-in default,
+        only the ones you supply get written:
+
+            {"target": "designator",         # required
+             "font_id": <int>,               # optional
+             "color":   <int>,               # optional, BGR-packed
+             "is_hidden": False,             # optional
+             "orientation": <int>,           # optional, 0/90/180/270
+             "justification": <int>}         # optional
+
+        At least one style field must be set per op. Targets are
+        ``"designator"``, ``"comment"``, or ``"parameter:<Name>"``.
+        Use ``get_font_id`` / ``get_font_spec`` to resolve the font_id
+        for {name, size, bold, italic} from the active library's font
+        table; that keeps the call neutral to any particular library's
+        style choices.
+
+        Args:
+            ops: List of per-target style ops. Must be non-empty.
+                Targets may not contain the wire separators ``;``
+                or ``~~``.
+            component_name: When set, applies only to that one
+                component. Omit for bulk-walk across the library.
+            library_path: .SchLib path. Defaults to focused doc.
+            only_mismatched: When True (default) skip labels
+                already matching the target style. Applies
+                globally to every op.
+            limit: Cap on processed components in bulk mode.
+            timeout: Per-call bridge poll timeout override.
+
+        Returns:
+            Dict with library_path, scope ("single"|"bulk"),
+            total, limit, truncated, and an ``ops`` array each
+            with target, modified, already_compliant,
+            missing_target, failed.
+        """
+        if not ops:
+            raise InvalidParameterError("ops must be a non-empty list")
+        encoded_ops: list[str] = []
+        for i, op in enumerate(ops):
+            if not isinstance(op, dict):
+                raise InvalidParameterError(f"ops[{i}] must be a dict")
+            target = op.get("target", "designator")
+            if (not isinstance(target, str) or ";" in target
+                    or "~~" in target):
+                raise InvalidParameterError(
+                    f"ops[{i}].target must be a string without "
+                    "';' or '~~'"
+                )
+            parts = [f"target={target}"]
+            style_set = False
+            if op.get("font_id") is not None:
+                parts.append(f"font_id={int(op['font_id'])}")
+                style_set = True
+            if op.get("color") is not None:
+                parts.append(f"color={int(op['color'])}")
+                style_set = True
+            if op.get("is_hidden") is not None:
+                parts.append(
+                    "is_hidden="
+                    + ("true" if op["is_hidden"] else "false")
+                )
+                style_set = True
+            if op.get("orientation") is not None:
+                parts.append(f"orientation={int(op['orientation'])}")
+                style_set = True
+            if op.get("justification") is not None:
+                parts.append(f"justification={int(op['justification'])}")
+                style_set = True
+            if not style_set:
+                raise InvalidParameterError(
+                    f"ops[{i}] must set at least one of font_id / "
+                    "color / is_hidden / orientation / justification"
+                )
+            encoded_ops.append(";".join(parts))
+        bridge = get_bridge()
+        params: dict[str, Any] = {
+            "ops": "~~".join(encoded_ops),
+            "limit": str(limit),
+        }
+        if component_name:
+            params["component_name"] = component_name
+        if library_path:
+            params["library_path"] = library_path
+        if not only_mismatched:
+            params["only_mismatched"] = "false"
+        result = await bridge.send_command_async(
+            "library.set_label_formats", params, timeout=timeout,
+        )
+        return result or {}
+
+    @mcp.tool()
     async def lib_batch_set_params(
         assignments: list[dict[str, str]],
         library_path: Optional[str] = None,
@@ -1156,24 +1360,53 @@ def register_library_tools(mcp):
     @mcp.tool()
     async def lib_copy_component(
         source_name: str,
-        new_name: str,
+        new_name: Optional[str] = None,
+        source_library: Optional[str] = None,
+        dest_library: Optional[str] = None,
+        overwrite: bool = False,
     ) -> dict[str, Any]:
-        """Duplicate a component within the same schematic library.
+        """Copy a component WITHIN or BETWEEN schematic libraries.
 
-        Creates a deep copy of the source component (including all pins,
-        graphics, and parameters) and adds it to the library with the
-        new name. The new component becomes the active component.
+        Replicates the source component (all pins, graphics, parameters)
+        and adds it to the destination library. When ``dest_library`` is
+        omitted or equals ``source_library`` this behaves as the original
+        same-library duplicate. When ``dest_library`` differs, the
+        component is copied across libraries -- the source library is
+        focused for the replicate, then the destination is focused and
+        the clone is added there. The destination ends focused with the
+        new component selected. Save is deferred (call ``save_all`` to
+        flush).
 
         Args:
-            source_name: Name of the existing component to copy
-            new_name: Name for the new component (must not already exist)
+            source_name: lib_ref of the component to copy.
+            new_name: lib_ref for the clone. Defaults to ``source_name``
+                (natural choice for cross-library copies that should
+                keep their identity).
+            source_library: .SchLib path to read from. Defaults to the
+                currently focused document.
+            dest_library: .SchLib path to write to. Omit (or pass the
+                same path as ``source_library``) for a same-library
+                duplicate.
+            overwrite: When True, a component already named ``new_name``
+                in the destination is removed first. Default False
+                returns ``NAME_EXISTS`` and changes nothing.
 
         Returns:
-            Dictionary confirming the copy with source and new_name
+            Dictionary with ``success``, ``source``, ``new_name``,
+            ``source_library``, ``dest_library``, ``same_library`` and
+            ``overwrote`` flags.
         """
         bridge = get_bridge()
+        params: dict[str, Any] = {"source_name": source_name}
+        if new_name:
+            params["new_name"] = new_name
+        if source_library:
+            params["source_library"] = source_library
+        if dest_library:
+            params["dest_library"] = dest_library
+        if overwrite:
+            params["overwrite"] = "true"
         result = await bridge.send_command_async(
-            "library.copy_component",
-            {"source_name": source_name, "new_name": new_name},
+            "library.copy_component", params,
         )
         return result
