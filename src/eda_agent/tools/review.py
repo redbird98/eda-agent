@@ -5,10 +5,16 @@
 One call to ``design_review_snapshot`` bundles 8-12 separate reads
 (project info, components, nets, rules, DRC messages, unrouted nets,
 sch/PCB diff, BOM, ...) into a single tool response. The response
-also carries a ``_review_guidance`` block that enforces
-datasheet-first discipline: every review conclusion must be grounded
-in the actual component datasheet, not the symbol or library
-metadata.
+also carries a ``_review_guidance`` block that holds the agent to
+two disciplines, so every review it produces follows them instead of
+relying on whatever the model happens to remember:
+
+  - datasheet discipline: every device-function claim is grounded in
+    the manufacturer datasheet, never the symbol or library metadata;
+  - review-quality discipline: a finding must add analysis the raw
+    tools do not -- specific, evidenced, actionable -- and is never a
+    relayed ERC/DRC message nor a 'verify X' prompt handed back to
+    the user.
 """
 
 from __future__ import annotations
@@ -55,6 +61,88 @@ DEFAULT_SECTIONS = [
 ]
 
 
+# ---------------------------------------------------------------------------
+# Review-quality discipline.
+#
+# Datasheet discipline (datasheet_hints.DATASHEET_RULES) keeps device
+# *facts* honest. This second discipline keeps the *findings* honest --
+# it governs what may be surfaced as a review finding at all. It ships
+# inside the _review_guidance block of every design_review_snapshot so
+# the standard is enforced by the agent, not left to the model's recall.
+#
+# Each rule below is here because skipping it produced a useless review:
+# relayed ERC categories the user already has in Altium's Messages panel;
+# "verify X" prompts that hand the analysis back to the user; device
+# functions guessed from symbol pin names; and normal design practice
+# surfaced as noise.
+# ---------------------------------------------------------------------------
+
+REVIEW_DISCIPLINE: str = (
+    "A finding must add analysis the raw tools do not: name the exact "
+    "parts, pins and nets, back it with a netlist fact or a cited "
+    "datasheet section, and state a concrete consequence and fix. Run "
+    "ERC and DRC, but investigate every violation and surface only "
+    "the verified-real ones as specific findings -- never relay the "
+    "raw list. Never emit 'verify X' as a finding -- do the analysis. "
+    "Normal design practice is not a finding."
+)
+
+REVIEW_QUALITY_RULES: list[str] = [
+    "RUN ERC AND DRC, THEN TRIAGE -- never relay them, never drop "
+    "them. ERC and DRC must still be run: a genuine violation can be "
+    "one of the most important findings in the whole review, so a "
+    "real one is never discarded. But the raw output is not the "
+    "review, and much of it is false positives -- ERC routinely "
+    "flags power and passive nets, unset pin electrical types, and "
+    "intentional no-connects. After the datasheet-grounded part "
+    "review, investigate EACH ERC/DRC violation one by one: trace it "
+    "to the exact net and pins and use the datasheet understanding "
+    "of the parts on that net to decide whether it is a real fault "
+    "or a false positive. Surface every violation verified as real "
+    "-- each as a specific finding (named net and pins, the actual "
+    "electrical fault, the fix), severity-rated on its real impact. "
+    "Drop the false positives. Never relay a raw category like 'N "
+    "nets with floating inputs' -- the user already has Altium's "
+    "Messages panel for that, and a relayed copy is worthless. The "
+    "triage exists to cut false-positive noise so the genuine ERC "
+    "and DRC issues stand out, not to dismiss ERC/DRC.",
+
+    "NO HOMEWORK. Never emit 'verify X', 'confirm X' or 'check X "
+    "against the datasheet' as a finding -- that hands the analysis "
+    "back to the user, which is the opposite of a review. Fetch the "
+    "datasheet, trace the net, and state the conclusion yourself. "
+    "'Verify the decoupling' is not a finding; 'U3 pin 12 VDDA is on "
+    "net +3V3 with no capacitor on that net' is.",
+
+    "SPECIFIC, EVIDENCED, ACTIONABLE. Every finding names the exact "
+    "components, pins and nets involved; is backed by either a "
+    "netlist fact (stated as a netlist fact) or a datasheet section "
+    "or page citation; and states the concrete electrical "
+    "consequence and the concrete fix. A finding with no named parts "
+    "and no citation is not a finding.",
+
+    "TOPOLOGY vs FUNCTION. A netlist fact -- a single-pin net, a pin "
+    "count, two pins shorted onto one net -- is directly observable "
+    "and may be stated plainly. A device function -- what a pin "
+    "does, a rating, a threshold, a default state -- is a datasheet "
+    "fact and may NEVER be inferred from a symbol pin name, the "
+    "Comment field, or the part number. A pin the symbol labels "
+    "'OUT' is not known to be an output until the datasheet says so.",
+
+    "NOT EVERYTHING IS A FINDING. Normal, expected design practice "
+    "is noise: unused MCU GPIOs left unrouted, an unused logic "
+    "output left open, declared no-connect pins. A review that is "
+    "mostly noise is useless -- signal-to-noise is the metric. If "
+    "you would not raise it with a senior engineer in a real design "
+    "review, do not surface it.",
+
+    "CALIBRATE SEVERITY. 'critical' and 'warning' are for real, "
+    "evidenced problems that can cause a malfunction or a respin. "
+    "Something you could not confirm is not 'critical'. Verified-OK "
+    "and positive observations are 'info'. Do not inflate counts.",
+]
+
+
 def _extract_unique_parts(
     components: Any, bom: Any
 ) -> list[dict[str, str]]:
@@ -63,8 +151,17 @@ def _extract_unique_parts(
 
 
 def _guidance_block(unique_parts: list[dict[str, str]]) -> dict[str, Any]:
-    """Thin wrapper around the shared guidance builder, kept for test compat."""
-    return build_guidance_block(unique_parts, context="design_review")
+    """Build the ``_review_guidance`` block.
+
+    It carries both disciplines: the shared datasheet discipline (so
+    device facts are grounded in the datasheet) and the review-quality
+    discipline (so what gets surfaced as a finding is specific,
+    evidenced, and adds analysis the raw sections do not).
+    """
+    block = build_guidance_block(unique_parts, context="design_review")
+    block["__REVIEW_DISCIPLINE__"] = REVIEW_DISCIPLINE
+    block["review_quality_rules"] = REVIEW_QUALITY_RULES
+    return block
 
 
 def register_review_tools(mcp):
@@ -97,6 +194,20 @@ def register_review_tools(mcp):
         components whose datasheets you must have read before
         reviewing. Do not skip this step.
 
+        CRITICAL, review-quality discipline (enforced via _review_guidance):
+        A finding must ADD analysis the raw sections do not. Run ERC
+        and DRC, but do NOT relay their raw output as findings -
+        investigate each violation after the datasheet review, drop
+        the false positives, and surface the real ones as specific,
+        traced findings (a genuine ERC/DRC violation can be a top
+        finding - never dropped). Do NOT emit "verify X" / "confirm
+        X" as a finding - that hands the analysis back to the user.
+        Every finding names the exact parts/pins/nets, is backed by a
+        netlist fact or a cited datasheet, states a concrete
+        consequence and fix, and is something you would raise in a
+        real design review. The full rules are in
+        _review_guidance["review_quality_rules"].
+
         Args:
             sections: Which snapshot sections to include. Defaults to
                 the standard review set (project_info, design_stats,
@@ -119,7 +230,8 @@ def register_review_tools(mcp):
 
         Returns:
             Dict with one key per requested section, plus:
-              - _review_guidance: datasheet-first rules Claude must follow
+              - _review_guidance: datasheet + review-quality rules
+                Claude must follow when turning sections into findings
               - _unique_parts: list of {manufacturer, part_number,
                 designators} to fetch datasheets for
               - _sections_failed: sections that errored (partial results

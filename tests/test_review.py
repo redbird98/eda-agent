@@ -9,6 +9,8 @@ import pytest
 from eda_agent.tools.review import (
     DATASHEET_RULES,
     DEFAULT_SECTIONS,
+    REVIEW_DISCIPLINE,
+    REVIEW_QUALITY_RULES,
     REVIEW_SECTIONS,
     _extract_unique_parts,
     _guidance_block,
@@ -106,6 +108,46 @@ class TestGuidanceBlock:
         text = block["action_required"].lower()
         assert "datasheet" in text
         assert "webfetch" in text or "websearch" in text
+
+    def test_guidance_carries_review_quality_discipline(self):
+        # The _review_guidance block must instil review-quality
+        # discipline, not only datasheet discipline.
+        block = _guidance_block([])
+        assert "__REVIEW_DISCIPLINE__" in block
+        assert "review_quality_rules" in block
+        assert block["review_quality_rules"] == REVIEW_QUALITY_RULES
+
+
+class TestReviewQualityDiscipline:
+    """The review-quality rules govern what may be surfaced as a
+    finding. They exist so the agent enforces the standard rather
+    than relying on the model to remember it.
+    """
+
+    def test_rules_are_nonempty_and_substantial(self):
+        assert len(REVIEW_QUALITY_RULES) >= 5
+        assert all(len(r) > 40 for r in REVIEW_QUALITY_RULES)
+        assert REVIEW_DISCIPLINE.strip()
+
+    def test_rules_run_and_triage_erc_drc(self):
+        joined = " ".join(REVIEW_QUALITY_RULES).lower()
+        # ERC and DRC are still run and kept as a review input...
+        assert "erc" in joined and "drc" in joined
+        assert "run" in joined
+        # ...but triaged: false positives cut, real ones surfaced
+        # rather than relayed.
+        assert "false positive" in joined
+        assert "relay" in joined or "restate" in joined
+
+    def test_rules_forbid_verify_homework_findings(self):
+        joined = " ".join(REVIEW_QUALITY_RULES).lower()
+        # 'verify X' handed back to the user is not a finding.
+        assert "verify" in joined
+
+    def test_rules_separate_topology_from_device_function(self):
+        joined = " ".join(REVIEW_QUALITY_RULES).lower()
+        assert "datasheet" in joined
+        assert "netlist" in joined
 
 
 class TestDesignReviewSnapshotOrchestration:
