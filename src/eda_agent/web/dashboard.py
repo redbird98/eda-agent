@@ -593,8 +593,28 @@ def create_app(workspace_dir: Optional[Path] = None) -> Flask:
                 "<h1>dashboard_static/index.html missing</h1>",
                 status=500, mimetype="text/html",
             )
-        return Response(_HTML_PATH.read_text(encoding="utf-8"),
+        resp = Response(_HTML_PATH.read_text(encoding="utf-8"),
                         mimetype="text/html")
+        # Local dev dashboard: every page load must read fresh from disk.
+        # Without these headers some browsers cache index.html for the
+        # full session, so iteration on the JS / HTML looks like it has
+        # no effect even though Flask reads the file every request.
+        resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+        resp.headers["Pragma"] = "no-cache"
+        resp.headers["Expires"] = "0"
+        return resp
+
+    @app.after_request
+    def _no_cache_api(resp: Response) -> Response:
+        # All JSON endpoints need fresh reads too -- they read either the
+        # live workspace or a short-TTL bridge cache. Tagging them no-store
+        # stops browsers / proxies from holding onto stale snapshots.
+        from flask import request as _req
+        if _req.path.startswith("/api/") or _req.path == "/":
+            resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+            resp.headers["Pragma"] = "no-cache"
+            resp.headers["Expires"] = "0"
+        return resp
 
     @app.route("/api/snapshot")
     def snapshot() -> Response:
@@ -802,205 +822,6 @@ def create_app(workspace_dir: Optional[Path] = None) -> Flask:
         return jsonify({"ok": False, "reason": "no-plan-cached",
                         "hint": "design_preview_plan / design_execute_plan write the cached snapshot."})
 
-    # -----------------------------------------------------------------
-    # Design review aggregator + drill-in detail.
-    # -----------------------------------------------------------------
-
-    # Lenient parameter-name lookups -- Altium projects spell these many ways.
-    _DATASHEET_KEYS    = ("Datasheet", "DatasheetURL", "Datasheet URL", "datasheet")
-    _MPN_KEYS          = ("ManufacturerPart", "Manufacturer Part Number",
-                          "ManufacturerPartNumber", "MPN", "PartNumber",
-                          "Part Number", "manufacturer_part_number")
-    _MANUFACTURER_KEYS = ("Manufacturer", "Mfr", "manufacturer")
-    _DESCRIPTION_KEYS  = ("Description", "Comment", "description")
-    _VALUE_KEYS        = ("Value", "value")
-
-    def _param(params: dict, keys: tuple) -> str:
-        if not isinstance(params, dict):
-            return ""
-        for k in keys:
-            v = params.get(k)
-            if v not in (None, "", "*"):
-                return str(v).strip()
-        return ""
-
-    def _looks_like_url(s: str) -> bool:
-        s = (s or "").strip().lower()
-        return s.startswith("http://") or s.startswith("https://") \
-            or s.endswith(".pdf") or s.startswith("file:")
-
-    def _build_review_summary() -> dict:
-        """Fast review pass: BOM + nets only, no per-component parameter
-        enrichment. Reads from the bundled project snapshot so it shares
-        the single round-trip with the rest of the dashboard.
-        """
-        snap = _project_snapshot()
-        if not snap.get("ok"):
-            return {"ok": False, "reason": snap.get("reason", "unavailable")}
-        bundle = snap.get("data") or {}
-        bom = bundle.get("bom")
-        bom_components = (bom.get("components") if isinstance(bom, dict) else None) or []
-
-        issues: list[dict] = []
-        components = []
-        for raw in bom_components:
-            if not isinstance(raw, dict):
-                continue
-            des = raw.get("designator", "")
-            footprint = raw.get("footprint") or ""
-            components.append({
-                "designator": des,
-                "comment":    raw.get("comment", ""),
-                "footprint":  footprint,
-                "lib_ref":    raw.get("lib_ref", ""),
-                "pin_count":  len(raw.get("pins") or []),
-                "has_footprint": bool(footprint),
-            })
-            if not footprint:
-                issues.append({
-                    "severity": "error", "category": "missing-footprint",
-                    "designator": des, "message": f"{des} has no footprint",
-                })
-
-        # Net-level issues: orphan nets (only 1 pin attached). From the
-        # same bundled snapshot -- no extra round-trip.
-        nets_resp = bundle.get("nets")
-        pin_rows = []
-        if isinstance(nets_resp, dict):
-            pin_rows = nets_resp.get("pins") or nets_resp.get("nets") or []
-        net_pin_count: dict[str, int] = {}
-        for p in pin_rows:
-            if not isinstance(p, dict):
-                continue
-            name = p.get("net") or p.get("name")
-            if not name:
-                continue
-            net_pin_count[name] = net_pin_count.get(name, 0) + 1
-        for name, count in net_pin_count.items():
-            if count == 1:
-                issues.append({
-                    "severity": "warn", "category": "orphan-net",
-                    "net": name,
-                    "message": f"net '{name}' has only one pin attached",
-                })
-
-        return {
-            "ok": True,
-            "components_total": len(components),
-            "components": components,
-            "issues": issues,
-            "nets_total": len(net_pin_count),
-        }
-
-    def _build_review_coverage() -> dict:
-        """Slow enrichment pass: get_component_info_batch with parameters.
-        Computes datasheet / MPN / manufacturer coverage. Latency: 5-15s
-        depending on project size. Cached 5 minutes -- this data does not
-        change often during a review session.
-        """
-        snap = _project_snapshot()
-        if not snap.get("ok"):
-            return {"ok": False, "reason": snap.get("reason", "unavailable")}
-        bom = (snap.get("data") or {}).get("bom")
-        bom_components = (bom.get("components") if isinstance(bom, dict) else None) or []
-        designators = [c.get("designator", "") for c in bom_components
-                       if isinstance(c, dict) and c.get("designator")]
-        if not designators:
-            return {"ok": True, "coverage": {}, "issues": []}
-
-        info = _bridge_call(
-            "project.get_component_info_batch",
-            {"designators": "~~".join(designators),
-             "with_pin_nets": "false",
-             "with_parameters": "true"},
-            timeout=120,
-        )
-        info_list = []
-        if isinstance(info, dict):
-            info_list = info.get("components") or []
-        info_by_designator = {}
-        for c in info_list:
-            if isinstance(c, dict) and c.get("designator"):
-                info_by_designator[c["designator"]] = c
-
-        cov_ds = cov_mpn = cov_mfr = cov_desc = cov_val = 0
-        issues: list[dict] = []
-        per_component: list[dict] = []
-        for des in designators:
-            detail = info_by_designator.get(des, {})
-            params = detail.get("parameters") if isinstance(detail, dict) else {}
-            datasheet = _param(params, _DATASHEET_KEYS)
-            mpn       = _param(params, _MPN_KEYS)
-            mfr       = _param(params, _MANUFACTURER_KEYS)
-            descr     = _param(params, _DESCRIPTION_KEYS)
-            value     = _param(params, _VALUE_KEYS)
-
-            per_component.append({
-                "designator":   des,
-                "datasheet":    datasheet,
-                "mpn":          mpn,
-                "manufacturer": mfr,
-                "description":  descr,
-                "value":        value,
-            })
-            if datasheet:    cov_ds   += 1
-            if mpn:          cov_mpn  += 1
-            if mfr:          cov_mfr  += 1
-            if descr:        cov_desc += 1
-            if value:        cov_val  += 1
-
-            if not datasheet:
-                issues.append({
-                    "severity": "warn", "category": "missing-datasheet",
-                    "designator": des, "message": f"{des} has no Datasheet parameter",
-                })
-            elif not _looks_like_url(datasheet):
-                issues.append({
-                    "severity": "warn", "category": "datasheet-not-url",
-                    "designator": des,
-                    "message": f"{des} Datasheet does not look like a URL/PDF: '{datasheet[:60]}'",
-                })
-            if not mpn:
-                issues.append({
-                    "severity": "warn", "category": "missing-mpn",
-                    "designator": des, "message": f"{des} has no MPN",
-                })
-            if not mfr:
-                issues.append({
-                    "severity": "info", "category": "missing-manufacturer",
-                    "designator": des, "message": f"{des} has no Manufacturer",
-                })
-
-        total = len(designators)
-        def pct(have: int) -> int:
-            return int(round(100 * have / total)) if total else 0
-        coverage = {
-            "datasheet":    {"have": cov_ds,   "total": total, "pct": pct(cov_ds)},
-            "mpn":          {"have": cov_mpn,  "total": total, "pct": pct(cov_mpn)},
-            "manufacturer": {"have": cov_mfr,  "total": total, "pct": pct(cov_mfr)},
-            "description":  {"have": cov_desc, "total": total, "pct": pct(cov_desc)},
-            "value":        {"have": cov_val,  "total": total, "pct": pct(cov_val)},
-        }
-        return {
-            "ok": True,
-            "components_total": total,
-            "coverage": coverage,
-            "issues": issues,
-            "per_component": per_component,
-        }
-
-    @app.route("/api/review/summary")
-    def review_summary() -> Response:
-        """Fast pass: BOM + nets + footprint/orphan issues. Cached 60s."""
-        return jsonify(_cached("review_summary", 60.0, _build_review_summary))
-
-    @app.route("/api/review/coverage")
-    def review_coverage() -> Response:
-        """Slow pass: per-component parameters -> datasheet/MPN/etc.
-        coverage. Cached 5 minutes -- data is stable across a review session.
-        """
-        return jsonify(_cached("review_coverage", 300.0, _build_review_coverage))
-
     @app.route("/api/component/<designator>")
     def component_detail(designator: str) -> Response:
         """Single-component drill-in: parameters, pins, datasheet.
@@ -1102,21 +923,127 @@ def create_app(workspace_dir: Optional[Path] = None) -> Flask:
             return jsonify({"ok": False, "reason": "altium-not-running"})
         return jsonify({"ok": True, "data": data})
 
+    # -----------------------------------------------------------------
+    # Tool catalog. Every registered MCP tool is exposed to the Actions
+    # tab so the user can manually call anything Claude can. Mutating
+    # heuristic uses an allowlist of read-only prefixes / exact names;
+    # everything else is badged "mutates" so the user sees what changes
+    # design state. The badge is informational, not a safety gate.
+    # -----------------------------------------------------------------
+
+    _READ_ONLY_EXACT = {
+        "attach_to_altium", "detach_from_altium", "ping_altium",
+        "cross_probe", "highlight_net", "clear_highlights",
+        "deselect_all", "select_objects", "zoom", "switch_view",
+        "get_clipboard_text", "execute_menu", "refresh_document",
+        "compile_project", "force_recompile",
+        "run_erc", "run_drc", "get_unconnected_pins",
+        "set_intent", "diag_workspace", "generate_output",
+    }
+    _READ_ONLY_PREFIXES = (
+        "get_", "list_", "find_", "query_", "compare_", "crossref_",
+        "diag_", "ping_",
+        "lib_search", "lib_diff", "lib_audit", "lib_get",
+        "pcb_get_", "pcb_check_", "pcb_export_",
+        "sch_get_",
+        "design_preview_", "design_validate_", "design_get_",
+        "design_snapshot_inventory", "design_review_snapshot",
+        "design_learn_from", "export_",
+    )
+
+    def _is_mutating_tool(name: str) -> bool:
+        if name in _READ_ONLY_EXACT:
+            return False
+        for pre in _READ_ONLY_PREFIXES:
+            if name.startswith(pre):
+                return False
+        return True
+
+    @app.route("/api/tools")
+    def tools_catalog() -> Response:
+        """Catalog every registered MCP tool: name, namespace,
+        description, JSON-schema parameters, and a mutating flag the
+        UI uses to badge edit-class tools.
+        """
+        try:
+            from eda_agent.server import mcp
+        except Exception as e:
+            return jsonify({"ok": False, "reason": f"mcp unavailable: {e}"})
+        reg = getattr(getattr(mcp, "_tool_manager", None), "_tools", None)
+        if not isinstance(reg, dict):
+            return jsonify({"ok": False, "reason": "tool registry unavailable"})
+        out = []
+        for name, tool in sorted(reg.items()):
+            ns = name.split("_", 1)[0] if "_" in name else name
+            out.append({
+                "name": name,
+                "namespace": ns,
+                "description": (getattr(tool, "description", "") or "").strip(),
+                "schema": getattr(tool, "parameters", {}) or {},
+                "is_async": bool(getattr(tool, "is_async", False)),
+                "mutates": _is_mutating_tool(name),
+            })
+        return jsonify({"ok": True, "tools": out, "count": len(out)})
+
+    @app.route("/api/tool/run", methods=["POST"])
+    def tool_run() -> Response:
+        """Invoke one registered MCP tool by name with a kwargs dict.
+
+        Returns {ok, data, elapsed_ms} on success; {ok:false, reason,
+        elapsed_ms} on a raised exception. Mutating tools clear the
+        project snapshot cache so the rest of the dashboard re-reads.
+        """
+        import asyncio
+        import time as _time
+        from flask import request as _req
+
+        body = _req.get_json(silent=True) or {}
+        name = (body.get("name") or "").strip()
+        args = body.get("args") or {}
+        if not name:
+            return jsonify({"ok": False, "reason": "name is required"}), 400
+        if not isinstance(args, dict):
+            return jsonify({"ok": False, "reason": "args must be an object"}), 400
+        try:
+            from eda_agent.server import mcp
+        except Exception as e:
+            return jsonify({"ok": False, "reason": f"mcp unavailable: {e}"}), 500
+        reg = getattr(getattr(mcp, "_tool_manager", None), "_tools", None)
+        if not isinstance(reg, dict) or name not in reg:
+            return jsonify({"ok": False, "reason": f"unknown tool: {name}"}), 404
+        tool = reg[name]
+        fn = getattr(tool, "fn", None)
+        if fn is None:
+            return jsonify({"ok": False, "reason": "tool function missing"}), 500
+        t0 = _time.monotonic()
+        try:
+            if getattr(tool, "is_async", False):
+                data = asyncio.run(fn(**args))
+            else:
+                data = fn(**args)
+        except Exception as e:
+            elapsed = int((_time.monotonic() - t0) * 1000)
+            return jsonify({"ok": False, "reason": f"{type(e).__name__}: {e}",
+                            "elapsed_ms": elapsed})
+        elapsed = int((_time.monotonic() - t0) * 1000)
+        if _is_mutating_tool(name):
+            with _cache_lock:
+                for k in list(_cache.keys()):
+                    if k.startswith("project."):
+                        _cache.pop(k, None)
+        return jsonify({"ok": True, "data": data, "elapsed_ms": elapsed})
+
     @app.route("/api/refresh/<topic>", methods=["POST"])
     def force_refresh(topic: str) -> Response:
         """Invalidate cached entries for one topic so the next GET re-fetches.
 
         The project / components / nets / messages tabs all read from the
         single bundled `project.dashboard_snapshot` cache entry, so every
-        topic drops that. Review additionally drops its own derived caches.
+        topic drops that.
         """
-        extra = {
-            "review": ("review_summary", "review_coverage",
-                       "project.get_component_info_batch"),
-        }
-        if topic not in ("project", "components", "nets", "messages", "review"):
+        if topic not in ("project", "components", "nets", "messages"):
             return jsonify({"ok": False, "reason": "unknown topic"}), 400
-        drop_prefixes = ("project.dashboard_snapshot",) + extra.get(topic, ())
+        drop_prefixes = ("project.dashboard_snapshot",)
         with _cache_lock:
             for k in list(_cache.keys()):
                 if any(k.startswith(p) for p in drop_prefixes):

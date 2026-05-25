@@ -91,6 +91,12 @@ input[type="text"], input[type="search"] {
   padding:6px 10px; font-size:12px;
   outline:none; min-width:200px;
 }
+select {
+  background:var(--bg); color:var(--text);
+  border:1px solid var(--border); border-radius:5px;
+  padding:5px 8px; font-size:12px; outline:none; cursor:pointer;
+}
+select:focus { border-color:var(--accent); }
 input[type="text"]:focus, input[type="search"]:focus {
   border-color:var(--accent);
 }
@@ -404,6 +410,85 @@ table.data .mono { font-size:11.5px; }
   color:var(--text); border-bottom-color:var(--accent-2);
 }
 
+/* ---------- global jump-to search ---------- */
+.gsearch { position:relative; }
+.gsearch input { min-width:230px; }
+.gsearch-results {
+  position:absolute; top:34px; left:0; width:300px; z-index:60;
+  background:var(--bg-elev); border:1px solid var(--border-hi);
+  border-radius:6px; box-shadow:0 8px 24px var(--shadow);
+  max-height:360px; overflow-y:auto;
+}
+.gsearch-results .gs-row {
+  display:flex; gap:8px; align-items:center;
+  padding:6px 10px; cursor:pointer; font-size:12px;
+  border-bottom:1px solid var(--row-border);
+}
+.gsearch-results .gs-row:hover,
+.gsearch-results .gs-row.sel { background:var(--bg-card-hi); }
+.gsearch-results .gs-label {
+  font-family:"JetBrains Mono","SF Mono",Menlo,Consolas,monospace;
+  flex:1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+}
+.gsearch-results .gs-sub { color:var(--text-dim); font-size:11px; }
+.gsearch-results .gs-empty { padding:10px; color:var(--text-dim); font-size:11px; }
+
+/* ---------- tool catalog (actions tab) ---------- */
+.tool-row {
+  border:1px solid var(--border); border-radius:6px;
+  margin-bottom:6px; background:var(--bg-elev);
+}
+.tool-row .tool-head {
+  display:flex; align-items:center; gap:8px; padding:7px 10px;
+  cursor:pointer; user-select:none;
+}
+.tool-row .tool-head:hover { background:var(--bg-card-hi); }
+.tool-row .tool-chev { font-family:monospace; color:var(--text-dim);
+  width:10px; text-align:center; }
+.tool-row.open .tool-chev { color:var(--accent); transform:rotate(90deg); }
+.tool-row .tool-name { font-weight:600; }
+.tool-row .tool-desc {
+  color:var(--text-mute); font-size:11px; flex:1; min-width:0;
+  white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+}
+.tool-body { padding:10px 12px; border-top:1px solid var(--border); }
+.tool-doc {
+  white-space:pre-wrap; word-break:break-word;
+  color:var(--text-mute); font-size:11px; margin:0 0 10px;
+  padding:8px 10px; background:var(--bg);
+  border:1px solid var(--border); border-radius:4px;
+  max-height:220px; overflow:auto;
+  font-family:"JetBrains Mono","SF Mono",Menlo,Consolas,monospace;
+}
+.tool-form { display:flex; flex-direction:column; gap:8px; }
+.tool-param { display:flex; flex-direction:column; gap:3px; }
+.tool-param-head { display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
+.tool-param-name { font-size:11px; font-weight:600; }
+.tool-param-head .hint { font-size:10px; }
+.tool-input {
+  padding:5px 8px; font-size:12px;
+  background:var(--bg); border:1px solid var(--border-hi);
+  border-radius:4px; color:var(--text); width:100%; box-sizing:border-box;
+  font-family:"JetBrains Mono","SF Mono",Menlo,Consolas,monospace;
+}
+.tool-input-json { resize:vertical; min-height:54px; }
+.tool-input-bool { width:auto; }
+.tool-btnrow { margin-top:10px; display:flex; align-items:center; gap:10px; }
+.tool-run {
+  padding:6px 16px; background:var(--accent); color:var(--bg);
+  border:none; border-radius:4px; cursor:pointer; font-weight:600;
+  font-size:12px;
+}
+.tool-run:hover { filter:brightness(1.1); }
+.tool-run:disabled { opacity:0.5; cursor:wait; }
+.tool-result { margin-top:8px; }
+.tool-result-data {
+  white-space:pre-wrap; word-break:break-word; margin:6px 0 0;
+  background:var(--bg); border:1px solid var(--border);
+  border-radius:4px; padding:8px; font-size:11px;
+  max-height:340px; overflow:auto;
+}
+
 [hidden] { display:none !important; }
 </style>
 </head>
@@ -414,18 +499,23 @@ table.data .mono { font-size:11.5px; }
   <div class="statuspill" id="status-pill">
     <span class="dot"></span><span id="status-text">connecting</span>
   </div>
+  <div class="gsearch">
+    <input type="search" id="global-search"
+           placeholder="jump to designator or net  ( / )" autocomplete="off">
+    <div class="gsearch-results" id="global-results" hidden></div>
+  </div>
   <div class="intent" id="intent-banner"></div>
   <button class="iconbtn" id="theme-toggle"
           title="Toggle light / dark theme (T)" aria-label="Toggle theme"></button>
 </header>
 
 <nav class="tabs" id="tabs">
-  <button data-tab="review" class="active">Review</button>
-  <button data-tab="project">Project</button>
+  <button data-tab="project" class="active">Project</button>
   <button data-tab="components">Components</button>
   <button data-tab="nets">Nets</button>
   <button data-tab="libraries">Libraries</button>
   <button data-tab="plan">Plan</button>
+  <button data-tab="actions">Actions</button>
   <button data-tab="status">Status</button>
   <div class="spacer"></div>
   <button class="refresh" id="refresh-tab" title="Refresh current tab (R)"
@@ -442,34 +532,28 @@ table.data .mono { font-size:11.5px; }
 <main>
 
   <!-- ========================= REVIEW TAB ========================= -->
-  <section data-pane="review">
+  <!-- ========================= GRAPH TAB ========================= -->
+  <!-- ========================= POWER TAB ========================= -->
+  <!-- ========================= ACTIONS TAB ========================= -->
+  <section data-pane="actions" hidden>
     <div class="panel">
-      <h2>design coverage</h2>
-      <div class="hint" id="review-source"></div>
-      <div id="review-coverage" style="margin-top:10px;"><div class="empty">loading...</div></div>
-    </div>
-
-    <div class="panel">
-      <div class="search-bar">
-        <h2 style="margin:0; flex:1;">issues</h2>
-        <span class="count" id="review-issue-count"></span>
-        <label class="tag muted" style="cursor:pointer">
-          <input type="checkbox" id="review-only-warn-err" checked style="vertical-align:middle">
-          warn/err only
-        </label>
-        <div class="toolbar-right row-actions">
-          <button class="iconbtn" id="review-clear-hl"
-                  title="Clear highlights in Altium" aria-label="Clear highlights">
-            <svg viewBox="0 0 16 16" width="13" height="13" fill="none"
-                 stroke="currentColor" stroke-width="1.5" stroke-linecap="round"
-                 stroke-linejoin="round">
-              <path d="M3 4.5h10M6.4 4.5V3h3.2v1.5M4.6 4.5l.5 8a1 1 0 0 0 1 .95h3.8a1 1 0 0 0 1-.95l.5-8"/>
-              <path d="M7 7.2v3.6M9 7.2v3.6"/>
-            </svg>
-          </button>
-        </div>
+      <h2>tools</h2>
+      <div class="hint">Every MCP tool the agent exposes. Tools tagged
+        <span class="tag warn">mutates</span> change design or workspace
+        state. Expand a tool to set its parameters and run it. The badge is
+        a heuristic, not a safety gate -- check before clicking on a tool
+        that writes to Altium.</div>
+      <div class="search-bar" style="margin-top:10px;">
+        <input type="search" id="tool-filter"
+               placeholder="filter by tool name or description...">
+        <select id="tool-ns-filter">
+          <option value="all">all namespaces</option>
+        </select>
+        <span class="count" id="tools-count"></span>
       </div>
-      <div id="review-issues"><div class="empty">loading...</div></div>
+      <div id="tools-list" style="margin-top:10px;">
+        <div class="empty">loading...</div>
+      </div>
     </div>
   </section>
 
@@ -503,6 +587,14 @@ table.data .mono { font-size:11.5px; }
       <div class="search-bar">
         <input type="search" id="comp-filter" placeholder="filter designator, comment, MPN, footprint...">
         <span class="count" id="comp-count"></span>
+        <select id="comp-class-filter">
+          <option value="">all classes</option>
+          <option value="ic">IC</option>
+          <option value="passive">passive</option>
+          <option value="semi">discrete</option>
+          <option value="connector">connector</option>
+          <option value="other">other</option>
+        </select>
         <div class="toolbar-right row-actions">
           <button class="iconbtn" id="comp-export"
                   title="Copy BOM as CSV" aria-label="Copy CSV">
@@ -515,6 +607,7 @@ table.data .mono { font-size:11.5px; }
           </button>
         </div>
       </div>
+      <div id="comp-summary" style="margin-bottom:10px;"></div>
       <div id="comp-body"><div class="empty">loading...</div></div>
     </div>
   </section>
@@ -525,11 +618,17 @@ table.data .mono { font-size:11.5px; }
       <div class="search-bar">
         <input type="search" id="net-filter" placeholder="filter net name...">
         <span class="count" id="net-count"></span>
-        <label class="tag muted" style="cursor:pointer">
-          <input type="checkbox" id="net-power-only" style="vertical-align:middle">
-          power/ground only
-        </label>
+        <select id="net-class-filter">
+          <option value="">all classes</option>
+          <option value="power">power</option>
+          <option value="ground">ground</option>
+          <option value="clock">clock</option>
+          <option value="reset">reset</option>
+          <option value="diff">differential</option>
+          <option value="signal">signal</option>
+        </select>
       </div>
+      <div id="net-summary" style="margin-bottom:10px;"></div>
       <div id="net-body"><div class="empty">loading...</div></div>
     </div>
   </section>
@@ -757,19 +856,15 @@ function showSub(name) {
 }
 
 async function loadTab(name) {
-  if (name === "review")     return loadReview();
   if (name === "project")    return loadProject();
   if (name === "components") return loadComponents();
   if (name === "nets")       return loadNets();
   if (name === "libraries")  return loadLibraries();
   if (name === "plan")       return loadPlan();
+  if (name === "actions")    return loadActions();
 }
 
 async function refreshActive() {
-  if (state.activeTab === "review") {
-    await fetchJSON("/api/refresh/review", {method:"POST"});
-    return loadReview();
-  }
   if (state.activeTab === "project") {
     await fetchJSON("/api/refresh/project", {method:"POST"});
     return loadProject();
@@ -784,155 +879,11 @@ async function refreshActive() {
   }
   if (state.activeTab === "libraries") return loadLibraries();
   if (state.activeTab === "plan")      return loadPlan();
+  if (state.activeTab === "actions")   return loadActions();
   if (state.activeTab === "status") {
     if (state.activeSub === "artifacts") return loadArtifacts();
     if (state.activeSub === "health")    return runHealth();
   }
-}
-
-/* ============================ REVIEW ============================ */
-async function loadReview() {
-  $("#review-coverage").innerHTML = "<div class='empty'>checking BOM + nets...</div>";
-  $("#review-issues").innerHTML = "";
-  $("#review-issue-count").textContent = "";
-  state.data.review = { summary: null, coverage: null };
-
-  // Phase 1: fast summary (BOM + nets, no parameters). ~2s.
-  const summary = await fetchJSON("/api/review/summary");
-  state.data.review.summary = summary;
-  renderReview();  // initial render with summary + a "loading" coverage panel
-
-  // Phase 2: slow parameter enrichment in the background. Coverage gauges
-  // fill in when this arrives. Issue queue gets the datasheet/MPN/etc
-  // findings appended.
-  if (summary && summary.ok) {
-    const coverage = await fetchJSON("/api/review/coverage");
-    state.data.review.coverage = coverage;
-    renderReview();
-  }
-}
-
-function renderReview() {
-  const data = state.data.review || {};
-  const summary = data.summary;
-  const coverage = data.coverage;
-  const covRoot = $("#review-coverage");
-  const issueRoot = $("#review-issues");
-  covRoot.innerHTML = "";
-  issueRoot.innerHTML = "";
-  if (!summary || !summary.ok) {
-    covRoot.appendChild(emptyBox(summary && summary.reason));
-    return;
-  }
-  $("#review-source").textContent =
-    (summary.components_total || 0) + " components, " +
-    (summary.nets_total || 0) + " nets analysed" +
-    (coverage ? "" : " - fetching parameter coverage...");
-
-  // Coverage gauges: only show if Phase 2 has returned.
-  if (coverage && coverage.ok && coverage.coverage) {
-    const grid = el("div", {class:"gauge-grid"});
-    const order = ["datasheet", "mpn", "manufacturer", "description", "value"];
-    order.forEach(function(k){
-      const c = coverage.coverage[k];
-      if (!c) return;
-      let cls = "bad";
-      if (c.pct >= 90) cls = "good";
-      else if (c.pct >= 60) cls = "mid";
-      const card = el("div", {class:"gauge " + cls},
-        el("div", {class:"label"}, k),
-        el("div", {class:"top"},
-          el("div", {class:"pct"}, c.pct + "%"),
-          el("div", {class:"frac"}, c.have + " / " + c.total),
-        ),
-        el("div", {class:"bar"}, el("div", {style:"width:" + c.pct + "%"})),
-      );
-      grid.appendChild(card);
-    });
-    // Footprint coverage from Phase 1
-    const fpHave = (summary.components || []).filter(function(c){ return c.has_footprint; }).length;
-    const fpTotal = (summary.components || []).length;
-    const fpPct = fpTotal ? Math.round(100 * fpHave / fpTotal) : 0;
-    let fpCls = "bad";
-    if (fpPct >= 90) fpCls = "good";
-    else if (fpPct >= 60) fpCls = "mid";
-    grid.appendChild(el("div", {class:"gauge " + fpCls},
-      el("div", {class:"label"}, "footprint"),
-      el("div", {class:"top"},
-        el("div", {class:"pct"}, fpPct + "%"),
-        el("div", {class:"frac"}, fpHave + " / " + fpTotal),
-      ),
-      el("div", {class:"bar"}, el("div", {style:"width:" + fpPct + "%"})),
-    ));
-    covRoot.appendChild(grid);
-  } else if (coverage && !coverage.ok) {
-    covRoot.appendChild(emptyBox(
-      "coverage enrichment failed: " + (coverage.reason || "unknown")));
-  } else {
-    covRoot.appendChild(el("div", {class:"empty"},
-      "fetching parameter coverage (5-15s)..."));
-  }
-
-  // Merge issues from both phases.
-  const allIssues = (summary.issues || []).concat(
-    coverage && coverage.ok ? (coverage.issues || []) : []);
-
-  // Issue filter + count
-  const onlyWarnErr = $("#review-only-warn-err").checked;
-  const issues = allIssues.filter(function(i){
-    if (!onlyWarnErr) return true;
-    return i.severity === "warn" || i.severity === "error";
-  });
-  $("#review-issue-count").textContent =
-    issues.length + " issues" + (coverage ? "" : " (so far)");
-  if (!issues.length) {
-    issueRoot.appendChild(emptyBox("no issues by these checks"));
-    return;
-  }
-
-  // Group by category for readability.
-  const byCat = new Map();
-  issues.forEach(function(i){
-    if (!byCat.has(i.category)) byCat.set(i.category, []);
-    byCat.get(i.category).push(i);
-  });
-  byCat.forEach(function(items, cat){
-    const head = el("div", {style:"padding:10px 12px 4px; color:var(--text-mute); font-size:11px; text-transform:uppercase; letter-spacing:1.2px;"},
-      cat + " (" + items.length + ")");
-    issueRoot.appendChild(head);
-    items.forEach(function(it){
-      const row = el("div", {class:"issue-row"});
-      row.appendChild(el("span", {class:"tag " + sevTag(it.severity)}, it.severity));
-      row.appendChild(el("span", {class:"target"},
-        it.designator || it.net || ""));
-      row.appendChild(el("span", {class:"tag muted"}, it.category));
-      row.appendChild(el("span", {class:"message"}, it.message || ""));
-      const actions = el("div", {class:"actions"});
-      if (it.designator) {
-        actions.appendChild(el("button", {
-          title: "Cross-probe in Altium (schematic)",
-          onclick: function(){ crossProbe(it.designator, "schematic"); },
-        }, "sch"));
-        actions.appendChild(el("button", {
-          title: "Cross-probe in Altium (PCB)",
-          onclick: function(){ crossProbe(it.designator, "pcb"); },
-        }, "pcb"));
-        actions.appendChild(el("button", {
-          onclick: function(){ openComponentDrawer(it.designator); },
-        }, "details"));
-      } else if (it.net) {
-        actions.appendChild(el("button", {
-          title: "Highlight net in Altium",
-          onclick: function(){ highlightNet(it.net); },
-        }, "highlight"));
-        actions.appendChild(el("button", {
-          onclick: function(){ openNetDrawer(it.net); },
-        }, "details"));
-      }
-      row.appendChild(actions);
-      issueRoot.appendChild(row);
-    });
-  });
 }
 
 /* ============================ ACTIONS ============================ */
@@ -968,6 +919,53 @@ async function clearHighlights() {
 }
 
 /* ============================ DRILL-IN DRAWERS ============================ */
+// Return the BOM component list, from whatever cache is warm; fetch only
+// if nothing is loaded. Used by the drawer to compute electrical neighbours.
+async function getBomComponents() {
+  function extract(resp) {
+    if (!resp || !resp.ok) return null;
+    const d = resp.data || {};
+    return d.bom || d.components || d.rows || [];
+  }
+  let list = extract(state.data.components);
+  if (list) return list;
+  state.data.components = await fetchJSON("/api/project/components");
+  return extract(state.data.components) || [];
+}
+
+// Heuristic role for a 2-pin passive, from its two net classes.
+function passiveRole(c) {
+  const des = c.designator || "";
+  const pm = des.match(/^[A-Za-z]+/);
+  if (!pm) return null;
+  const prefix = pm[0].toUpperCase();
+  if (["R","C","L","FB","RN"].indexOf(prefix) < 0) return null;
+  const pins = c.pins || [];
+  if (pins.length !== 2) return null;
+  const a = pins[0].net || "", b = pins[1].net || "";
+  if (!a || !b) return null;
+  if (a === b) return { role: "shorted", sev: "err",
+    note: "both pins land on the same net (" + a + ")" };
+  const aG = isGroundNet(a), bG = isGroundNet(b);
+  const aP = isPowerNet(a) && !aG, bP = isPowerNet(b) && !bG;
+  if (prefix === "C") {
+    if ((aP && bG) || (bP && aG))
+      return { role: "bypass / bulk cap", sev: "ok",
+               note: "bridges " + (aP ? a : b) + " to " + (aG ? a : b) };
+    if (aG || bG) return { role: "filter cap to ground", sev: "info" };
+    return { role: "coupling / series cap", sev: "info" };
+  }
+  if (prefix === "R" || prefix === "RN") {
+    if ((aP && !bP && !bG) || (bP && !aP && !aG))
+      return { role: "pull-up", sev: "info", note: "to " + (aP ? a : b) };
+    if ((aG && !bG) || (bG && !aG))
+      return { role: "pull-down", sev: "info", note: "to " + (aG ? a : b) };
+    return { role: "series resistor", sev: "info" };
+  }
+  if ((aP || bP)) return { role: "power-rail inductor / ferrite", sev: "info" };
+  return { role: "series inductor / ferrite", sev: "info" };
+}
+
 async function openComponentDrawer(designator) {
   $("#drawer-cmd").textContent = designator;
   $("#drawer-tag").textContent = "component";
@@ -976,20 +974,27 @@ async function openComponentDrawer(designator) {
   body.innerHTML = "<div class='empty'>loading...</div>";
   $("#drawer").classList.add("open");
   const r = await fetchJSON("/api/component/" + encodeURIComponent(designator));
-  body.innerHTML = "";
   if (!r || !r.ok) {
+    body.innerHTML = "";
     body.appendChild(emptyBox(r && r.reason));
     return;
   }
   const c = r.data || {};
-  // Action row
+  const pins = c.pins || [];
+  const bom = await getBomComponents();
+  // Global net-name set for differential-pair classification.
+  const upperSet = {};
+  bom.forEach(function(oc){
+    (oc.pins || []).forEach(function(p){
+      if (p.net) upperSet[String(p.net).toUpperCase()] = true;
+    });
+  });
+  body.innerHTML = "";
+
+  // Action row.
   body.appendChild(el("div", {class:"row-actions", style:"margin-bottom:12px;"},
-    el("button", {
-      onclick: function(){ crossProbe(designator, "schematic"); },
-    }, "sch jump"),
-    el("button", {
-      onclick: function(){ crossProbe(designator, "pcb"); },
-    }, "pcb jump"),
+    el("button", { onclick: function(){ crossProbe(designator, "schematic"); } }, "sch jump"),
+    el("button", { onclick: function(){ crossProbe(designator, "pcb"); } }, "pcb jump"),
     c.datasheet
       ? el("a", {href: c.datasheet, target:"_blank", rel:"noopener",
                  style:"display:inline-block; padding:5px 10px; background:var(--bg-card); border:1px solid var(--border); border-radius:5px; font-size:12px; color:var(--accent);"},
@@ -997,7 +1002,31 @@ async function openComponentDrawer(designator) {
       : null,
   ));
 
-  // Core fields
+  // Electrical insight: pin-class breakdown + passive role.
+  const pinClasses = {};
+  pins.forEach(function(p){
+    const cl = p.net ? netClass(p.net, upperSet) : "signal";
+    p._class = cl;
+    pinClasses[cl] = (pinClasses[cl] || 0) + 1;
+  });
+  if (pins.length) {
+    const ins = el("div", {class:"row-actions", style:"margin-bottom:10px;"});
+    ins.appendChild(el("span", {class:"tag"}, pins.length + " pins"));
+    ["power","ground","clock","reset","diff","signal"].forEach(function(cl){
+      if (pinClasses[cl])
+        ins.appendChild(el("span", {class:"tag " + (NET_CLASS_TAG[cl] || "muted")},
+          cl + ": " + pinClasses[cl]));
+    });
+    body.appendChild(ins);
+  }
+  const role = passiveRole(c);
+  if (role) {
+    body.appendChild(el("div", {style:"margin-bottom:10px;"},
+      el("span", {class:"tag " + (role.sev || "info")}, role.role),
+      role.note ? el("span", {class:"hint", style:"margin-left:8px;"}, role.note) : null));
+  }
+
+  // Core fields.
   const core = el("div", {class:"kv-grid"});
   function kv(k, v) {
     if (v == null || v === "") return;
@@ -1017,7 +1046,33 @@ async function openComponentDrawer(designator) {
   kv("datasheet",    c.datasheet);
   body.appendChild(core);
 
-  // Parameters
+  // Electrical neighbours: components sharing a non-power net.
+  const myNets = {};
+  pins.forEach(function(p){
+    if (p.net && p.net !== "?" && !isPowerNet(p.net)) myNets[p.net] = true;
+  });
+  const neigh = {};
+  bom.forEach(function(oc){
+    const od = oc.designator || "";
+    if (!od || od === designator) return;
+    (oc.pins || []).forEach(function(p){
+      if (p.net && myNets[p.net]) neigh[od] = true;
+    });
+  });
+  const neighList = Object.keys(neigh).sort();
+  if (neighList.length) {
+    body.appendChild(el("h3", {style:"margin-top:16px;"},
+      "electrical neighbours (" + neighList.length + ")"));
+    const wrap = el("div", {class:"row-actions"});
+    neighList.slice(0, 60).forEach(function(d){
+      const tag = el("span", {class:"tag", style:"cursor:pointer;"}, d);
+      tag.addEventListener("click", function(){ openComponentDrawer(d); });
+      wrap.appendChild(tag);
+    });
+    body.appendChild(wrap);
+  }
+
+  // Parameters.
   const params = c.parameters || {};
   if (Object.keys(params).length) {
     body.appendChild(el("h3", {style:"margin-top:16px;"}, "parameters"));
@@ -1029,13 +1084,13 @@ async function openComponentDrawer(designator) {
     body.appendChild(grid);
   }
 
-  // Pins
-  const pins = c.pins || [];
+  // Pins, with per-pin net class.
   if (pins.length) {
     body.appendChild(el("h3", {style:"margin-top:16px;"}, "pins (" + pins.length + ")"));
     const t = el("table", {class:"data"});
     t.appendChild(el("thead", {}, el("tr", {},
-      el("th", {}, "pin"), el("th", {}, "name"), el("th", {}, "net"),
+      el("th", {}, "pin"), el("th", {}, "name"),
+      el("th", {}, "net"), el("th", {}, "class"),
     )));
     const tb = el("tbody", {});
     pins.forEach(function(p){
@@ -1047,6 +1102,9 @@ async function openComponentDrawer(designator) {
           net ? el("a", {href:"#", onclick: function(ev){
                   ev.preventDefault(); openNetDrawer(net);
                 }}, net) : ""),
+        el("td", {},
+          net ? el("span", {class:"tag " + (NET_CLASS_TAG[p._class] || "muted")},
+                  p._class) : ""),
       ));
     });
     t.appendChild(tb);
@@ -1054,10 +1112,22 @@ async function openComponentDrawer(designator) {
   }
 }
 
+// Find a net's differential-pair sibling among a set of net names.
+function diffPartner(netName, upperSet) {
+  const u = netName.toUpperCase();
+  const pairs = [["_P","_N"], ["_DP","_DM"], ["_POS","_NEG"], ["_M","_P"]];
+  for (let i = 0; i < pairs.length; i++) {
+    const a = pairs[i][0], b = pairs[i][1];
+    if (u.length > a.length && u.slice(-a.length) === a
+        && upperSet[u.slice(0, -a.length) + b]) return u.slice(0, -a.length) + b;
+    if (u.length > b.length && u.slice(-b.length) === b
+        && upperSet[u.slice(0, -b.length) + a]) return u.slice(0, -b.length) + a;
+  }
+  return null;
+}
+
 async function openNetDrawer(netName) {
   $("#drawer-cmd").textContent = netName;
-  $("#drawer-tag").textContent = isPowerNet(netName) ? "power net" : "net";
-  $("#drawer-tag").className = "tag " + (isPowerNet(netName) ? "info" : "muted");
   const body = $("#drawer-body");
   body.innerHTML = "<div class='empty'>collecting pins...</div>";
   $("#drawer").classList.add("open");
@@ -1074,6 +1144,12 @@ async function openNetDrawer(netName) {
   }
   const allPins = (netsResp.data && (netsResp.data.pins || [])) || [];
   const pins = allPins.filter(function(p){ return p.net === netName; });
+  // Net-name set + this net's class.
+  const upperSet = {};
+  allPins.forEach(function(p){ if (p.net) upperSet[p.net.toUpperCase()] = true; });
+  const cls = netClass(netName, upperSet);
+  $("#drawer-tag").textContent = cls + " net";
+  $("#drawer-tag").className = "tag " + (NET_CLASS_TAG[cls] || "muted");
 
   body.appendChild(el("div", {class:"row-actions", style:"margin-bottom:12px;"},
     el("button", {
@@ -1088,12 +1164,48 @@ async function openNetDrawer(netName) {
     }),
   ));
 
-  body.appendChild(el("div", {class:"kv-grid"},
-    el("div", {class:"k"}, "name"),       el("div", {class:"v"}, netName),
-    el("div", {class:"k"}, "pin count"),  el("div", {class:"v"}, String(pins.length)),
-    el("div", {class:"k"}, "kind"),       el("div", {class:"v"},
-      isPowerNet(netName) ? "power" : "signal"),
-  ));
+  // Insight strip: class, voltage, bus, differential partner.
+  const ins = el("div", {class:"row-actions", style:"margin-bottom:10px;"});
+  ins.appendChild(el("span", {class:"tag " + (NET_CLASS_TAG[cls] || "muted")}, cls));
+  const v = railVoltage(netName);
+  if (cls === "power" && v != null)
+    ins.appendChild(el("span", {class:"tag info"}, v + " V"));
+  const bm = netName.match(/^(.+?)[_\[]?(\d+)\]?$/);
+  if (bm && bm[1]) ins.appendChild(el("span", {class:"tag muted"},
+    "bus member: " + bm[1]));
+  const partner = diffPartner(netName, upperSet);
+  body.appendChild(ins);
+
+  // Component-class breakdown of what the net touches.
+  const compsOnNet = {};
+  pins.forEach(function(p){ if (p.component) compsOnNet[p.component] = true; });
+  const clsCount = {};
+  Object.keys(compsOnNet).forEach(function(d){
+    const cc = componentClass(d);
+    clsCount[cc] = (clsCount[cc] || 0) + 1;
+  });
+  const kv = el("div", {class:"kv-grid"});
+  kv.appendChild(el("div", {class:"k"}, "name"));
+  kv.appendChild(el("div", {class:"v"}, netName));
+  kv.appendChild(el("div", {class:"k"}, "pins / components"));
+  kv.appendChild(el("div", {class:"v"},
+    pins.length + " pins on " + Object.keys(compsOnNet).length + " components"));
+  const touches = ["ic","passive","semi","connector","other"]
+    .filter(function(c){ return clsCount[c]; })
+    .map(function(c){ return clsCount[c] + " " + c; }).join(", ");
+  if (touches) {
+    kv.appendChild(el("div", {class:"k"}, "touches"));
+    kv.appendChild(el("div", {class:"v"}, touches));
+  }
+  if (partner) {
+    kv.appendChild(el("div", {class:"k"}, "diff partner"));
+    const pv = el("div", {class:"v"});
+    pv.appendChild(el("a", {href:"#", onclick: function(ev){
+      ev.preventDefault(); openNetDrawer(partner);
+    }}, partner));
+    kv.appendChild(pv);
+  }
+  body.appendChild(kv);
 
   if (pins.length) {
     body.appendChild(el("h3", {style:"margin-top:16px;"}, "connections"));
@@ -1177,6 +1289,7 @@ function renderProjectStats(stats) {
   const d = stats.data || {};
   const rows = [
     ["sheets",     d.sheets     != null ? d.sheets     : d.document_count],
+    ["documents",  d.documents  != null ? d.documents  : null],
     ["components", d.components != null ? d.components : d.component_count],
     ["pins",       d.pins       != null ? d.pins       : d.pin_count],
     ["nets",       d.nets       != null ? d.nets       : d.net_count],
@@ -1300,9 +1413,40 @@ async function loadComponents() {
   renderComponents();
 }
 
+var COMP_CLASS_TAG = {
+  ic: "info", connector: "warn", semi: "ok",
+  passive: "muted", other: "muted",
+};
+
+// BOM analytics: how many distinct part values / footprints, frequency
+// ranking, and single-use values (used by exactly one component -- a
+// consolidation or possible-mistake signal an EE wants to see).
+function analyzeBom(comps) {
+  const values = {}, footprints = {};
+  comps.forEach(function(c){
+    const v = String(c.value || c.comment || "").trim();
+    if (v) values[v] = (values[v] || 0) + 1;
+    const fp = String(c.footprint || "").trim();
+    if (fp) footprints[fp] = (footprints[fp] || 0) + 1;
+  });
+  const valueList = Object.keys(values)
+    .map(function(k){ return { value: k, count: values[k] }; })
+    .sort(function(a, b){ return b.count - a.count; });
+  const fpList = Object.keys(footprints)
+    .map(function(k){ return { fp: k, count: footprints[k] }; })
+    .sort(function(a, b){ return b.count - a.count; });
+  return {
+    valueList: valueList, fpList: fpList,
+    distinctValues: valueList.length,
+    distinctFootprints: fpList.length,
+    singleUse: valueList.filter(function(x){ return x.count === 1; }).length,
+  };
+}
+
 function renderComponents() {
   const root = $("#comp-body");
-  root.innerHTML = "";
+  const summary = $("#comp-summary");
+  root.innerHTML = ""; summary.innerHTML = "";
   const r = state.data.components;
   if (!r || !r.ok) {
     root.appendChild(emptyBox(r && r.reason));
@@ -1310,14 +1454,61 @@ function renderComponents() {
     return;
   }
   let all = (r.data && (r.data.bom || r.data.components || r.data.rows)) || [];
+  // Classify every component once.
+  const classCounts = {};
+  all.forEach(function(c){
+    c._class = componentClass(c.designator || "");
+    classCounts[c._class] = (classCounts[c._class] || 0) + 1;
+  });
+  // Composition summary strip.
+  const strip = el("div", {class:"row-actions"});
+  ["ic","passive","semi","connector","other"].forEach(function(cl){
+    if (!classCounts[cl]) return;
+    strip.appendChild(el("span", {class:"tag " + (COMP_CLASS_TAG[cl] || "muted")},
+      cl + ": " + classCounts[cl]));
+  });
+  summary.appendChild(strip);
+
+  // BOM analytics: value spread + footprint mix + single-use parts.
+  const bomA = analyzeBom(all);
+  const aStrip = el("div", {class:"row-actions", style:"margin-top:6px;"});
+  aStrip.appendChild(el("span", {class:"hint"}, "BOM: "));
+  aStrip.appendChild(el("span", {class:"tag"},
+    bomA.distinctValues + " distinct values"));
+  aStrip.appendChild(el("span", {class:"tag"},
+    bomA.distinctFootprints + " footprints"));
+  if (bomA.singleUse)
+    aStrip.appendChild(el("span", {class:"tag warn", style:"cursor:pointer;",
+      title:"Values used by exactly one component -- consolidation candidates"},
+      bomA.singleUse + " single-use values"));
+  summary.appendChild(aStrip);
+  if (bomA.valueList.length) {
+    const topStrip = el("div", {class:"row-actions", style:"margin-top:6px;"});
+    topStrip.appendChild(el("span", {class:"hint"}, "top values: "));
+    bomA.valueList.slice(0, 10).forEach(function(v){
+      const tag = el("span", {class:"tag muted", style:"cursor:pointer;"},
+        v.value + " x" + v.count);
+      tag.addEventListener("click", function(){
+        $("#comp-filter").value = v.value;
+        renderComponents();
+      });
+      topStrip.appendChild(tag);
+    });
+    summary.appendChild(topStrip);
+  }
+
   const filt = ($("#comp-filter").value || "").toLowerCase().trim();
+  const classFilter = $("#comp-class-filter").value;
   let rows = all;
   if (filt) {
-    rows = all.filter(function(c){
+    rows = rows.filter(function(c){
       return Object.values(c).some(function(v){
         return v != null && String(v).toLowerCase().indexOf(filt) >= 0;
       });
     });
+  }
+  if (classFilter) {
+    rows = rows.filter(function(c){ return c._class === classFilter; });
   }
   $("#comp-count").textContent = rows.length + " of " + all.length + " components";
   if (!rows.length) {
@@ -1331,8 +1522,8 @@ function renderComponents() {
   ]);
   const t = el("table", {class:"data"});
   const head = el("tr", {});
+  head.appendChild(el("th", {}, "class"));
   cols.forEach(function(c){ head.appendChild(el("th", {}, c)); });
-  head.appendChild(el("th", {}, "datasheet"));
   t.appendChild(el("thead", {}, head));
   const tb = el("tbody", {});
   rows.slice(0, 600).forEach(function(row){
@@ -1342,15 +1533,14 @@ function renderComponents() {
       if (ev.target.tagName === "A") return;
       if (row.designator) openComponentDrawer(row.designator);
     });
+    tr.appendChild(el("td", {},
+      el("span", {class:"tag " + (COMP_CLASS_TAG[row._class] || "muted")},
+        row._class)));
     cols.forEach(function(c){
       const isMono = ["designator","footprint","mpn","lib_ref"].indexOf(c) >= 0;
       tr.appendChild(el("td", {class: isMono ? "mono" : ""},
         renderCellValue(row[c], c)));
     });
-    const ds = row.datasheet || row.datasheet_url || row.datasheet_path;
-    tr.appendChild(ds
-      ? el("td", {}, el("a", {href: ds, target:"_blank", rel:"noopener"}, "open"))
-      : el("td", {}, ""));
     tb.appendChild(tr);
   });
   t.appendChild(tb);
@@ -1422,9 +1612,87 @@ function aggregateNets(r) {
   }).sort(function(a,b){ return b.pin_count - a.pin_count; });
 }
 
+// --- Net classification: power / ground / clock / reset / diff / signal ---
+var NET_CLASS_TAG = {
+  power: "info", ground: "muted", clock: "warn",
+  reset: "err", diff: "ok", signal: "muted",
+};
+
+function diffSibling(u, set) {
+  // u is upper-case; set is a map of upper-case net names. A net is part of
+  // a differential pair only if its opposite-polarity sibling actually
+  // exists -- a bare "..._P" with no "..._N" is just a signal.
+  var pairs = [["_P","_N"], ["_DP","_DM"], ["_POS","_NEG"], ["_M","_P"]];
+  for (var i = 0; i < pairs.length; i++) {
+    var a = pairs[i][0], b = pairs[i][1];
+    if (u.length > a.length && u.slice(-a.length) === a
+        && set[u.slice(0, -a.length) + b]) return true;
+    if (u.length > b.length && u.slice(-b.length) === b
+        && set[u.slice(0, -b.length) + a]) return true;
+  }
+  return false;
+}
+
+function netClass(name, upperSet) {
+  if (!name) return "signal";
+  var u = name.toUpperCase();
+  if (isGroundNet(name)) return "ground";
+  if (isPowerNet(name))  return "power";
+  if (/(^|[^A-Z])(CLK|CLOCK|XTAL|OSC|SCLK|MCLK|REFCLK|HSE|LSE)([^A-Z]|$)/.test(u))
+    return "clock";
+  if (/(RESET|NRST|MRST|_RST|^RST|POR)/.test(u)) return "reset";
+  if (upperSet && diffSibling(u, upperSet)) return "diff";
+  return "signal";
+}
+
+function detectBuses(names) {
+  // A bus = a base name with >=3 indexed members (D0..D7, ADDR[0]..[15]).
+  var groups = {};
+  names.forEach(function(n){
+    var m = n.match(/^(.+?)[_\[]?(\d+)\]?$/);
+    if (!m || !m[1]) return;
+    var base = m[1];
+    (groups[base] || (groups[base] = [])).push(n);
+  });
+  var buses = [];
+  Object.keys(groups).forEach(function(b){
+    if (groups[b].length >= 3) buses.push({ base: b, width: groups[b].length });
+  });
+  buses.sort(function(a, b){ return b.width - a.width; });
+  return buses;
+}
+
+// Recognise standard serial / bus interfaces from net-name signatures.
+// Each protocol needs its distinctive signal pair present to count, which
+// keeps false positives down.
+function detectInterfaces(names) {
+  var U = names.map(function(n){ return { raw: n, u: n.toUpperCase() }; });
+  function has(re) {
+    return U.filter(function(x){ return re.test(x.u); })
+            .map(function(x){ return x.raw; });
+  }
+  var defs = [
+    { proto: "I2C",  a: /(^|[^A-Z])SDA(\d|[^A-Z]|$)/, b: /(^|[^A-Z])SCL(\d|[^A-Z]|$)/ },
+    { proto: "SPI",  a: /MOSI|\bSDO\b/,                b: /MISO|\bSDI\b/ },
+    { proto: "UART", a: /(^|[_])TXD?(\d|[^A-Z]|$)/,    b: /(^|[_])RXD?(\d|[^A-Z]|$)/ },
+    { proto: "USB",  a: /(USB.*)?D[\+P]($|[^A-Z])/,    b: /(USB.*)?D[\-M]($|[^A-Z])/ },
+    { proto: "CAN",  a: /CANH|CAN_H/,                  b: /CANL|CAN_L/ },
+    { proto: "SWD",  a: /SWDIO/,                       b: /SWCLK/ },
+    { proto: "JTAG", a: /\bTCK\b/,                     b: /\bTMS\b/ },
+  ];
+  var found = [];
+  defs.forEach(function(d){
+    var na = has(d.a), nb = has(d.b);
+    if (na.length && nb.length)
+      found.push({ proto: d.proto, nets: na.concat(nb) });
+  });
+  return found;
+}
+
 function renderNets() {
   const root = $("#net-body");
-  root.innerHTML = "";
+  const summary = $("#net-summary");
+  root.innerHTML = ""; summary.innerHTML = "";
   const r = state.data.nets;
   if (!r || !r.ok) {
     root.appendChild(emptyBox(r && r.reason));
@@ -1432,16 +1700,60 @@ function renderNets() {
     return;
   }
   const all = aggregateNets(r);
+  // Classify every net once.
+  const upperSet = {};
+  all.forEach(function(n){ if (n.name) upperSet[n.name.toUpperCase()] = true; });
+  const counts = { power:0, ground:0, clock:0, reset:0, diff:0, signal:0 };
+  all.forEach(function(n){
+    n._class = netClass(n.name, upperSet);
+    counts[n._class] = (counts[n._class] || 0) + 1;
+  });
+  const buses = detectBuses(all.map(function(n){ return n.name || ""; }));
+
+  // Summary strip: class counts + detected buses.
+  const strip = el("div", {class:"row-actions"});
+  ["power","ground","clock","reset","diff","signal"].forEach(function(cls){
+    if (!counts[cls]) return;
+    strip.appendChild(el("span", {class:"tag " + (NET_CLASS_TAG[cls] || "muted")},
+      cls + ": " + counts[cls]));
+  });
+  summary.appendChild(strip);
+  if (buses.length) {
+    const busStrip = el("div", {class:"row-actions", style:"margin-top:6px;"});
+    busStrip.appendChild(el("span", {class:"hint"}, buses.length + " bus(es): "));
+    buses.slice(0, 12).forEach(function(b){
+      busStrip.appendChild(el("span", {class:"tag muted"},
+        b.base + "[" + b.width + "]"));
+    });
+    summary.appendChild(busStrip);
+  }
+  // Standard interfaces detected from net-name signatures.
+  const ifaces = detectInterfaces(all.map(function(n){ return n.name || ""; }));
+  if (ifaces.length) {
+    const ifStrip = el("div", {class:"row-actions", style:"margin-top:6px;"});
+    ifStrip.appendChild(el("span", {class:"hint"}, "interfaces: "));
+    ifaces.forEach(function(f){
+      const tag = el("span", {class:"tag info", style:"cursor:pointer;"},
+        f.proto);
+      tag.addEventListener("click", function(){
+        $("#net-filter").value = f.nets[0] || "";
+        renderNets();
+      });
+      ifStrip.appendChild(tag);
+    });
+    summary.appendChild(ifStrip);
+  }
+
   const filt = ($("#net-filter").value || "").toLowerCase().trim();
-  const powerOnly = $("#net-power-only").checked;
+  const classFilter = $("#net-class-filter").value;
   let rows = all;
   if (filt) {
     rows = rows.filter(function(n){
       return (n.name || "").toLowerCase().indexOf(filt) >= 0;
     });
   }
-  if (powerOnly) {
-    rows = rows.filter(function(n){ return isPowerNet(n.name); });
+  if (classFilter) {
+    rows = rows.filter(function(n){ return n._class === classFilter; });
   }
   $("#net-count").textContent = rows.length + " of " + all.length + " nets";
   if (!rows.length) {
@@ -1451,7 +1763,7 @@ function renderNets() {
   const t = el("table", {class:"data"});
   t.appendChild(el("thead", {}, el("tr", {},
     el("th", {}, "name"),
-    el("th", {}, "kind"),
+    el("th", {}, "class"),
     el("th", {class:"num"}, "pins"),
     el("th", {class:"num"}, "components"),
   )));
@@ -1463,8 +1775,7 @@ function renderNets() {
     });
     tr.appendChild(el("td", {class:"mono"}, n.name || ""));
     tr.appendChild(el("td", {},
-      el("span", {class:"tag " + (isPowerNet(n.name) ? "info" : "muted")},
-        isPowerNet(n.name) ? "power" : "signal")));
+      el("span", {class:"tag " + (NET_CLASS_TAG[n._class] || "muted")}, n._class)));
     tr.appendChild(el("td", {class:"num"},
       fmt(n.pin_count != null ? n.pin_count : n.pins)));
     tr.appendChild(el("td", {class:"num"},
@@ -2079,6 +2390,340 @@ async function pollIntent() {
   $("#intent-banner").textContent = r.intent || "";
 }
 
+/* ============================ Component helpers ============================ */
+function componentClass(designator) {
+  var m = (designator || "").match(/^[A-Za-z]+/);
+  var p = m ? m[0].toUpperCase() : "";
+  if (p === "U" || p === "IC" || p === "A") return "ic";
+  if (p === "J" || p === "P" || p === "X" || p === "CN" || p === "SW" || p === "S") return "connector";
+  if (p === "D" || p === "LED" || p === "Q" || p === "T" || p === "VR" || p === "TVS") return "semi";
+  if (p === "R" || p === "C" || p === "L" || p === "FB" || p === "RN" || p === "Y" || p === "XTAL") return "passive";
+  return "other";
+}
+
+/* ============================ Tool Catalog (Actions) ============================ */
+// The Actions tab exposes every registered MCP tool. Each row is
+// expandable; the form is auto-generated from the tool's JSON Schema so
+// the Python signature is the single source of truth -- new tools show
+// up here without a dashboard change.
+var toolState = { all: [], filter: "", ns: "all", expanded: {} };
+
+async function loadActions() {
+  if (state.loaded.actions) return;
+  const r = await fetchJSON("/api/tools");
+  // Differentiate "endpoint not loaded yet" (server stale) from "no tools".
+  if (!r || !r.ok) {
+    toolState.all = [];
+    toolState.loadError = (r && r.reason)
+      || "The MCP server has not loaded the tool catalog endpoint yet -- "
+       + "reconnect MCP (/mcp) and refresh this page.";
+  } else {
+    toolState.all = r.tools || [];
+    toolState.loadError = null;
+    state.loaded.actions = true;
+  }
+  buildNamespaceFilter();
+  renderTools();
+}
+
+function buildNamespaceFilter() {
+  const sel = $("#tool-ns-filter");
+  if (!sel) return;
+  const set = {};
+  toolState.all.forEach(function(t){ set[t.namespace] = true; });
+  sel.innerHTML = "";
+  const all = document.createElement("option");
+  all.value = "all"; all.textContent = "all namespaces";
+  sel.appendChild(all);
+  Object.keys(set).sort().forEach(function(n){
+    const o = document.createElement("option");
+    o.value = n; o.textContent = n;
+    sel.appendChild(o);
+  });
+  sel.value = toolState.ns;
+}
+
+function renderTools() {
+  const root = $("#tools-list");
+  root.innerHTML = "";
+  const q = (toolState.filter || "").toLowerCase();
+  const ns = toolState.ns;
+  const shown = toolState.all.filter(function(t){
+    if (ns !== "all" && t.namespace !== ns) return false;
+    if (!q) return true;
+    return t.name.toLowerCase().indexOf(q) >= 0
+        || (t.description || "").toLowerCase().indexOf(q) >= 0;
+  });
+  $("#tools-count").textContent =
+    shown.length + " of " + toolState.all.length + " tools";
+  if (!shown.length) {
+    if (toolState.loadError)
+      root.appendChild(el("div", {class:"empty"}, toolState.loadError));
+    else if (!toolState.all.length)
+      root.appendChild(el("div", {class:"empty"},
+        "no tools registered (this is unexpected -- the agent should expose ~200)"));
+    else
+      root.appendChild(el("div", {class:"empty"}, "no tools match this filter"));
+    return;
+  }
+  shown.forEach(function(t){ root.appendChild(toolRow(t)); });
+}
+
+function toolRow(t) {
+  const row = el("div", {class:"tool-row"});
+  const head = el("div", {class:"tool-head"});
+  head.appendChild(el("span", {class:"tool-chev"}, ">"));
+  head.appendChild(el("span", {class:"tool-name mono"}, t.name));
+  head.appendChild(el("span", {class:"tag muted"}, t.namespace));
+  if (t.mutates)
+    head.appendChild(el("span", {class:"tag warn"}, "mutates"));
+  const firstLine = (t.description || "").split("\n")[0].trim();
+  if (firstLine)
+    head.appendChild(el("span", {class:"tool-desc"}, firstLine));
+  head.addEventListener("click", function(){ toggleTool(row, t); });
+  row.appendChild(head);
+  if (toolState.expanded[t.name]) {
+    row.classList.add("open");
+    row.appendChild(buildToolBody(t));
+  }
+  return row;
+}
+
+function toggleTool(row, t) {
+  if (row.classList.contains("open")) {
+    row.classList.remove("open");
+    while (row.childNodes.length > 1) row.removeChild(row.lastChild);
+    toolState.expanded[t.name] = false;
+  } else {
+    row.classList.add("open");
+    row.appendChild(buildToolBody(t));
+    toolState.expanded[t.name] = true;
+  }
+}
+
+function buildToolBody(t) {
+  const body = el("div", {class:"tool-body"});
+  if (t.description)
+    body.appendChild(el("pre", {class:"tool-doc"}, t.description));
+  const form = el("div", {class:"tool-form"});
+  const inputs = {};
+  const schema = t.schema || {};
+  const props = schema.properties || {};
+  const required = {};
+  (schema.required || []).forEach(function(k){ required[k] = true; });
+  const keys = Object.keys(props);
+  if (!keys.length)
+    form.appendChild(el("div", {class:"hint"}, "no parameters"));
+  keys.forEach(function(key){
+    const p = props[key];
+    const made = buildParamInput(p);
+    inputs[key] = { input: made.el, kind: made.kind, schema: p,
+                    required: !!required[key] };
+    const wrap = el("div", {class:"tool-param"});
+    const head = el("div", {class:"tool-param-head"});
+    head.appendChild(el("span", {class:"tool-param-name mono"}, key));
+    head.appendChild(el("span", {class:"hint"}, paramTypeLabel(p)));
+    if (required[key])
+      head.appendChild(el("span", {class:"tag err"}, "required"));
+    wrap.appendChild(head);
+    wrap.appendChild(made.el);
+    form.appendChild(wrap);
+  });
+  body.appendChild(form);
+  const btnrow = el("div", {class:"tool-btnrow"});
+  const runBtn = el("button", {class:"tool-run"}, "Run");
+  const result = el("div", {class:"tool-result"});
+  runBtn.addEventListener("click", function(){
+    runTool(t, inputs, runBtn, result);
+  });
+  btnrow.appendChild(runBtn);
+  body.appendChild(btnrow);
+  body.appendChild(result);
+  return body;
+}
+
+function paramTypeLabel(p) {
+  if (Array.isArray(p.enum)) return "enum";
+  if (p.anyOf) return "union";
+  if (p.type === "array") {
+    const it = p.items && p.items.type;
+    return it ? "array<" + it + ">" : "array";
+  }
+  if (p.type === "object") return "object";
+  if (Array.isArray(p.type)) return p.type.join("|");
+  return p.type || "any";
+}
+
+function buildParamInput(p) {
+  if (Array.isArray(p.enum)) {
+    const sel = document.createElement("select");
+    sel.className = "tool-input";
+    p.enum.forEach(function(v){
+      const o = document.createElement("option");
+      o.value = String(v); o.textContent = String(v);
+      sel.appendChild(o);
+    });
+    if (p.default != null) sel.value = String(p.default);
+    return { el: sel, kind: "enum" };
+  }
+  const tp = Array.isArray(p.type) ? p.type[0] : p.type;
+  if (tp === "boolean") {
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.className = "tool-input tool-input-bool";
+    if (p.default === true) cb.checked = true;
+    cb.dataset.indet = "1";
+    cb.addEventListener("change", function(){ cb.dataset.indet = ""; });
+    return { el: cb, kind: "boolean" };
+  }
+  if (tp === "integer" || tp === "number") {
+    const i = document.createElement("input");
+    i.type = "number"; i.className = "tool-input";
+    if (p.default != null) i.placeholder = String(p.default);
+    return { el: i, kind: tp };
+  }
+  if (tp === "array" || tp === "object") {
+    const ta = document.createElement("textarea");
+    ta.className = "tool-input tool-input-json"; ta.rows = 3;
+    if (p.default != null)
+      ta.placeholder = JSON.stringify(p.default);
+    else
+      ta.placeholder = tp === "array" ? "[ ... ]" : "{ ... }";
+    return { el: ta, kind: "json" };
+  }
+  const i = document.createElement("input");
+  i.type = "text"; i.className = "tool-input";
+  if (p.default != null) i.placeholder = String(p.default);
+  return { el: i, kind: "string" };
+}
+
+function collectArgs(inputs) {
+  const out = {};
+  Object.keys(inputs).forEach(function(key){
+    const info = inputs[key];
+    const inp = info.input;
+    const p = info.schema;
+    const tp = Array.isArray(p.type) ? p.type[0] : p.type;
+    if (Array.isArray(p.enum)) {
+      out[key] = inp.value;
+      return;
+    }
+    if (tp === "boolean") {
+      if (!inp.dataset.indet || info.required) out[key] = !!inp.checked;
+      return;
+    }
+    const raw = (inp.value || "").trim();
+    if (raw === "") return;   // omit empty -- Optional defaults take over
+    if (tp === "integer") out[key] = parseInt(raw, 10);
+    else if (tp === "number") out[key] = parseFloat(raw);
+    else if (tp === "array" || tp === "object") {
+      try { out[key] = JSON.parse(raw); }
+      catch (e) {
+        throw new Error("'" + key + "' is not valid JSON: " + e.message);
+      }
+    }
+    else out[key] = raw;
+  });
+  return out;
+}
+
+async function runTool(t, inputs, btn, result) {
+  result.innerHTML = "";
+  var args;
+  try { args = collectArgs(inputs); }
+  catch (e) {
+    result.appendChild(el("div", {class:"empty"}, e.message));
+    return;
+  }
+  btn.disabled = true;
+  const oldLabel = btn.textContent;
+  btn.textContent = "running...";
+  const t0 = Date.now();
+  const r = await fetchJSON("/api/tool/run", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({ name: t.name, args: args }),
+  });
+  const ms = Date.now() - t0;
+  btn.disabled = false;
+  btn.textContent = oldLabel;
+  const ok = !!(r && r.ok);
+  result.innerHTML = "";
+  result.appendChild(el("div", {class:"row-actions", style:"margin-bottom:4px;"},
+    el("span", {class:"tag " + (ok ? "ok" : "err")}, ok ? "ok" : "failed"),
+    el("span", {class:"tag muted"},
+      (r && r.elapsed_ms != null ? r.elapsed_ms : ms) + "ms")));
+  if (ok) {
+    result.appendChild(el("pre", {class:"mono tool-result-data"},
+      JSON.stringify(r.data, null, 2)));
+    showToast(t.name + " ok", "ok");
+    if (t.mutates) {
+      state.data.components = null;
+      state.data.nets = null;
+    }
+  } else {
+    result.appendChild(el("div", {class:"empty"},
+      (r && r.reason) || "tool failed"));
+    showToast(t.name + " failed", "err");
+  }
+}
+
+/* ============================ Global search ============================ */
+async function globalSearch() {
+  const q = ($("#global-search").value || "").trim().toLowerCase();
+  const box = $("#global-results");
+  if (!q) { box.hidden = true; box.innerHTML = ""; box._hits = null; return; }
+  const comps = await getBomComponents();
+  const hits = [], seen = {};
+  comps.forEach(function(c){
+    const d = c.designator || "";
+    if (d && d.toLowerCase().indexOf(q) >= 0)
+      hits.push({ kind:"comp", label:d, sub:c.comment || "",
+                  exact:d.toLowerCase().indexOf(q) === 0 });
+  });
+  comps.forEach(function(c){
+    (c.pins || []).forEach(function(p){
+      const n = p.net;
+      if (n && n !== "?" && !seen[n] && n.toLowerCase().indexOf(q) >= 0) {
+        seen[n] = true;
+        hits.push({ kind:"net", label:n, sub:"net",
+                    exact:n.toLowerCase().indexOf(q) === 0 });
+      }
+    });
+  });
+  hits.sort(function(a, b){
+    if (a.exact !== b.exact) return a.exact ? -1 : 1;
+    return a.label.length - b.label.length;
+  });
+  const top = hits.slice(0, 14);
+  box.innerHTML = "";
+  if (!top.length) {
+    box.appendChild(el("div", {class:"gs-empty"}, "no match"));
+    box._hits = null;
+  } else {
+    top.forEach(function(h, i){
+      const row = el("div", {class:"gs-row" + (i === 0 ? " sel" : "")});
+      row.appendChild(el("span", {class:"tag " + (h.kind === "comp" ? "info" : "muted")},
+        h.kind));
+      row.appendChild(el("span", {class:"gs-label"}, h.label));
+      if (h.sub) row.appendChild(el("span", {class:"gs-sub"}, h.sub));
+      row.addEventListener("click", function(){ globalSearchOpen(h); });
+      box.appendChild(row);
+    });
+    box._hits = top;
+  }
+  box.hidden = false;
+}
+
+function globalSearchOpen(h) {
+  if (!h) return;
+  $("#global-results").hidden = true;
+  $("#global-search").value = "";
+  $("#global-search").blur();
+  if (h.kind === "comp") openComponentDrawer(h.label);
+  else openNetDrawer(h.label);
+}
+
 /* ============================ Theme ============================ */
 function cssVar(name) {
   return getComputedStyle(document.documentElement)
@@ -2144,12 +2789,18 @@ window.addEventListener("DOMContentLoaded", function(){
   });
   $("#refresh-tab").addEventListener("click", refreshActive);
 
-  $("#review-only-warn-err").addEventListener("change", renderReview);
-  $("#review-clear-hl").addEventListener("click", clearHighlights);
-
   $("#comp-filter").addEventListener("input", renderComponents);
+  $("#comp-class-filter").addEventListener("change", renderComponents);
   $("#net-filter").addEventListener("input", renderNets);
-  $("#net-power-only").addEventListener("change", renderNets);
+  $("#net-class-filter").addEventListener("change", renderNets);
+  $("#tool-filter").addEventListener("input", function() {
+    toolState.filter = this.value;
+    renderTools();
+  });
+  $("#tool-ns-filter").addEventListener("change", function() {
+    toolState.ns = this.value;
+    renderTools();
+  });
 
   $("#comp-export").addEventListener("click", function(){
     const r = state.data.components;
@@ -2192,22 +2843,44 @@ window.addEventListener("DOMContentLoaded", function(){
   applyTheme(document.documentElement.getAttribute("data-theme") || "dark");
   $("#theme-toggle").addEventListener("click", toggleTheme);
 
+  // Global search wiring.
+  $("#global-search").addEventListener("input", globalSearch);
+  $("#global-search").addEventListener("keydown", function(ev){
+    if (ev.key === "Enter") {
+      const hits = $("#global-results")._hits;
+      if (hits && hits.length) globalSearchOpen(hits[0]);
+    } else if (ev.key === "Escape") {
+      $("#global-results").hidden = true;
+      $("#global-search").value = "";
+      $("#global-search").blur();
+    }
+  });
+  document.addEventListener("click", function(ev){
+    if (!ev.target.closest || !ev.target.closest(".gsearch"))
+      $("#global-results").hidden = true;
+  });
+
   document.addEventListener("keydown", function(ev){
+    if (ev.key === "/" && ev.target.tagName !== "INPUT") {
+      ev.preventDefault();
+      $("#global-search").focus();
+      return;
+    }
     if (ev.target.tagName === "INPUT") return;
     if (ev.key === "Escape") $("#drawer").classList.remove("open");
     if (ev.key === "r" || ev.key === "R") refreshActive();
     if (ev.key === "t" || ev.key === "T") toggleTheme();
-    if (ev.key === "1") showTab("review");
-    if (ev.key === "2") showTab("project");
-    if (ev.key === "3") showTab("components");
-    if (ev.key === "4") showTab("nets");
-    if (ev.key === "5") showTab("libraries");
-    if (ev.key === "6") showTab("plan");
-    if (ev.key === "7") showTab("status");
+    if (ev.key === "1") showTab("project");
+    if (ev.key === "2") showTab("components");
+    if (ev.key === "3") showTab("nets");
+    if (ev.key === "4") showTab("libraries");
+    if (ev.key === "5") showTab("plan");
+    if (ev.key === "6") showTab("actions");
+    if (ev.key === "0") showTab("status");
   });
 
   connectSSE();
-  loadReview();
+  loadProject();
   pollIntent();
   pollHealth();
   setInterval(pollHealth, 3000);
