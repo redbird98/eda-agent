@@ -5,6 +5,7 @@
 import argparse
 import logging
 import sys
+import threading
 from pathlib import Path
 from typing import Optional
 from mcp.server.fastmcp import FastMCP
@@ -13,6 +14,76 @@ from .tools import register_all_tools
 from .config import get_config
 
 logger = logging.getLogger("eda_agent")
+
+
+class _ThreadAwareStdout:
+    """sys.stdout wrapper that keeps the MAIN thread's writes on the
+    real stdout (which the MCP server uses for JSON-RPC) but redirects
+    every BACKGROUND-thread write to stderr.
+
+    Lenient MCP clients (Claude Code) tolerate stray stdout bytes from
+    the dashboard thread; strict clients (Codex) see a single non-JSON
+    byte and close the transport. This wrapper makes the dashboard
+    coexist with strict-stdio clients without disabling it -- any
+    background-thread print() / write() lands on stderr where it's
+    safe, while the main thread's MCP I/O stays untouched.
+    """
+
+    __slots__ = ("_real_stdout", "_real_stderr")
+
+    def __init__(self, real_stdout, real_stderr):
+        self._real_stdout = real_stdout
+        self._real_stderr = real_stderr
+
+    def _target(self):
+        if threading.current_thread() is threading.main_thread():
+            return self._real_stdout
+        return self._real_stderr
+
+    # Required stream methods. Delegating __getattr__ alone isn't safe
+    # because some callers do isinstance checks / direct attribute peeks
+    # before writing.
+    def write(self, s):
+        return self._target().write(s)
+
+    def writelines(self, lines):
+        return self._target().writelines(lines)
+
+    def flush(self):
+        return self._target().flush()
+
+    def isatty(self):
+        return self._target().isatty()
+
+    def fileno(self):
+        return self._target().fileno()
+
+    @property
+    def buffer(self):
+        return self._target().buffer
+
+    @property
+    def encoding(self):
+        return self._target().encoding
+
+    @property
+    def errors(self):
+        return self._target().errors
+
+    def __getattr__(self, name):
+        return getattr(self._target(), name)
+
+
+def _install_stdio_guard() -> None:
+    """Replace sys.stdout with the thread-aware wrapper.
+
+    Idempotent: a second call is a no-op. Captures the original stdout
+    so the MCP main thread can keep writing JSON-RPC to it; everything
+    on background threads falls through to stderr automatically.
+    """
+    if isinstance(sys.stdout, _ThreadAwareStdout):
+        return
+    sys.stdout = _ThreadAwareStdout(sys.stdout, sys.stderr)
 
 
 def setup_logging() -> None:
@@ -157,19 +228,20 @@ def serve_mcp(no_dashboard: bool = False) -> int:
     the JSON-RPC stream. Headless mode is the safe default for those
     clients.
     """
+    # CRITICAL ORDER: install the thread-aware stdio guard BEFORE any
+    # other module gets a chance to print. Strict MCP stdio clients
+    # (Codex etc) close the transport on the first non-JSON byte. The
+    # guard sends background-thread writes to stderr while keeping the
+    # main thread's stdout intact for the MCP JSON-RPC stream.
+    _install_stdio_guard()
+    sys.stdout.flush()
+
     setup_logging()
     logger.info("Starting EDA Agent MCP Server")
 
     config = get_config()
     config.ensure_workspace()
     logger.info("Workspace directory: %s", config.workspace_dir)
-
-    # MCP protocol uses stdout for JSON-RPC. Any stray write breaks the
-    # transport. Redirect any print() / banner output to stderr for the
-    # rest of process lifetime; the FastMCP server writes through its
-    # own captured sys.stdout reference (mcp.server uses the original
-    # stdout binding it captured at import time).
-    sys.stdout.flush()
 
     # Auto-launch the web dashboard in-process. Skip for headless / strict
     # MCP clients that can't tolerate dashboard side-effects.
