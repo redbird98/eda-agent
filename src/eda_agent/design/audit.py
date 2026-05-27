@@ -308,7 +308,11 @@ def _list_sheets(bridge: Any, project_path: Optional[str]) -> list[str]:
     if project_path:
         params["project_path"] = project_path
     try:
-        result = bridge.send_command("project.get_project_documents", params)
+        # Pascal dispatcher exposes this as 'get_documents' (the Python
+        # MCP tool 'get_project_documents' wraps it). Using the wrong
+        # action name surfaces as an UNKNOWN_ACTION error in the
+        # activity feed.
+        result = bridge.send_command("project.get_documents", params)
     except Exception:
         return [""]
 

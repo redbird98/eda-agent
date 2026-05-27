@@ -38,13 +38,51 @@
   --text-mute:#a0a4ad;
   --text-dim:#6f747e;
   --accent:#7aa2f7;
+  --accent-hi:#9bbbf9;
   --accent-2:#bb9af7;
+  --on-accent:#0d0e10;
   --ok:#73d28c;
   --warn:#e0af68;
   --slow:#ff9e64;
   --err:#f7768e;
   --info:#7dcfff;
   --shadow:rgba(0,0,0,0.5);
+  --shadow-sm:0 1px 2px rgba(0,0,0,0.4);
+  --shadow-md:0 2px 6px rgba(0,0,0,0.45);
+  --shadow-lg:0 8px 24px rgba(0,0,0,0.5);
+
+  /* Spacing scale -- use these instead of one-off px values so the
+   * whole UI breathes on the same rhythm. 4/8/12/16/20/24/32. */
+  --s-0:0;
+  --s-1:4px;
+  --s-2:8px;
+  --s-3:12px;
+  --s-4:16px;
+  --s-5:20px;
+  --s-6:24px;
+  --s-7:32px;
+
+  /* Typography scale. Body is fs-base (13px). Smaller is fs-sm (12) for
+   * dense tables; fs-xs (11) for hints + secondary copy. Larger sizes
+   * are used sparingly. */
+  --fs-xs:11px;
+  --fs-sm:12px;
+  --fs-base:13px;
+  --fs-md:14px;
+  --fs-lg:16px;
+  --fs-xl:20px;
+  --fs-2xl:24px;
+
+  --fw-normal:400;
+  --fw-medium:500;
+  --fw-semibold:600;
+
+  /* Border radii. sm for chips/tags, md for buttons/inputs/cards,
+   * lg for the drawer/panels/modals. */
+  --r-sm:3px;
+  --r-md:5px;
+  --r-lg:8px;
+  --r-pill:999px;
 }
 :root[data-theme="light"] {
   --bg:#f3f4f6;
@@ -58,13 +96,18 @@
   --text-mute:#586069;
   --text-dim:#888f99;
   --accent:#2f6fd4;
+  --accent-hi:#5089e0;
   --accent-2:#7a52c8;
+  --on-accent:#ffffff;
   --ok:#1f9d4d;
   --warn:#b0780e;
   --slow:#c75d1a;
   --err:#d23952;
   --info:#16769f;
   --shadow:rgba(25,35,55,0.16);
+  --shadow-sm:0 1px 2px rgba(25,35,55,0.08);
+  --shadow-md:0 2px 8px rgba(25,35,55,0.10);
+  --shadow-lg:0 10px 28px rgba(25,35,55,0.16);
 }
 * { box-sizing:border-box; }
 html, body {
@@ -77,51 +120,101 @@ html, body {
 }
 a { color:var(--accent); text-decoration:none; }
 a:hover { text-decoration:underline; }
+/* Base button -- the default style for any <button>. Use the .btn-*
+ * modifier classes below for stronger or quieter variants. */
 button {
   background:var(--bg-card); color:var(--text);
-  border:1px solid var(--border); border-radius:5px;
-  padding:5px 10px; cursor:pointer; font-size:12px;
-  transition: background 80ms, border-color 80ms;
+  border:1px solid var(--border); border-radius:var(--r-md);
+  padding:var(--s-1) var(--s-3); cursor:pointer;
+  font-size:var(--fs-sm); font-weight:var(--fw-medium);
+  font-family:inherit;
+  transition: background 80ms, border-color 80ms, color 80ms;
 }
 button:hover { background:var(--bg-card-hi); border-color:var(--border-hi); }
+button:focus-visible {
+  outline:2px solid var(--accent); outline-offset:1px;
+}
 button:disabled { opacity:0.45; cursor:not-allowed; }
+
+/* Button variants. Apply on top of the base by adding the class. */
+.btn-primary {
+  background:var(--accent); color:var(--on-accent);
+  border-color:var(--accent);
+}
+.btn-primary:hover {
+  background:var(--accent-hi); border-color:var(--accent-hi);
+}
+.btn-ghost {
+  background:transparent; border-color:transparent;
+  color:var(--text-mute);
+}
+.btn-ghost:hover {
+  background:var(--bg-card); border-color:var(--border);
+  color:var(--text);
+}
+.btn-danger {
+  background:var(--err); color:var(--on-accent); border-color:var(--err);
+}
+.btn-danger:hover { filter:brightness(1.08); }
+.btn-sm  { padding:2px var(--s-2); font-size:var(--fs-xs); }
+.btn-lg  { padding:var(--s-2) var(--s-4); font-size:var(--fs-md); }
 input[type="text"], input[type="search"] {
   background:var(--bg); color:var(--text);
-  border:1px solid var(--border); border-radius:5px;
-  padding:6px 10px; font-size:12px;
+  border:1px solid var(--border); border-radius:var(--r-md);
+  padding:var(--s-1) var(--s-3); font-size:var(--fs-sm);
   outline:none; min-width:200px;
+  font-family:inherit;
+  transition: border-color 80ms, box-shadow 80ms;
+}
+input[type="text"]::placeholder, input[type="search"]::placeholder {
+  color:var(--text-dim);
 }
 select {
   background:var(--bg); color:var(--text);
-  border:1px solid var(--border); border-radius:5px;
-  padding:5px 8px; font-size:12px; outline:none; cursor:pointer;
+  border:1px solid var(--border); border-radius:var(--r-md);
+  padding:var(--s-1) var(--s-2); font-size:var(--fs-sm);
+  outline:none; cursor:pointer; font-family:inherit;
+  transition: border-color 80ms;
 }
-select:focus { border-color:var(--accent); }
-input[type="text"]:focus, input[type="search"]:focus {
+select:focus, input[type="text"]:focus, input[type="search"]:focus {
   border-color:var(--accent);
+  box-shadow:0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent);
 }
 .mono { font-family: "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace; }
 
 /* ---------- layout shell ---------- */
 header.shell {
   position:sticky; top:0; z-index:50;
-  background:var(--bg-elev);
+  background:linear-gradient(180deg, var(--bg-elev) 0%,
+                                     color-mix(in srgb, var(--bg-elev) 95%, var(--accent) 5%) 100%);
   border-bottom:1px solid var(--border);
-  padding:10px 18px;
-  display:flex; align-items:center; gap:18px;
+  padding:var(--s-3) var(--s-5);
+  display:flex; align-items:center; gap:var(--s-5);
+  box-shadow:var(--shadow-sm);
+  backdrop-filter:saturate(140%);
 }
 .brand {
-  font-weight:600; font-size:14px;
+  font-weight:var(--fw-semibold); font-size:var(--fs-lg);
   letter-spacing:0.2px;
+  display:flex; align-items:center; gap:var(--s-2);
+}
+.brand::before {
+  content:"";
+  width:18px; height:18px;
+  background:linear-gradient(135deg, var(--accent), var(--accent-2));
+  border-radius:var(--r-sm);
+  box-shadow:0 0 12px color-mix(in srgb, var(--accent) 60%, transparent);
 }
 .brand .v {
-  color:var(--text-dim); font-weight:400; font-size:11px; margin-left:6px;
+  color:var(--text-dim); font-weight:var(--fw-normal);
+  font-size:var(--fs-xs); letter-spacing:0.4px;
+  text-transform:uppercase;
 }
 .statuspill {
-  display:inline-flex; align-items:center; gap:6px;
-  padding:3px 10px; border-radius:999px;
+  display:inline-flex; align-items:center; gap:var(--s-2);
+  padding:var(--s-1) var(--s-3); border-radius:var(--r-pill);
   background:var(--bg-card); border:1px solid var(--border);
-  font-size:11px; color:var(--text-mute);
+  font-size:var(--fs-xs); color:var(--text-mute);
 }
 .statuspill .dot {
   width:7px; height:7px; border-radius:50%;
@@ -139,27 +232,39 @@ header.shell {
 }
 
 nav.tabs {
-  position:sticky; top:43px; z-index:40;
-  background:var(--bg);
+  position:sticky; top:52px; z-index:40;
+  background:var(--bg-elev);
   border-bottom:1px solid var(--border);
-  display:flex; gap:2px; padding:0 12px;
+  display:flex; gap:var(--s-1); padding:0 var(--s-4);
+  box-shadow:var(--shadow-sm);
 }
 nav.tabs button {
   background:transparent; border:none; border-radius:0;
-  padding:10px 14px; font-size:12px; color:var(--text-mute);
+  padding:var(--s-3) var(--s-4); font-size:var(--fs-sm);
+  font-weight:var(--fw-medium); color:var(--text-mute);
   border-bottom:2px solid transparent;
+  position:relative;
+  transition: color 140ms ease, border-color 220ms ease;
 }
+nav.tabs button:hover { color:var(--text); background:transparent; }
 nav.tabs button.active {
   color:var(--text); border-bottom-color:var(--accent);
 }
-nav.tabs button:hover { background:var(--bg-elev); }
+nav.tabs button.active::after {
+  content:""; position:absolute; left:0; right:0; bottom:-2px;
+  height:2px;
+  background:linear-gradient(90deg, transparent,
+                                    var(--accent),
+                                    transparent);
+  filter:blur(4px); opacity:0.6;
+}
 nav.tabs .spacer { flex:1; }
 nav.tabs .refresh {
-  margin:5px 4px 4px 0;
+  margin:var(--s-1) var(--s-1) var(--s-1) 0;
   padding:0; width:30px; height:26px;
   display:inline-flex; align-items:center; justify-content:center;
   background:var(--bg-card); border:1px solid var(--border);
-  border-radius:5px; color:var(--text-mute);
+  border-radius:var(--r-md); color:var(--text-mute);
 }
 
 /* Icon buttons: square, SVG centred, inherits colour via currentColor. */
@@ -173,43 +278,72 @@ nav.tabs .refresh {
 .iconbtn.sm { width:24px; height:22px; }
 
 main {
-  padding:18px;
+  padding:var(--s-5);
   max-width:1400px; margin:0 auto;
+}
+main > section { animation: pane-in 220ms ease-out; }
+@keyframes pane-in {
+  from { opacity:0; transform:translateY(4px); }
+  to   { opacity:1; transform:none; }
 }
 
 .panel {
   background:var(--bg-card); border:1px solid var(--border);
-  border-radius:8px; padding:14px 16px;
-  margin-bottom:14px;
+  border-radius:var(--r-lg); padding:var(--s-4) var(--s-5);
+  margin-bottom:var(--s-4);
+  box-shadow:var(--shadow-sm);
+  transition: border-color 140ms ease, box-shadow 140ms ease;
 }
+.panel:hover { border-color:var(--border-hi); }
 .panel h2 {
-  margin:0 0 10px; font-size:12px; font-weight:600;
-  color:var(--text-mute); text-transform:uppercase; letter-spacing:1.2px;
+  margin:0 0 var(--s-3); font-size:var(--fs-xs);
+  font-weight:var(--fw-semibold);
+  color:var(--text-mute); text-transform:uppercase; letter-spacing:1.4px;
+  display:flex; align-items:center; gap:var(--s-2);
+}
+.panel h2::before {
+  content:"";
+  width:3px; height:14px;
+  background:linear-gradient(180deg, var(--accent), var(--accent-2));
+  border-radius:var(--r-sm);
 }
 .panel h3 {
-  margin:14px 0 6px; font-size:13px; font-weight:600;
+  margin:var(--s-4) 0 var(--s-2); font-size:var(--fs-base);
+  font-weight:var(--fw-semibold);
 }
 .panel .hint {
-  color:var(--text-dim); font-size:11px;
+  color:var(--text-dim); font-size:var(--fs-xs);
 }
 
 .kpi-grid {
-  display:grid; gap:10px;
+  display:grid; gap:var(--s-3);
   grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
 }
 .kpi {
   background:var(--bg-elev); border:1px solid var(--border);
-  border-radius:6px; padding:10px 12px;
+  border-radius:var(--r-md); padding:var(--s-3) var(--s-4);
+  position:relative; overflow:hidden;
+  transition: border-color 140ms ease, transform 140ms ease;
+}
+.kpi:hover { border-color:var(--border-hi); transform:translateY(-1px); }
+.kpi::before {
+  content:""; position:absolute; left:0; top:0; bottom:0;
+  width:2px; background:linear-gradient(180deg, var(--accent), transparent);
 }
 .kpi .label {
   font-size:10px; color:var(--text-mute);
   text-transform:uppercase; letter-spacing:1.4px;
 }
 .kpi .value {
-  font-size:20px; font-weight:600;
-  margin-top:4px; font-feature-settings:"tnum";
+  font-size:var(--fs-2xl); font-weight:var(--fw-semibold);
+  margin-top:var(--s-1); font-feature-settings:"tnum";
+  background:linear-gradient(180deg, var(--text), color-mix(in srgb, var(--text) 70%, transparent));
+  -webkit-background-clip:text; background-clip:text;
 }
-.kpi .sub { font-size:11px; color:var(--text-dim); margin-top:2px; }
+.kpi .sub {
+  font-size:var(--fs-xs); color:var(--text-dim);
+  margin-top:2px;
+}
 
 table.data {
   width:100%; border-collapse:collapse; font-size:12px;
@@ -223,19 +357,21 @@ table.data thead th {
   position:sticky; top:0;
 }
 table.data tbody td {
-  padding:7px 10px; border-bottom:1px solid var(--row-border);
+  padding:var(--s-2) var(--s-3); border-bottom:1px solid var(--row-border);
   vertical-align:top;
 }
+table.data tbody tr:last-child td { border-bottom:none; }
 table.data tbody tr:hover td { background:var(--bg-elev); }
 table.data .num { text-align:right; font-feature-settings:"tnum"; }
-table.data .mono { font-size:11.5px; }
+table.data .mono { font-size:var(--fs-xs); }
 
 .tag {
   display:inline-block;
-  padding:1px 8px; border-radius:999px; font-size:10.5px;
+  padding:1px var(--s-2); border-radius:var(--r-pill);
+  font-size:10.5px;
   background:var(--bg-elev); color:var(--text-mute);
   border:1px solid var(--border);
-  font-weight:500; letter-spacing:0.3px;
+  font-weight:var(--fw-medium); letter-spacing:0.3px;
 }
 /* Tag tints are rgba so they read correctly on both themes; the text  */
 /* colour comes from the theme-specific semantic var.                  */
@@ -247,25 +383,25 @@ table.data .mono { font-size:11.5px; }
 .tag.muted { color:var(--text-dim); }
 
 .empty {
-  padding:30px 16px; text-align:center;
-  color:var(--text-dim); font-size:12px;
+  padding:var(--s-7) var(--s-4); text-align:center;
+  color:var(--text-dim); font-size:var(--fs-sm);
 }
-.empty code { color:var(--accent); font-size:11px; }
+.empty code { color:var(--accent); font-size:var(--fs-xs); }
 
 .row-actions {
-  display:flex; gap:6px; flex-wrap:wrap;
+  display:flex; gap:var(--s-2); flex-wrap:wrap; align-items:center;
 }
 .search-bar {
-  display:flex; gap:8px; align-items:center; margin-bottom:10px;
-  flex-wrap:wrap;
+  display:flex; gap:var(--s-2); align-items:center;
+  margin-bottom:var(--s-3); flex-wrap:wrap;
 }
 .search-bar .count {
-  color:var(--text-dim); font-size:11px;
+  color:var(--text-dim); font-size:var(--fs-xs);
 }
 .toolbar-right { margin-left:auto; }
 
 .split {
-  display:grid; gap:14px;
+  display:grid; gap:var(--s-4);
 }
 .split.cols-2 { grid-template-columns: 1fr 1fr; }
 .split.cols-3 { grid-template-columns: repeat(3, 1fr); }
@@ -298,46 +434,50 @@ table.data .mono { font-size:11.5px; }
 
 /* ---------- detail drawer ---------- */
 .drawer {
-  position:fixed; top:0; right:-520px; width:520px; height:100%;
+  position:fixed; top:0; right:-540px; width:540px; height:100%;
   background:var(--bg-elev); border-left:1px solid var(--border-hi);
-  box-shadow:-8px 0 28px var(--shadow);
-  transition: right 220ms ease;
+  box-shadow:var(--shadow-lg);
+  transition: right 260ms cubic-bezier(.22,.61,.36,1);
   z-index:90; display:flex; flex-direction:column;
 }
 .drawer.open { right:0; }
 .drawer header {
-  padding:12px 16px; border-bottom:1px solid var(--border);
+  padding:var(--s-3) var(--s-5);
+  border-bottom:1px solid var(--border);
   display:flex; align-items:center; justify-content:space-between;
+  background:var(--bg-card);
 }
-.drawer .body { flex:1; overflow-y:auto; padding:16px; }
+.drawer .body { flex:1; overflow-y:auto; padding:var(--s-5); }
 .drawer pre {
   background:var(--bg); border:1px solid var(--border);
-  border-radius:6px; padding:10px;
-  font-size:11px; white-space:pre-wrap; word-break:break-all;
+  border-radius:var(--r-md); padding:var(--s-3);
+  font-size:var(--fs-xs); white-space:pre-wrap; word-break:break-all;
   max-height:none;
 }
 
 /* ---------- sparkline ---------- */
 .sparkline {
-  background:var(--bg-elev); border:1px solid var(--border); border-radius:6px;
-  padding:10px 12px;
+  background:var(--bg-elev); border:1px solid var(--border);
+  border-radius:var(--r-md); padding:var(--s-3) var(--s-4);
 }
 .sparkline .label {
   font-size:10px; text-transform:uppercase; letter-spacing:1.4px;
   color:var(--text-mute);
 }
 .sparkline .value {
-  font-size:18px; font-weight:600; margin-top:2px;
+  font-size:var(--fs-xl); font-weight:var(--fw-semibold); margin-top:2px;
 }
-.sparkline svg { display:block; margin-top:4px; }
+.sparkline svg { display:block; margin-top:var(--s-1); }
 
 .toast {
-  position:fixed; bottom:14px; right:14px; z-index:80;
+  position:fixed; bottom:var(--s-4); right:var(--s-4); z-index:80;
   background:var(--bg-card); border:1px solid var(--border-hi);
-  border-radius:6px; padding:10px 14px; font-size:12px;
-  max-width:380px;
-  box-shadow:0 8px 24px var(--shadow);
+  border-radius:var(--r-md); padding:var(--s-3) var(--s-4);
+  font-size:var(--fs-sm); max-width:380px;
+  box-shadow:var(--shadow-lg);
+  animation: toast-in 180ms ease-out;
 }
+@keyframes toast-in { from { opacity:0; transform:translateY(8px); } }
 
 .gauge-grid {
   display:grid; gap:12px;
@@ -490,6 +630,168 @@ table.data .mono { font-size:11.5px; }
 }
 
 [hidden] { display:none !important; }
+
+
+/* SVG drill-in affordances. Selection persists; hover is transient.
+ * stroke/fill paint-order rules keep the highlight from washing out
+ * the underlying symbol detail -- we add a fat semi-transparent stroke
+ * underneath via stroke-paint-order:stroke fill. */
+#drawing-host svg [data-designator],
+#drawing-host svg [data-net] { cursor: pointer; }
+#drawing-host svg .svg-hover-comp { filter: drop-shadow(0 0 6px #d4a017); }
+#drawing-host svg .svg-hover-net  { filter: drop-shadow(0 0 4px #4ec9b0); }
+#drawing-host svg .svg-selected-comp {
+  filter: drop-shadow(0 0 8px #f6d35a) drop-shadow(0 0 18px rgba(246,211,90,0.35));
+}
+#drawing-host svg .svg-selected-net {
+  filter: drop-shadow(0 0 6px #4ec9b0) drop-shadow(0 0 14px rgba(78,201,176,0.35));
+}
+
+/* Schematic / PCB mode toggle pair. A simple text-button pair that
+ * shows which mode is active via background contrast. */
+.drawing-mode {
+  padding: 5px 14px; font-size: 12px; font-weight: 500;
+  background: var(--bg-card); color: var(--text-mute);
+  border: 1px solid var(--border); cursor: pointer;
+  border-radius: 0;
+}
+.drawing-mode:first-child  { border-radius: 5px 0 0 5px; }
+.drawing-mode:last-child   { border-radius: 0 5px 5px 0; margin-left: -1px; }
+.drawing-mode:hover { color: var(--text); }
+.drawing-mode.active {
+  background: var(--accent); color: var(--bg-card);
+  border-color: var(--accent);
+}
+
+/* Hover tooltip for the Drawing canvas. position:fixed so it floats
+ * above any z-context, and transform-based positioning so it stays
+ * crisp under DPI scaling. */
+.svg-tooltip {
+  position: fixed; top: 0; left: 0;
+  display: none; pointer-events: none;
+  background: var(--bg-card); color: var(--text);
+  border: 1px solid var(--border); border-radius: 5px;
+  padding: 6px 10px; max-width: 320px;
+  font-size: 12px; line-height: 1.5;
+  box-shadow: 0 4px 14px rgba(0,0,0,0.3);
+  z-index: 9999;
+}
+.svg-tooltip .t-title {
+  font-weight: 600; font-family: ui-monospace, monospace;
+  margin-bottom: 3px;
+}
+.svg-tooltip .t-row { display: flex; gap: 6px; align-items: center; }
+.svg-tooltip .t-text {
+  font-family: ui-monospace, monospace; font-size: 11px;
+  color: var(--text-dim);
+}
+.svg-tooltip .t-desc {
+  color: var(--text-dim); font-size: 11px;
+  margin-top: 3px; max-width: 300px;
+}
+.svg-tooltip .t-hint {
+  color: var(--text-dim); font-size: 11px; margin-top: 2px;
+}
+.svg-tooltip .t-action {
+  color: var(--accent); font-size: 11px; margin-top: 4px;
+  border-top: 1px solid var(--border); padding-top: 3px;
+}
+
+/* ---------- Drawing tab hero polish ---------- */
+/* Toolbar groups the mode pills, sheet picker and actions on one row
+ * with proper visual separation. */
+#drawing-mode-row {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: 2px;
+  gap: 0;
+  box-shadow: var(--shadow-sm) inset;
+}
+#drawing-status {
+  color: var(--text-dim); font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+  padding-left: var(--s-2);
+}
+
+/* Stage gets a properly framed look: gradient background, inset shadow,
+ * rounded corners so the SVG floats inside a polished frame. */
+#drawing-stage {
+  border-radius: var(--r-lg);
+  box-shadow: inset 0 0 0 1px var(--border),
+              inset 0 1px 3px rgba(0,0,0,0.18);
+  background:
+    radial-gradient(ellipse at center,
+                    var(--bg-elev) 0%,
+                    var(--bg) 80%);
+}
+#drawing-host {
+  border-radius: var(--r-lg) 0 0 var(--r-lg);
+}
+#drawing-spinner {
+  background: var(--bg-card); padding: var(--s-2) var(--s-3);
+  border: 1px solid var(--border); border-radius: var(--r-md);
+  box-shadow: var(--shadow-md);
+}
+
+/* Selection bar -- now a glowing pill at the top of the stage. */
+#drawing-selbar {
+  background: var(--bg-card)!important;
+  border: 1px solid var(--border-hi)!important;
+  border-radius: var(--r-md)!important;
+  padding: var(--s-2) var(--s-3)!important;
+  box-shadow: var(--shadow-md), 0 0 0 3px color-mix(in srgb, var(--accent) 12%, transparent);
+  font-size: var(--fs-sm)!important;
+}
+#drawing-selbar-text {
+  font-weight: var(--fw-semibold); color: var(--text);
+  font-size: var(--fs-sm);
+}
+
+/* Layer sidebar: grouped sections, colour swatches matching the SVG
+ * layer fills so the EE has a legend right where the toggles live. */
+#drawing-layers {
+  border-left: 1px solid var(--border);
+  background: var(--bg-elev);
+  font-size: var(--fs-sm);
+}
+#drawing-layers .layer-section {
+  margin-top: var(--s-3);
+  padding-top: var(--s-2);
+  border-top: 1px solid var(--row-border);
+}
+#drawing-layers .layer-section:first-child {
+  margin-top: 0; padding-top: 0; border-top: none;
+}
+#drawing-layers .layer-section-title {
+  font-size: 10px; text-transform: uppercase; letter-spacing: 1.2px;
+  color: var(--text-dim); margin-bottom: var(--s-1);
+}
+#drawing-layers label {
+  display: flex; align-items: center; gap: var(--s-2);
+  padding: var(--s-1) var(--s-1);
+  border-radius: var(--r-sm);
+  cursor: pointer; user-select: none;
+  transition: background 80ms;
+}
+#drawing-layers label:hover { background: var(--bg-card); }
+#drawing-layers .layer-swatch {
+  width: 14px; height: 10px; border-radius: 2px;
+  border: 1px solid color-mix(in srgb, currentColor 30%, transparent);
+  flex: none;
+}
+#drawing-layers .layer-name {
+  font-family: ui-monospace, monospace; font-size: var(--fs-xs);
+  flex: 1; min-width: 0;
+}
+#drawing-layers .layer-actions {
+  display: flex; gap: var(--s-1);
+  margin-bottom: var(--s-2);
+}
+#drawing-layers .layer-actions button {
+  flex: 1; padding: 2px var(--s-2);
+  font-size: var(--fs-xs); font-weight: var(--fw-medium);
+}
 </style>
 </head>
 <body>
@@ -510,7 +812,8 @@ table.data .mono { font-size:11.5px; }
 </header>
 
 <nav class="tabs" id="tabs">
-  <button data-tab="project" class="active">Project</button>
+  <button data-tab="drawing" class="active">Drawing</button>
+  <button data-tab="project">Project</button>
   <button data-tab="components">Components</button>
   <button data-tab="nets">Nets</button>
   <button data-tab="libraries">Libraries</button>
@@ -558,7 +861,59 @@ table.data .mono { font-size:11.5px; }
   </section>
 
   <!-- ========================= PROJECT TAB ========================= -->
-  <section data-pane="project">
+  <!-- ========================= DRAWING TAB ========================= -->
+  <section data-pane="drawing">
+    <div class="panel" style="margin-bottom:10px;">
+      <div class="search-bar" style="margin-bottom:0;">
+        <div class="row-actions" id="drawing-mode-row">
+          <button class="drawing-mode active" data-mode="sch">Schematic</button>
+          <button class="drawing-mode" data-mode="pcb">PCB</button>
+        </div>
+        <select id="drawing-sheet" style="min-width:240px;">
+          <option value="">(active sheet)</option>
+        </select>
+        <span class="count" id="drawing-status"></span>
+        <div class="toolbar-right row-actions">
+          <button id="drawing-refresh">refresh</button>
+          <button id="drawing-open" title="Open the SVG in a new browser tab">open ↗</button>
+        </div>
+      </div>
+    </div>
+    <div id="drawing-selbar" class="row-actions"
+         style="display:none; margin:-4px 0 6px 0; padding:4px 10px;
+                background:var(--bg-elev); border:1px solid var(--border);
+                border-radius:5px; font-size:12px; align-items:center;">
+      <span class="hint">selected:</span>
+      <span id="drawing-selbar-text" class="mono"></span>
+      <span class="spacer" style="flex:1;"></span>
+      <button id="drawing-selbar-drawer" class="iconbtn"
+              title="open drawer for this selection">open drawer</button>
+      <button id="drawing-selbar-clear" class="iconbtn"
+              title="clear selection (Esc)">clear</button>
+    </div>
+    <div class="panel" style="padding:0; overflow:hidden;">
+      <div id="drawing-stage" style="position:relative; height:78vh; min-height:520px; background:var(--bg); display:flex;">
+        <div id="drawing-host" style="flex:1; height:100%; overflow:auto;"></div>
+        <div id="drawing-layers" hidden
+             style="width:180px; border-left:1px solid var(--border);
+                    background:var(--bg-elev); overflow-y:auto;
+                    padding:10px; font-size:12px;">
+          <div style="font-weight:600; margin-bottom:8px; color:var(--text);">Layers</div>
+          <div id="drawing-layers-list">
+            <div class="empty" style="font-size:11px;">loading...</div>
+          </div>
+        </div>
+        <div id="drawing-spinner"
+             style="position:absolute; top:50%; left:50%;
+                    transform:translate(-50%,-50%);
+                    color:var(--text-dim); font-size:12px; display:none;">
+          rendering...
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section data-pane="project" hidden>
     <div class="panel" id="project-header">
       <h2>focused project</h2>
       <div id="project-header-body"><div class="empty">loading...</div></div>
@@ -572,6 +927,23 @@ table.data .mono { font-size:11.5px; }
       <div class="panel">
         <h2>documents</h2>
         <div id="project-docs"><div class="empty">loading...</div></div>
+      </div>
+    </div>
+
+    <div class="panel" id="project-health-panel">
+      <h2>design health</h2>
+      <div id="project-health-body" style="margin-top:var(--s-2);">
+        <div class="empty">loading...</div>
+      </div>
+    </div>
+
+    <div class="panel" id="project-sheets-panel" hidden>
+      <h2>sheet load</h2>
+      <div class="hint">Which sheet carries which slice of the design.
+        Identifies the dense sheets (more time per review pass) and
+        the empty / placeholder ones.</div>
+      <div id="project-sheets-body" style="margin-top:10px;">
+        <div class="empty">loading...</div>
       </div>
     </div>
 
@@ -737,18 +1109,28 @@ table.data .mono { font-size:11.5px; }
 
 <aside class="drawer" id="drawer">
   <header>
-    <div>
-      <span class="tag" id="drawer-tag">-</span>
-      <strong id="drawer-cmd" class="mono">-</strong>
+    <div style="display:flex; align-items:center; gap:8px; min-width:0; flex:1;">
+      <button class="iconbtn" id="drawer-back" title="Back (Alt+Left)"
+              aria-label="Back" hidden style="flex:none;">
+        <svg viewBox="0 0 16 16" width="14" height="14" fill="none"
+             stroke="currentColor" stroke-width="1.7" stroke-linecap="round"
+             stroke-linejoin="round">
+          <path d="M10 3L4 8l6 5"/>
+        </svg>
+      </button>
+      <span class="tag" id="drawer-tag" style="flex:none;">-</span>
+      <strong id="drawer-cmd" class="mono"
+              style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">-</strong>
     </div>
     <button class="iconbtn" id="drawer-close" title="Close (Esc)"
-            aria-label="Close">
+            aria-label="Close" style="flex:none;">
       <svg viewBox="0 0 16 16" width="14" height="14" fill="none"
            stroke="currentColor" stroke-width="1.7" stroke-linecap="round">
         <path d="M4 4l8 8M12 4l-8 8"/>
       </svg>
     </button>
   </header>
+  <div id="drawer-breadcrumb" style="padding:4px 14px 0; font-size:11px; color:var(--text-dim); display:none;"></div>
   <div class="body" id="drawer-body"></div>
 </aside>
 
@@ -817,6 +1199,8 @@ async function fetchJSON(url, opts) {
     return { ok:false, reason: e.message };
   }
 }
+// Clear any prior sessionStorage state from the old reconnect banner.
+try { sessionStorage.removeItem("missingEndpoints"); } catch (e) {}
 
 const state = {
   activeTab: "review",
@@ -856,6 +1240,7 @@ function showSub(name) {
 }
 
 async function loadTab(name) {
+  if (name === "drawing")    return loadDrawing();
   if (name === "project")    return loadProject();
   if (name === "components") return loadComponents();
   if (name === "nets")       return loadNets();
@@ -865,6 +1250,7 @@ async function loadTab(name) {
 }
 
 async function refreshActive() {
+  if (state.activeTab === "drawing") return renderDrawing();
   if (state.activeTab === "project") {
     await fetchJSON("/api/refresh/project", {method:"POST"});
     return loadProject();
@@ -918,6 +1304,46 @@ async function clearHighlights() {
   if (r && r.ok) showToast("highlights cleared", "ok");
 }
 
+/* ============================ DATASHEET LINKS ============================ */
+// Walk a component's various spots where a datasheet URL can live. Altium
+// doesn't have a single canonical field -- libraries set it differently:
+//   c.datasheet               (rare; only when the Library tab explicitly fills it)
+//   c.datasheet_url           (alt name)
+//   c.parameters.HelpURL      (most common -- F1 in the schematic editor opens this)
+//   c.parameters.Datasheet    (some SamacSys / Octopart libs)
+//   c.parameters.ComponentLink1URL ... 4URL   (Altium's stock component links)
+// We return every distinct URL found so multi-link parts (e.g. datasheet +
+// application note) surface both. Always rel="noopener" + target="_blank".
+function pickDatasheetLinks(c) {
+  if (!c) return [];
+  const out = [];
+  const seen = {};
+  function add(url, source, label) {
+    if (!url) return;
+    const u = String(url).trim();
+    if (!u) return;
+    // Allow http(s) and file:// only -- guard against javascript: etc.
+    if (!/^(https?:|file:|ftp:)/i.test(u)) return;
+    if (seen[u]) return;
+    seen[u] = true;
+    out.push({url: u, source: source, label: label || "open datasheet"});
+  }
+  add(c.datasheet, "datasheet field");
+  add(c.datasheet_url, "datasheet_url field");
+  const p = c.parameters || {};
+  add(p.HelpURL, "HelpURL", "datasheet");
+  add(p.Datasheet, "Datasheet param", "datasheet");
+  add(p.DatasheetURL, "DatasheetURL param", "datasheet");
+  // ComponentLink<N>URL pairs with ComponentLink<N>Description for label.
+  for (let i = 1; i <= 4; i++) {
+    const u = p["ComponentLink" + i + "URL"];
+    if (!u) continue;
+    const desc = p["ComponentLink" + i + "Description"] || ("link " + i);
+    add(u, "ComponentLink" + i + "URL", desc);
+  }
+  return out;
+}
+
 /* ============================ DRILL-IN DRAWERS ============================ */
 // Return the BOM component list, from whatever cache is warm; fetch only
 // if nothing is loaded. Used by the drawer to compute electrical neighbours.
@@ -967,6 +1393,7 @@ function passiveRole(c) {
 }
 
 async function openComponentDrawer(designator) {
+  pushDrawerHistory("comp", designator);
   $("#drawer-cmd").textContent = designator;
   $("#drawer-tag").textContent = "component";
   $("#drawer-tag").className = "tag info";
@@ -991,16 +1418,29 @@ async function openComponentDrawer(designator) {
   });
   body.innerHTML = "";
 
-  // Action row.
-  body.appendChild(el("div", {class:"row-actions", style:"margin-bottom:12px;"},
+  // Action row. The datasheet field on the BOM row is almost always
+  // empty in Altium projects because the URL lives in component
+  // PARAMETERS (HelpURL / ComponentLink1URL / Datasheet) rather than
+  // a first-class field. pickDatasheet walks the common spots so the
+  // drawer actually surfaces a clickable link.
+  const dsRow = el("div", {class:"row-actions", style:"margin-bottom:12px;"},
     el("button", { onclick: function(){ crossProbe(designator, "schematic"); } }, "sch jump"),
-    el("button", { onclick: function(){ crossProbe(designator, "pcb"); } }, "pcb jump"),
-    c.datasheet
-      ? el("a", {href: c.datasheet, target:"_blank", rel:"noopener",
-                 style:"display:inline-block; padding:5px 10px; background:var(--bg-card); border:1px solid var(--border); border-radius:5px; font-size:12px; color:var(--accent);"},
-          "open datasheet")
-      : null,
-  ));
+    el("button", { onclick: function(){ crossProbe(designator, "pcb"); } }, "pcb jump"));
+  const dsLinks = pickDatasheetLinks(c);
+  if (dsLinks.length) {
+    dsLinks.forEach(function(link){
+      dsRow.appendChild(el("a", {
+        href: link.url, target:"_blank", rel:"noopener",
+        title: link.source,
+        style:"display:inline-block; padding:5px 10px; background:var(--bg-card); border:1px solid var(--border); border-radius:5px; font-size:12px; color:var(--accent);"
+      }, link.label));
+    });
+  } else {
+    dsRow.appendChild(el("span", {class:"tag warn",
+      title:"No HelpURL / ComponentLink1URL / Datasheet parameter found on this component. Ask the agent to add one with set_sch_component_parameters."},
+      "no datasheet link"));
+  }
+  body.appendChild(dsRow);
 
   // Electrical insight: pin-class breakdown + passive role.
   const pinClasses = {};
@@ -1046,30 +1486,150 @@ async function openComponentDrawer(designator) {
   kv("datasheet",    c.datasheet);
   body.appendChild(core);
 
-  // Electrical neighbours: components sharing a non-power net.
-  const myNets = {};
+  // Electrical neighbours, grouped by NET. Flat-list view loses the
+  // most useful piece of context for a reviewer -- "via which signal
+  // does X talk to Y?" -- and forces a drawer-jump just to see it.
+  // Grouped view: each net the focused component touches becomes a
+  // row; row body lists the OTHER components on that net. Click the
+  // net name to highlight the net in Altium; click any designator to
+  // open its drawer; click the magnifier to locate on the SVG.
+  // Sort order: power/ground first (small group, usually big fanout),
+  // then by fanout desc so the biggest signals lead.
+  const myPinByNet = {};   // net -> array of THIS component's pin names
   pins.forEach(function(p){
-    if (p.net && p.net !== "?" && !isPowerNet(p.net)) myNets[p.net] = true;
+    if (!p.net || p.net === "?") return;
+    if (!myPinByNet[p.net]) myPinByNet[p.net] = [];
+    myPinByNet[p.net].push(p);
   });
-  const neigh = {};
+  const neighByNet = {};   // net -> { otherDes -> Set of other-pin labels }
   bom.forEach(function(oc){
     const od = oc.designator || "";
     if (!od || od === designator) return;
     (oc.pins || []).forEach(function(p){
-      if (p.net && myNets[p.net]) neigh[od] = true;
+      if (!p.net || !myPinByNet[p.net]) return;
+      if (!neighByNet[p.net]) neighByNet[p.net] = {};
+      const label = (p.des || p.designator || p.name || "?");
+      if (!neighByNet[p.net][od]) neighByNet[p.net][od] = [];
+      neighByNet[p.net][od].push(label);
     });
   });
-  const neighList = Object.keys(neigh).sort();
-  if (neighList.length) {
+  const netList = Object.keys(myPinByNet).sort(function(a, b){
+    const aPow = isPowerNet(a) || isGroundNet(a);
+    const bPow = isPowerNet(b) || isGroundNet(b);
+    if (aPow !== bPow) return aPow ? -1 : 1;
+    const an = Object.keys(neighByNet[a] || {}).length;
+    const bn = Object.keys(neighByNet[b] || {}).length;
+    return bn - an;
+  });
+  // Hide nets where this component is the only participant -- those
+  // are floating (already surfaced on the Nets tab). Drawer view of
+  // an unconnected pin is more useful in the pins table below.
+  const populated = netList.filter(function(n){
+    return Object.keys(neighByNet[n] || {}).length > 0;
+  });
+  if (populated.length) {
     body.appendChild(el("h3", {style:"margin-top:16px;"},
-      "electrical neighbours (" + neighList.length + ")"));
+      "nets + neighbours (" + populated.length + ")"));
+    const table = el("table", {class:"data", style:"font-size:12px;"});
+    table.appendChild(el("thead", {}, el("tr", {},
+      el("th", {}, "net"),
+      el("th", {class:"num"}, "my pins"),
+      el("th", {}, "other components on this net"),
+    )));
+    const tb = el("tbody", {});
+    populated.forEach(function(net){
+      const cl = netClass(net, upperSet);
+      const myPins = myPinByNet[net].map(function(p){
+        return p.des || p.designator || p.name || "?";
+      }).join(", ");
+      const others = neighByNet[net] || {};
+      const otherDess = Object.keys(others).sort();
+      const tr = el("tr", {});
+      // Net cell: clickable to highlight in Altium.
+      const netCell = el("td", {});
+      const netTag = el("span",
+        {class:"tag " + (NET_CLASS_TAG[cl] || "muted"),
+         style:"cursor:pointer; font-family:ui-monospace,monospace;",
+         title:"click: highlight this net in Altium"},
+        net);
+      netTag.addEventListener("click", function(ev){
+        ev.stopPropagation();
+        highlightNet(net);
+      });
+      netCell.appendChild(netTag);
+      tr.appendChild(netCell);
+      tr.appendChild(el("td", {class:"num mono", style:"font-size:11px;"}, myPins));
+      // Other-components cell: clickable tags.
+      const wrap = el("td", {});
+      otherDess.slice(0, 40).forEach(function(od){
+        const pinLabels = (others[od] || []).join(",");
+        const tag = el("span",
+          {class:"tag", style:"cursor:pointer; margin-right:4px;",
+           title:od + " on this net via pin(s): " + pinLabels},
+          od + (pinLabels ? " ." + pinLabels : ""));
+        tag.addEventListener("click", function(){ gotoComp(od); });
+        wrap.appendChild(tag);
+      });
+      if (otherDess.length > 40) {
+        wrap.appendChild(el("span", {class:"hint"},
+          " +" + (otherDess.length - 40) + " more"));
+      }
+      tr.appendChild(wrap);
+      tb.appendChild(tr);
+    });
+    table.appendChild(tb);
+    body.appendChild(table);
+  }
+
+  // Same-part siblings. Group BOM components by (lib_ref, value) and
+  // surface the other members so the EE sees at a glance "this is 1 of
+  // 12 identical 100nF caps" vs "this is the only 4u7 on the board".
+  // Useful for two real workflows:
+  //  (a) Sanity check -- if C1 is 100nF 0402 X7R 16V and the sibling
+  //      group has 11 others, you're looking at a stock decoupling cap.
+  //      If the group has 1 (only C1), that part might be a typo or
+  //      a one-off that needs justification.
+  //  (b) Consolidation pass -- siblings that differ only by lib_ref
+  //      flavour (e.g. "0402 cap" vs "0402 generic cap") are a smell.
+  const myKey = (c.lib_ref || "") + "|" + (c.value || c.comment || "");
+  const sibs = bom.filter(function(oc){
+    if (!oc.designator || oc.designator === designator) return false;
+    const key = (oc.lib_ref || "") + "|" + (oc.value || oc.comment || "");
+    return key === myKey && (oc.lib_ref || oc.value || oc.comment);
+  });
+  if (sibs.length) {
+    body.appendChild(el("h3", {style:"margin-top:16px;"},
+      "same-part siblings (" + sibs.length + ")"));
     const wrap = el("div", {class:"row-actions"});
-    neighList.slice(0, 60).forEach(function(d){
-      const tag = el("span", {class:"tag", style:"cursor:pointer;"}, d);
-      tag.addEventListener("click", function(){ openComponentDrawer(d); });
+    sibs.slice(0, 60).sort(function(a, b){
+      // Natural-sort designators so R1, R2, R10 not R1, R10, R2.
+      const ax = (a.designator || "").match(/(\D+)(\d+)/);
+      const bx = (b.designator || "").match(/(\D+)(\d+)/);
+      if (ax && bx && ax[1] === bx[1]) return parseInt(ax[2]) - parseInt(bx[2]);
+      return (a.designator || "").localeCompare(b.designator || "");
+    }).forEach(function(s){
+      const tag = el("span",
+        {class:"tag muted", style:"cursor:pointer;",
+         title:"same lib_ref + value as " + designator},
+        s.designator);
+      tag.addEventListener("click", function(){
+        gotoComp(s.designator);
+      });
       wrap.appendChild(tag);
     });
+    if (sibs.length > 60)
+      wrap.appendChild(el("span", {class:"hint"},
+        "+" + (sibs.length - 60) + " more"));
     body.appendChild(wrap);
+  } else if (c.lib_ref || c.value) {
+    // No siblings: surface it as a soft warning -- a unique part on a
+    // board usually warrants justification (one-off rare component,
+    // or a typo that broke an intended consolidation group).
+    body.appendChild(el("div",
+      {class:"hint", style:"margin-top:16px; padding:6px 10px; "
+       + "background:var(--bg-elev); border-radius:4px;"},
+      "unique part on this board -- no other components share this "
+      + "(lib_ref, value) combination"));
   }
 
   // Parameters.
@@ -1084,31 +1644,96 @@ async function openComponentDrawer(designator) {
     body.appendChild(grid);
   }
 
-  // Pins, with per-pin net class.
+  // Pins, with per-pin net class + role filter chips. For big-IC review
+  // the pin table can be 100+ rows; filtering by role ("just the power
+  // pins", "just the unconnected ones") is the difference between
+  // scrolling and reading.
   if (pins.length) {
-    body.appendChild(el("h3", {style:"margin-top:16px;"}, "pins (" + pins.length + ")"));
-    const t = el("table", {class:"data"});
-    t.appendChild(el("thead", {}, el("tr", {},
-      el("th", {}, "pin"), el("th", {}, "name"),
-      el("th", {}, "net"), el("th", {}, "class"),
-    )));
-    const tb = el("tbody", {});
+    // Classify every pin: power/ground (by net class OR pin-name signature),
+    // unconnected (no net), nc (deliberately NC by name), other.
+    const ncRe = /^(NC|N\.C\.|DNC|N\/C|NO[ _-]?CONNECT|RSVD|RESERVED)/i;
+    const pwrRe = /^(V(CC|DD|SS|BAT|BUS|IN|OUT|REF|IO|CORE)|[ADPNT](V(CC|DD)))(_|$|[A-Z]?[0-9])/i;
+    const gndRe = /^(GND|VSS|AGND|DGND|PGND|SGND)(_|$|[0-9])/i;
     pins.forEach(function(p){
+      const name = String(p.name || p.pin_name || "");
       const net = p.net || p.netname || "";
-      tb.appendChild(el("tr", {},
-        el("td", {class:"mono"}, p.pin || p.number || p.designator || ""),
-        el("td", {class:"mono"}, p.name || p.pin_name || ""),
-        el("td", {class:"mono"},
-          net ? el("a", {href:"#", onclick: function(ev){
-                  ev.preventDefault(); openNetDrawer(net);
-                }}, net) : ""),
-        el("td", {},
-          net ? el("span", {class:"tag " + (NET_CLASS_TAG[p._class] || "muted")},
-                  p._class) : ""),
-      ));
+      if (ncRe.test(name)) p._role = "nc";
+      else if (!net || net === "?") p._role = "unconnected";
+      else if (gndRe.test(name) || isGroundNet(net)) p._role = "ground";
+      else if (pwrRe.test(name) || isPowerNet(net)) p._role = "power";
+      else p._role = "signal";
     });
-    t.appendChild(tb);
-    body.appendChild(t);
+
+    const roleCounts = {};
+    pins.forEach(function(p){ roleCounts[p._role] = (roleCounts[p._role] || 0) + 1; });
+
+    body.appendChild(el("h3", {style:"margin-top:16px;"}, "pins (" + pins.length + ")"));
+    // Filter chips. Default "all"; clicking another chip filters.
+    const filterState = { active: "all" };
+    const chipStrip = el("div", {class:"row-actions", style:"margin-bottom:8px;"});
+    const order = ["all", "power", "ground", "signal", "unconnected", "nc"];
+    const chipRefs = {};
+    order.forEach(function(role){
+      const n = role === "all" ? pins.length : (roleCounts[role] || 0);
+      if (role !== "all" && !n) return;   // hide empty roles
+      const klass = role === "all" ? "info"
+                  : role === "power" ? "warn"
+                  : role === "ground" ? "muted"
+                  : role === "unconnected" ? "err"
+                  : role === "nc" ? "muted" : "ok";
+      const tag = el("span",
+        {class:"tag " + klass + (role === filterState.active ? "" : " muted"),
+         style:"cursor:pointer;"},
+        role + ": " + n);
+      tag.addEventListener("click", function(){
+        filterState.active = role;
+        renderPinTable();
+        order.forEach(function(r){
+          const c = chipRefs[r];
+          if (!c) return;
+          c.classList.toggle("muted", r !== filterState.active);
+        });
+      });
+      chipRefs[role] = tag;
+      chipStrip.appendChild(tag);
+    });
+    body.appendChild(chipStrip);
+
+    const tableHost = el("div", {});
+    body.appendChild(tableHost);
+
+    function renderPinTable() {
+      tableHost.innerHTML = "";
+      const visible = filterState.active === "all"
+        ? pins : pins.filter(function(p){ return p._role === filterState.active; });
+      const t = el("table", {class:"data"});
+      t.appendChild(el("thead", {}, el("tr", {},
+        el("th", {}, "pin"), el("th", {}, "name"),
+        el("th", {}, "net"), el("th", {}, "role"),
+      )));
+      const tb = el("tbody", {});
+      const roleColor = {
+        power: "warn", ground: "muted", signal: "ok",
+        unconnected: "err", nc: "muted",
+      };
+      visible.forEach(function(p){
+        const net = p.net || p.netname || "";
+        tb.appendChild(el("tr", {},
+          el("td", {class:"mono"}, p.pin || p.number || p.designator || ""),
+          el("td", {class:"mono"}, p.name || p.pin_name || ""),
+          el("td", {class:"mono"},
+            net ? el("a", {href:"#", onclick: function(ev){
+                    ev.preventDefault(); gotoNet(net);
+                  }}, net) : ""),
+          el("td", {},
+            el("span", {class:"tag " + (roleColor[p._role] || "muted")},
+              p._role)),
+        ));
+      });
+      t.appendChild(tb);
+      tableHost.appendChild(t);
+    }
+    renderPinTable();
   }
 }
 
@@ -1127,6 +1752,7 @@ function diffPartner(netName, upperSet) {
 }
 
 async function openNetDrawer(netName) {
+  pushDrawerHistory("net", netName);
   $("#drawer-cmd").textContent = netName;
   const body = $("#drawer-body");
   body.innerHTML = "<div class='empty'>collecting pins...</div>";
@@ -1201,27 +1827,96 @@ async function openNetDrawer(netName) {
     kv.appendChild(el("div", {class:"k"}, "diff partner"));
     const pv = el("div", {class:"v"});
     pv.appendChild(el("a", {href:"#", onclick: function(ev){
-      ev.preventDefault(); openNetDrawer(partner);
+      ev.preventDefault(); gotoNet(partner);
     }}, partner));
     kv.appendChild(pv);
   }
   body.appendChild(kv);
 
+  // Driver/load inference. For each pin classify its role from the pin
+  // NAME signature (which is the most stable cross-vendor source we have
+  // for SCH-only snapshots; the electrical-type field is sometimes set
+  // by the library author and sometimes not, so we don't rely on it
+  // here). Counts feed the "topology" line; per-pin role colours the
+  // connections table.
+  // Net topology rules of thumb for the EE reviewer:
+  //   power/ground:   ignore -- skip the inference, no driver concept.
+  //   exactly 1 drv:  healthy point-to-point or fanout.
+  //   0 drivers:      bug-suspect: nothing is sourcing the net.
+  //   2+ drivers:     bug-suspect unless explicitly open-drain / OD bus.
+  // OD/I2C buses are detected from pin names (SDA/SCL/INT) and exempted.
+  const skipDriverCheck = (cls === "power" || cls === "ground");
+  let drv = 0, ld = 0, bidir = 0, unk = 0;
+  const odBusRe = /\b(SDA|SCL|INT[_\-]?|OD|OPEN_DRAIN|I2C|SMB(US)?)\b/i;
+  let looksOpenDrain = false;
+  function rolePin(name) {
+    const n = String(name || "").toUpperCase();
+    if (!n) return "unk";
+    if (odBusRe.test(n)) { looksOpenDrain = true; return "bidir"; }
+    if (/\b(TX|MOSI|SCLK|SCK|MCLK|DOUT|OUT(PUT)?|_O$|Q$|N?Q|CLK_OUT|EN|OE)\b/.test(n)) return "driver";
+    if (/\b(RX|MISO|DIN|IN(PUT)?|_I$|MR|CLK_IN|D$)\b/.test(n)) return "load";
+    if (/\b(IO|GPIO|GP[0-9]|P[0-9])\b/.test(n)) return "bidir";
+    if (/\b(VCC|VDD|VSS|GND|VBAT|VREF)\b/.test(n)) return "power";
+    return "unk";
+  }
+  pins.forEach(function(p){
+    p._role = rolePin(p.pin_name);
+    if (p._role === "driver") drv++;
+    else if (p._role === "load") ld++;
+    else if (p._role === "bidir") bidir++;
+    else if (p._role !== "power") unk++;
+  });
+
+  if (pins.length && !skipDriverCheck) {
+    const topo = el("div", {class:"row-actions", style:"margin-bottom:10px;"});
+    topo.appendChild(el("span", {class:"hint"}, "topology: "));
+    if (drv) topo.appendChild(el("span", {class:"tag info"}, drv + " driver(s)"));
+    if (ld) topo.appendChild(el("span", {class:"tag muted"}, ld + " load(s)"));
+    if (bidir) topo.appendChild(el("span", {class:"tag ok"}, bidir + " bidir"));
+    if (unk) topo.appendChild(el("span", {class:"tag muted"}, unk + " unclassified"));
+    // Diagnostic chips. Skip the "multi-driver" warning when the net
+    // smells like an open-drain bus (SDA/SCL/INT lines genuinely have
+    // multiple drivers by design).
+    if (drv === 0 && (ld + bidir) > 0) {
+      topo.appendChild(el("span",
+        {class:"tag err",
+         title:"No pin on this net has an output-like name. If nothing "
+             + "drives it, the loads will float."},
+        "no driver?"));
+    } else if (drv >= 2 && !looksOpenDrain) {
+      topo.appendChild(el("span",
+        {class:"tag warn",
+         title:"Multiple output-like pins on the same net. Bus contention "
+             + "unless the bus is open-drain (then pins should be named "
+             + "SDA / SCL / INT / OD)."},
+        "multi-driver?"));
+    }
+    body.appendChild(topo);
+  }
+
   if (pins.length) {
     body.appendChild(el("h3", {style:"margin-top:16px;"}, "connections"));
     const t = el("table", {class:"data"});
     t.appendChild(el("thead", {}, el("tr", {},
-      el("th", {}, "component"), el("th", {}, "pin"), el("th", {}, "name"),
+      el("th", {}, "component"), el("th", {}, "pin"),
+      el("th", {}, "name"), el("th", {}, "role"),
     )));
     const tb = el("tbody", {});
+    const roleColor = {
+      driver: "info", load: "muted", bidir: "ok",
+      power: "warn", unk: "muted",
+    };
     pins.forEach(function(p){
       tb.appendChild(el("tr", {},
         el("td", {class:"mono"},
           el("a", {href:"#", onclick: function(ev){
-            ev.preventDefault(); openComponentDrawer(p.component);
+            ev.preventDefault(); gotoComp(p.component);
           }}, p.component || "")),
         el("td", {class:"mono"}, p.pin || ""),
         el("td", {class:"mono"}, p.pin_name || ""),
+        el("td", {},
+          el("span", {class:"tag " + (roleColor[p._role] || "muted")},
+            p._role || "unk")),
       ));
     });
     t.appendChild(tb);
@@ -1229,13 +1924,1100 @@ async function openNetDrawer(netName) {
   }
 }
 
+/* ============================ DRAWING ============================ */
+// Inline schematic + PCB SVG view. Pulls geometry through the bridge,
+// rendered server-side by eda_agent.render, embedded inline so the
+// interactive layer-toggle legend, hover effects and data-* attributes
+// stay hot.
+var drawingState = { mode: "sch", sheet: "", sheetsLoaded: false };
+
+async function loadDrawing() {
+  if (!drawingState.sheetsLoaded) await loadDrawingSheets();
+  await renderDrawing();
+}
+
+async function loadDrawingSheets() {
+  drawingState.sheetsLoaded = true;
+  const r = await fetchJSON("/api/drawing/sheets");
+  const sel = $("#drawing-sheet");
+  sel.innerHTML = '<option value="">(active sheet)</option>';
+  if (r && r.ok && Array.isArray(r.sheets)) {
+    r.sheets.forEach(function(s){
+      const o = document.createElement("option");
+      o.value = s.file_path || s.file_name || "";
+      o.textContent = s.file_name || s.file_path || "(unnamed)";
+      sel.appendChild(o);
+    });
+  }
+}
+
+async function renderDrawing() {
+  const host = $("#drawing-host");
+  const sp = $("#drawing-spinner");
+  const status = $("#drawing-status");
+  sp.style.display = "";
+  status.textContent = drawingState.mode === "pcb"
+    ? "rendering PCB..."
+    : "rendering schematic...";
+  host.innerHTML = "";
+
+  let url;
+  if (drawingState.mode === "pcb") {
+    // Suppress the inline layer-toggle legend -- the dashboard has
+    // its own sidebar that does the same job outside the SVG.
+    url = "/api/drawing/pcb?nolegend=1";
+  } else {
+    const doc = drawingState.sheet || "";
+    url = "/api/drawing/sch" + (doc ? "?doc=" + encodeURIComponent(doc) : "");
+  }
+
+  try {
+    const t0 = Date.now();
+    const resp = await fetch(url, { cache: "no-store" });
+    const ctype = resp.headers.get("Content-Type") || "";
+    const body = await resp.text();
+    if (!resp.ok || ctype.indexOf("svg") < 0) {
+      host.innerHTML = "<div class='empty' style='padding:24px;'>"
+        + "drawing endpoint did not return SVG (HTTP "
+        + resp.status + ")</div>";
+      status.textContent = "error " + resp.status;
+      return;
+    }
+    host.innerHTML = body;
+    const inserted = host.querySelector("svg");
+    if (inserted) {
+      // Let the SVG fill the stage. Keep its own aspect ratio so the
+      // viewBox math drives the canvas size.
+      inserted.setAttribute("width", "100%");
+      inserted.setAttribute("height", "100%");
+      attachZoomPan(inserted);
+      attachSvgInteractivity(inserted);
+      // PCB-only: populate the layer sidebar OUTSIDE the SVG so the
+      // toggles don't compete with the canvas for clicks, and restore
+      // the user's last layer-visibility state across renders.
+      const layerPanel = $("#drawing-layers");
+      if (drawingState.mode === "pcb") {
+        layerPanel.hidden = false;
+        loadDrawingLayers(inserted);
+      } else {
+        layerPanel.hidden = true;
+      }
+    } else {
+      host.innerHTML = "<div class='empty'>response did not contain an SVG element.</div>";
+      status.textContent = "no svg";
+      return;
+    }
+    status.textContent = (drawingState.mode === "pcb" ? "PCB " : "SCH ")
+      + "rendered in " + (Date.now() - t0) + " ms";
+  } catch (e) {
+    host.innerHTML = "<div class='empty'>render failed: "
+      + (e && e.message ? e.message : e) + "</div>";
+    status.textContent = "error";
+  } finally {
+    sp.style.display = "none";
+  }
+}
+
+function setDrawingMode(mode) {
+  if (mode !== "sch" && mode !== "pcb") return;
+  drawingState.mode = mode;
+  $$(".drawing-mode").forEach(function(b){
+    b.classList.toggle("active", b.dataset.mode === mode);
+  });
+  // Sheet picker only makes sense for schematic.
+  $("#drawing-sheet").disabled = (mode === "pcb");
+  // Carry the current selection across the mode switch -- the user's
+  // intent is "show me this same thing in the other view". Stash and
+  // re-apply after the new SVG renders. Net selections cross over too
+  // since data-net is consistent across both renderers.
+  const carry = drawingSelection ? { kind: drawingSelection.kind, name: drawingSelection.name } : null;
+  renderDrawing().then(function(){
+    if (!carry) return;
+    const host = $("#drawing-host");
+    if (!host) return;
+    const svg = host.querySelector("svg");
+    if (!svg) return;
+    const attr = carry.kind === "comp" ? "data-designator" : "data-net";
+    const sel = "[" + attr + '="' + cssEscape(carry.name) + '"]';
+    // Only re-apply if the element exists in the new mode -- a
+    // designator with no PCB footprint won't appear in PCB mode, and
+    // we'd rather drop the selection than mark something invisible.
+    if (svg.querySelector(sel)) {
+      svgLocateBySelector(svg, sel);
+      svgMarkSelected(svg, carry.kind, carry.name);
+    } else {
+      svgClearSelection();
+      showToast(carry.name + " not visible in " + mode + " view", "muted");
+    }
+  });
+}
+
+// Mouse-wheel zoom + middle/right-drag pan for an inline SVG. We mutate
+// the SVG's viewBox attribute directly so any data-* attributes the
+// renderer attached stay queryable for cross-probing later. The transform
+// is composed in world space (mils) so zoom feels uniform regardless of
+// how big the rendered sheet was. Left-click is reserved for component
+// selection (added later). Right-click pan suppresses the context menu.
+function attachZoomPan(svg) {
+  const vb0 = (svg.getAttribute("viewBox") || "").split(/\s+/).map(Number);
+  if (vb0.length !== 4 || vb0.some(isNaN)) return;
+  const state = { x: vb0[0], y: vb0[1], w: vb0[2], h: vb0[3],
+                  x0: vb0[0], y0: vb0[1], w0: vb0[2], h0: vb0[3] };
+
+  function apply() {
+    svg.setAttribute("viewBox",
+      state.x + " " + state.y + " " + state.w + " " + state.h);
+  }
+  // Programmatic zoom-to-rect, exposed so the global search bar and
+  // drawer "locate" buttons can move the view onto a designator or net.
+  svg._zoomTo = function(x, y, w, h) {
+    state.x = x; state.y = y; state.w = w; state.h = h;
+    apply();
+  };
+  function worldPoint(ev) {
+    const r = svg.getBoundingClientRect();
+    const sx = (ev.clientX - r.left) / r.width;
+    const sy = (ev.clientY - r.top) / r.height;
+    return { x: state.x + sx * state.w, y: state.y + sy * state.h };
+  }
+
+  // Wheel zoom -- zoom AT the cursor so the point under the mouse
+  // stays put. Each tick is sqrt(2), enough to feel responsive without
+  // overshooting on a single scroll.
+  svg.addEventListener("wheel", function(ev) {
+    ev.preventDefault();
+    const factor = ev.deltaY > 0 ? Math.SQRT2 : 1 / Math.SQRT2;
+    const p = worldPoint(ev);
+    state.w *= factor;
+    state.h *= factor;
+    // Clamp so we don't zoom past where the user can navigate back.
+    const maxW = state.w0 * 16;
+    const minW = state.w0 / 200;
+    if (state.w > maxW || state.h > state.h0 * 16) {
+      state.w = state.w0 * 16; state.h = state.h0 * 16;
+    }
+    if (state.w < minW || state.h < state.h0 / 200) {
+      state.w = state.w0 / 200; state.h = state.h0 / 200;
+    }
+    // Re-anchor on cursor world-point.
+    const r = svg.getBoundingClientRect();
+    const sx = (ev.clientX - r.left) / r.width;
+    const sy = (ev.clientY - r.top) / r.height;
+    state.x = p.x - sx * state.w;
+    state.y = p.y - sy * state.h;
+    apply();
+  }, { passive: false });
+
+  // Pan: hold middle or right mouse and drag. Left button stays free
+  // for the component drill-in we'll wire later.
+  let panning = null;
+  svg.addEventListener("mousedown", function(ev) {
+    if (ev.button === 0) return;  // left -- reserved for selection
+    ev.preventDefault();
+    panning = { sx: ev.clientX, sy: ev.clientY, x0: state.x, y0: state.y };
+    svg.style.cursor = "grabbing";
+  });
+  document.addEventListener("mousemove", function(ev) {
+    if (!panning) return;
+    const r = svg.getBoundingClientRect();
+    const dx = (ev.clientX - panning.sx) * (state.w / r.width);
+    const dy = (ev.clientY - panning.sy) * (state.h / r.height);
+    state.x = panning.x0 - dx;
+    state.y = panning.y0 - dy;
+    apply();
+  });
+  document.addEventListener("mouseup", function() {
+    if (!panning) return;
+    panning = null;
+    svg.style.cursor = "";
+  });
+  svg.addEventListener("contextmenu", function(ev) {
+    // We use right-click for pan; suppress the browser menu so a click
+    // that wasn't a drag doesn't surface one.
+    ev.preventDefault();
+  });
+
+  // Keyboard: 0 = reset view, +/- = zoom in/out.
+  svg.tabIndex = 0;  // make focusable so keys work without an outer listener
+  svg.addEventListener("keydown", function(ev) {
+    if (ev.key === "0") {
+      state.x = state.x0; state.y = state.y0;
+      state.w = state.w0; state.h = state.h0;
+      apply(); ev.preventDefault();
+    } else if (ev.key === "+" || ev.key === "=") {
+      const cx = state.x + state.w/2, cy = state.y + state.h/2;
+      state.w /= Math.SQRT2; state.h /= Math.SQRT2;
+      state.x = cx - state.w/2; state.y = cy - state.h/2;
+      apply(); ev.preventDefault();
+    } else if (ev.key === "-" || ev.key === "_") {
+      const cx = state.x + state.w/2, cy = state.y + state.h/2;
+      state.w *= Math.SQRT2; state.h *= Math.SQRT2;
+      state.x = cx - state.w/2; state.y = cy - state.h/2;
+      apply(); ev.preventDefault();
+    }
+  });
+}
+
+// Wire click + hover on the rendered SVG. The renderer already attaches
+// data-designator on each comp <g>, data-net on net labels / ports /
+// pads / vias / tracks, and data-layer on PCB layer groups. We surface
+// the same drill-in actions the rest of the dashboard already uses:
+//   - left-click a component group  -> openComponentDrawer(designator)
+//   - left-click a net-bearing elt  -> highlightNet(name)
+// Selection state is one designator and one net at a time, mirrored to
+// CSS classes so the user gets an immediate visual confirmation. We
+// don't open the drawer on a drag (pan), only on a clean click without
+// motion -- otherwise every pan would pop the drawer.
+function attachSvgInteractivity(svg) {
+  // Closest-ancestor lookup of an element carrying a given data-* attr.
+  function ancestorWith(el, attr) {
+    while (el && el !== svg && el.getAttribute) {
+      if (el.getAttribute(attr)) return el;
+      el = el.parentElement;
+    }
+    return null;
+  }
+  // Track mousedown coords so a click that became a drag (>5px) doesn't
+  // fire the drill-in. zoom/pan already swallows non-left buttons; this
+  // protects against a left-button accidental drag.
+  let downAt = null;
+  svg.addEventListener("mousedown", function(ev) {
+    if (ev.button !== 0) return;
+    downAt = { x: ev.clientX, y: ev.clientY };
+  });
+  svg.addEventListener("click", function(ev) {
+    if (ev.button !== 0) return;
+    if (downAt) {
+      const dx = ev.clientX - downAt.x, dy = ev.clientY - downAt.y;
+      downAt = null;
+      if (Math.hypot(dx, dy) > 5) return;   // it was a drag
+    }
+    // Component drill-in wins over net highlight when both attrs are
+    // present (e.g. clicking a pin inside a component group). The
+    // designator is the more specific signal.
+    const compEl = ancestorWith(ev.target, "data-designator");
+    if (compEl) {
+      const des = compEl.getAttribute("data-designator");
+      if (des) {
+        svgMarkSelected(svg, "comp", des);
+        openComponentDrawer(des);
+        return;
+      }
+    }
+    const netEl = ancestorWith(ev.target, "data-net");
+    if (netEl) {
+      const net = netEl.getAttribute("data-net");
+      if (net) {
+        svgMarkSelected(svg, "net", net);
+        highlightNet(net);
+      }
+    }
+  });
+  // Hover: pure CSS class swap. Cheap.
+  svg.addEventListener("mousemove", function(ev) {
+    const compEl = ancestorWith(ev.target, "data-designator");
+    const netEl = ancestorWith(ev.target, "data-net");
+    svgMarkHover(svg, compEl, netEl);
+    // Tooltip follows the mouse so the EE can scan a dense schematic
+    // without clicking through every part. Compact one-line summary;
+    // detail belongs in the drawer.
+    svgUpdateTooltip(ev, compEl, netEl);
+  });
+  svg.addEventListener("mouseleave", function() {
+    svgMarkHover(svg, null, null);
+    svgHideTooltip();
+  });
+}
+
+// Lazy-initialised single tooltip element reused across hovers. Lives
+// in the drawing-host so it's scoped to the canvas area and disappears
+// when the Drawing tab is hidden. Positioned via CSS transform for
+// crispness; updated on every mousemove with a cached "kind|key" so we
+// don't redo the BOM/nets lookup on every pixel.
+var svgTooltipState = { el: null, lastKey: "" };
+function svgUpdateTooltip(ev, compEl, netEl) {
+  let kind = null, key = null;
+  if (compEl) { kind = "comp"; key = compEl.getAttribute("data-designator"); }
+  else if (netEl) { kind = "net"; key = netEl.getAttribute("data-net"); }
+  if (!kind || !key) { svgHideTooltip(); return; }
+  if (!svgTooltipState.el) {
+    const tip = el("div", {class:"svg-tooltip"});
+    document.body.appendChild(tip);
+    svgTooltipState.el = tip;
+  }
+  const tip = svgTooltipState.el;
+  const cacheKey = kind + "|" + key;
+  if (cacheKey !== svgTooltipState.lastKey) {
+    tip.innerHTML = "";
+    tip.appendChild(buildTooltipBody(kind, key));
+    svgTooltipState.lastKey = cacheKey;
+  }
+  // Position. Offset so the cursor doesn't cover the text. Flip to the
+  // left edge if we'd overflow the viewport.
+  const pad = 14;
+  let x = ev.clientX + pad;
+  let y = ev.clientY + pad;
+  const w = tip.offsetWidth || 0;
+  const h = tip.offsetHeight || 0;
+  if (x + w + 12 > window.innerWidth)  x = ev.clientX - w - pad;
+  if (y + h + 12 > window.innerHeight) y = ev.clientY - h - pad;
+  tip.style.transform = "translate(" + x + "px, " + y + "px)";
+  tip.style.display = "block";
+}
+function svgHideTooltip() {
+  if (svgTooltipState.el) svgTooltipState.el.style.display = "none";
+  svgTooltipState.lastKey = "";
+}
+function buildTooltipBody(kind, key) {
+  const wrap = document.createDocumentFragment();
+  if (kind === "comp") {
+    const bom = (state.data.components && state.data.components.data
+                 && (state.data.components.data.bom
+                     || state.data.components.data.components)) || [];
+    const c = bom.find(function(x){ return x.designator === key; });
+    wrap.appendChild(el("div", {class:"t-title"}, key));
+    if (c) {
+      const cls = componentClass(key);
+      const line2 = [c.value || c.comment, c.footprint, c.mpn]
+        .filter(Boolean).join(" - ");
+      wrap.appendChild(el("div", {class:"t-row"},
+        el("span", {class:"tag " + (COMP_CLASS_TAG[cls] || "muted")}, cls),
+        " ", el("span", {class:"t-text"}, line2 || "(no value)")));
+      if (c.description) {
+        wrap.appendChild(el("div", {class:"t-desc"},
+          String(c.description).slice(0, 110)));
+      }
+      const pinCount = (c.pins || []).length;
+      if (pinCount) {
+        wrap.appendChild(el("div", {class:"t-hint"},
+          pinCount + " pin" + (pinCount === 1 ? "" : "s")));
+      }
+    } else {
+      wrap.appendChild(el("div", {class:"t-hint"},
+        "no BOM data -- visit Components tab to load"));
+    }
+    wrap.appendChild(el("div", {class:"t-action"}, "click: open drawer"));
+  } else {  // net
+    wrap.appendChild(el("div", {class:"t-title"}, key));
+    const upperSet = {};   // need a basic set so netClass works for diff detection
+    const list = (state.data.nets && state.data.nets.data
+                  && state.data.nets.data.nets) || [];
+    list.forEach(function(n){ if (n.name) upperSet[n.name.toUpperCase()] = true; });
+    const cls = netClass(key, upperSet);
+    const n = list.find(function(x){ return x.name === key; });
+    const pc = n ? (n.pin_count != null ? n.pin_count : n.pins) : null;
+    wrap.appendChild(el("div", {class:"t-row"},
+      el("span", {class:"tag " + (NET_CLASS_TAG[cls] || "muted")}, cls),
+      pc != null ? " " : "",
+      pc != null ? el("span", {class:"t-text"}, pc + " pin(s)") : ""));
+    wrap.appendChild(el("div", {class:"t-action"}, "click: open net drawer"));
+  }
+  return wrap;
+}
+
+// Pan + zoom the canvas onto every element matching a data-* selector
+// (used by the global search bar and the "locate" buttons in drawers).
+// Returns true if at least one element was found and the view was moved.
+// The union of all matched bounding boxes (in SVG user-space coords, which
+// for our renderer are world-space mils) becomes the new viewBox plus a
+// pad on each side so the element isn't flush against the edge.
+function svgLocateBySelector(svg, selector) {
+  if (!svg || !svg._zoomTo) return false;
+  const els = svg.querySelectorAll(selector);
+  if (!els.length) return false;
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  let any = false;
+  els.forEach(function(el){
+    let b;
+    try { b = el.getBBox(); }
+    catch (e) { return; }
+    if (!b || (b.width === 0 && b.height === 0)) return;
+    any = true;
+    if (b.x < minX) minX = b.x;
+    if (b.y < minY) minY = b.y;
+    if (b.x + b.width  > maxX) maxX = b.x + b.width;
+    if (b.y + b.height > maxY) maxY = b.y + b.height;
+  });
+  if (!any) return false;
+  // Account for the outer scale(1,-1) flip: a getBBox on a child of the
+  // flipped <g> returns coords in the WRAPPED space (post-flip). To map
+  // back to the SVG's user-space viewBox, we negate Y and swap min/max.
+  // We detect the flip by reading the wrapper transform; safer to just
+  // try both interpretations and pick whichever fits within the original
+  // viewBox bounds when projected onto the existing zoom state.
+  // -- In practice the renderer always emits scale(1,-1) when flip_y is
+  // true (default), so we apply the flip unconditionally; if a future
+  // renderer mode disables it, we'll plumb the flag through.
+  const flipped = (svg.getAttribute("data-flipped") || "1") !== "0";
+  if (flipped) {
+    const fy0 = -maxY, fy1 = -minY;
+    minY = fy0; maxY = fy1;
+  }
+  const w = Math.max(maxX - minX, 200);   // minimum view ~200 mils
+  const h = Math.max(maxY - minY, 200);
+  const pad = Math.max(w, h) * 0.4;
+  svg._zoomTo(minX - pad, minY - pad, w + 2 * pad, h + 2 * pad);
+  return true;
+}
+
+// Current Drawing-tab selection. The CSS class persists on the SVG
+// nodes; this object tracks the canonical (kind, name) for the
+// selection-bar UI + Esc-to-clear. {kind: "comp"|"net", name: "..."} or
+// null when nothing's selected.
+var drawingSelection = null;
+
+function svgMarkSelected(svg, kind, name) {
+  // Drop previous selection of the same kind, then mark new one.
+  svg.querySelectorAll(".svg-selected-" + kind).forEach(function(n){
+    n.classList.remove("svg-selected-" + kind);
+  });
+  const attr = kind === "comp" ? "data-designator" : "data-net";
+  svg.querySelectorAll('[' + attr + '="' + cssEscape(name) + '"]').forEach(function(n){
+    n.classList.add("svg-selected-" + kind);
+  });
+  drawingSelection = { kind: kind, name: name };
+  renderDrawingSelbar();
+}
+
+function svgClearSelection() {
+  const host = $("#drawing-host");
+  if (host) {
+    const svg = host.querySelector("svg");
+    if (svg) {
+      svg.querySelectorAll(".svg-selected-comp, .svg-selected-net")
+        .forEach(function(n){
+          n.classList.remove("svg-selected-comp");
+          n.classList.remove("svg-selected-net");
+        });
+    }
+  }
+  drawingSelection = null;
+  renderDrawingSelbar();
+}
+
+function renderDrawingSelbar() {
+  const bar = $("#drawing-selbar");
+  if (!bar) return;
+  if (!drawingSelection) { bar.style.display = "none"; return; }
+  bar.style.display = "flex";
+  const txt = $("#drawing-selbar-text");
+  // Lookup class for a richer label without committing to a full lookup
+  // every refresh -- bom is in state.data.components.
+  let label = drawingSelection.name;
+  if (drawingSelection.kind === "comp") {
+    const cls = componentClass(drawingSelection.name);
+    label = drawingSelection.name + "  (" + cls + ")";
+  } else {
+    const upper = {};
+    const list = (state.data.nets && state.data.nets.data
+                  && state.data.nets.data.nets) || [];
+    list.forEach(function(n){ if (n.name) upper[n.name.toUpperCase()] = true; });
+    const cls = netClass(drawingSelection.name, upper);
+    label = drawingSelection.name + "  (" + cls + " net)";
+  }
+  txt.textContent = label;
+}
+
+function svgMarkHover(svg, compEl, netEl) {
+  svg.querySelectorAll(".svg-hover-comp, .svg-hover-net").forEach(function(n){
+    n.classList.remove("svg-hover-comp");
+    n.classList.remove("svg-hover-net");
+  });
+  if (compEl) {
+    const des = compEl.getAttribute("data-designator");
+    svg.querySelectorAll('[data-designator="' + cssEscape(des) + '"]').forEach(function(n){
+      n.classList.add("svg-hover-comp");
+    });
+  } else if (netEl) {
+    const net = netEl.getAttribute("data-net");
+    if (net) {
+      svg.querySelectorAll('[data-net="' + cssEscape(net) + '"]').forEach(function(n){
+        n.classList.add("svg-hover-net");
+      });
+    }
+  }
+}
+
+// Minimal CSS.escape polyfill -- attribute selectors choke on dots,
+// slashes, and other special chars common in net names like NET/A.0.
+function cssEscape(s) {
+  if (window.CSS && CSS.escape) return CSS.escape(s);
+  return String(s).replace(/[^a-zA-Z0-9_-]/g, function(ch){
+    return "\\" + ch;
+  });
+}
+
+function openDrawingInTab() {
+  const mode = drawingState.mode;
+  const doc = drawingState.sheet || "";
+  const url = mode === "pcb"
+    ? "/api/drawing/pcb"
+    : "/api/drawing/sch" + (doc ? "?doc=" + encodeURIComponent(doc) : "");
+  window.open(url, "_blank");
+}
+
 /* ============================ PROJECT ============================ */
 async function loadProject() {
   const data = await fetchJSON("/api/project/info");
+  // Stash so other surfaces (Design Health markdown export, future
+  // diff views) can read project_name / path without re-fetching.
+  state.data.project = data;
   renderProjectHeader(data.focused, data.path);
   renderProjectStats(data.stats);
   renderProjectDocs(data.documents);
   renderProjectMessages();
+  // Health card runs the same analyzers used inline on the Components
+  // and Nets tabs. It needs BOM + nets data, which we lazy-load.
+  loadProjectHealth();
+}
+
+async function getNetsList() {
+  function extract(resp) {
+    if (!resp || !resp.ok) return null;
+    return aggregateNets(resp);
+  }
+  let list = extract(state.data.nets);
+  if (list) return list;
+  state.data.nets = await fetchJSON("/api/project/nets");
+  return extract(state.data.nets) || [];
+}
+
+async function loadProjectHealth() {
+  const root = $("#project-health-body");
+  if (!root) return;
+  let bom, nets;
+  try {
+    [bom, nets] = await Promise.all([getBomComponents(), getNetsList()]);
+  } catch (e) {
+    root.innerHTML = "";
+    root.appendChild(emptyBox("could not load BOM/nets: " + (e && e.message)));
+    return;
+  }
+  if (!bom || !bom.length) {
+    root.innerHTML = "";
+    root.appendChild(emptyBox("no BOM yet -- compile the project first"));
+    return;
+  }
+  // Pre-classify (cheap, the inline tabs do this too).
+  bom.forEach(function(c){ c._class = componentClass(c.designator || ""); });
+  const upperSet = {};
+  (nets || []).forEach(function(n){
+    if (n.name) upperSet[n.name.toUpperCase()] = true;
+  });
+  (nets || []).forEach(function(n){ n._class = netClass(n.name, upperSet); });
+
+  const dec = analyzeDecoupling(bom);
+  const dsCov = analyzeDatasheetCoverage(bom);
+  const ncIc = analyzeUnconnectedIcPins(bom);
+  const mismatch = analyzePinNetMismatch(bom);
+  const mpn = analyzeMpnConsistency(bom);
+  const hpc = analyzeHighPinIcs(bom);
+  const fpCov = analyzeFootprintCoverage(bom);
+  // Driver contention uses the flat per-pin list with pin_name and
+  // net. That shape lives at /api/project/nets (data.pins). Use it
+  // directly if available, otherwise fall back to building it from
+  // BOM (which also carries per-pin nets).
+  const flatPins = (state.data.nets && state.data.nets.data
+                    && state.data.nets.data.pins) || (function(){
+    const out = [];
+    bom.forEach(function(c){
+      (c.pins || []).forEach(function(p){
+        out.push({ component: c.designator, net: p.net,
+                   pin: p.des || p.designator, pin_name: p.name || p.pin_name });
+      });
+    });
+    return out;
+  })();
+  const cont = analyzeContentionNets(nets, flatPins);
+  const floating = (nets || []).filter(function(n){
+    const pc = n.pin_count != null ? n.pin_count : n.pins;
+    return (pc || 0) <= 1 && n.name && !isPowerNet(n.name);
+  });
+  const anonRe = /^Net[A-Z][A-Z0-9_]*_\d+$/i;
+  const anon = (nets || []).filter(function(n){
+    return n.name && anonRe.test(n.name);
+  });
+  const highFan = (nets || []).filter(function(n){
+    const pc = n.pin_count != null ? n.pin_count : n.pins;
+    return (pc || 0) >= 16;
+  });
+
+  // Each row: label, count, severity, target tab + filter when clicked.
+  // Severity tiers: ok (green), info, warn (yellow), err (red), muted.
+  function pct(num, denom) { return denom ? Math.round(100 * num / denom) : 0; }
+  const rows = [
+    {
+      label: "IC decoupling",
+      detail: dec.icCount ? (
+        dec.fullyCovered.length + "/" + dec.icCount + " ICs covered"
+      ) : "no ICs in BOM",
+      severity: !dec.icCount ? "muted"
+                : dec.missing.length ? "err"
+                : dec.partial.length ? "warn" : "ok",
+      missingCount: dec.missing.length + dec.partial.length,
+      jump: function(){
+        showTab("components");
+        // Defer so the components tab gets to render its summary first.
+        setTimeout(function(){
+          renderComponentsFiltered(bom,
+            function(c){ return dec.partialSet[c.designator]
+                             || dec.missingSet[c.designator]; },
+            "ICs with decoupling gaps");
+        }, 50);
+      },
+    },
+    {
+      label: "IC datasheets",
+      detail: dsCov.icCount ? (
+        dsCov.withDs.length + "/" + dsCov.icCount + " linked"
+      ) : "no ICs in BOM",
+      severity: !dsCov.icCount ? "muted"
+                : dsCov.withoutDs.length === 0 ? "ok"
+                : dsCov.withoutDs.length < dsCov.icCount / 2 ? "warn" : "err",
+      missingCount: dsCov.withoutDs.length,
+      jump: function(){
+        showTab("components");
+        setTimeout(function(){
+          renderComponentsFiltered(bom,
+            function(c){ return dsCov.missingSet[c.designator]; },
+            "ICs without a datasheet link");
+        }, 50);
+      },
+    },
+    {
+      label: "Footprint coverage",
+      detail: fpCov.count
+        ? fpCov.withFp.length + "/" + fpCov.count + " parts have footprints"
+        : "no components in BOM",
+      severity: !fpCov.count ? "muted"
+                : fpCov.withoutFp.length === 0 ? "ok"
+                : fpCov.withoutFp.length < fpCov.count / 4 ? "warn" : "err",
+      missingCount: fpCov.withoutFp.length,
+      jump: function(){
+        showTab("components");
+        setTimeout(function(){
+          renderComponentsFiltered(bom,
+            function(c){ return fpCov.missingSet[c.designator]; },
+            "components without a footprint");
+        }, 50);
+      },
+    },
+    {
+      label: "Driver contention",
+      detail: cont.conflicts.length
+        ? cont.conflicts.length + " net(s) with 2+ output-like pins"
+        : "no apparent contention",
+      severity: cont.conflicts.length ? "err" : "ok",
+      missingCount: cont.conflicts.length,
+      jump: function(){
+        showTab("nets");
+        setTimeout(function(){
+          renderNetsFiltered(nets,
+            function(n){ return cont.conflictSet[n.name]; },
+            "nets with possible driver contention");
+        }, 50);
+      },
+    },
+    {
+      label: "High-pin-count ICs",
+      detail: (function(){
+        const parts = [];
+        if (hpc.huge.length)   parts.push(hpc.huge.length   + " >= 200 pin");
+        if (hpc.large.length)  parts.push(hpc.large.length  + " >= 100 pin");
+        if (hpc.medium.length) parts.push(hpc.medium.length + " >= 50 pin");
+        return parts.length ? parts.join(", ") : "all ICs under 50 pins";
+      })(),
+      severity: hpc.huge.length ? "warn"
+                : (hpc.large.length || hpc.medium.length) ? "info" : "muted",
+      missingCount: hpc.huge.length + hpc.large.length + hpc.medium.length,
+      jump: function(){
+        showTab("components");
+        setTimeout(function(){
+          renderComponentsFiltered(bom,
+            function(c){ return hpc.flaggedSet[c.designator]; },
+            "ICs >= 50 pins (deserve extra review attention)");
+        }, 50);
+      },
+    },
+    {
+      label: "MPN consistency",
+      detail: mpn.conflicts.length
+        ? mpn.conflicts.length + " (lib_ref, value) group(s) with multiple MPNs"
+        : "no conflicting MPN groups",
+      severity: mpn.conflicts.length ? "err" : "ok",
+      missingCount: mpn.conflicts.length,
+      jump: function(){
+        showTab("components");
+        setTimeout(function(){
+          renderComponentsFiltered(bom,
+            function(c){ return mpn.conflictDesigSet[c.designator]; },
+            "components in MPN-conflict groups");
+        }, 50);
+      },
+    },
+    {
+      label: "Pin/net name match",
+      detail: mismatch.icCount
+        ? (mismatch.mismatched.length
+            ? mismatch.mismatched.length + " IC(s) with mismatch"
+            : "all power/ground pins on matching rails")
+        : "no ICs in BOM",
+      severity: !mismatch.icCount ? "muted"
+                : mismatch.mismatched.length ? "err" : "ok",
+      missingCount: mismatch.mismatched.length,
+      jump: function(){
+        showTab("components");
+        setTimeout(function(){
+          renderComponentsFiltered(bom,
+            function(c){ return mismatch.mismatchedSet[c.designator]; },
+            "ICs with pin/net naming mismatch");
+        }, 50);
+      },
+    },
+    {
+      label: "Unconnected IC pins",
+      detail: ncIc.unconnectedCount
+        ? (ncIc.unconnectedCount + " pin(s) across "
+           + ncIc.icsWithUnconnected.length + " IC(s)")
+        : (ncIc.icCount ? "none" : "no ICs in BOM"),
+      severity: !ncIc.icCount ? "muted"
+                : ncIc.unconnectedCount ? "err" : "ok",
+      missingCount: ncIc.icsWithUnconnected.length,
+      jump: function(){
+        showTab("components");
+        setTimeout(function(){
+          renderComponentsFiltered(bom,
+            function(c){ return ncIc.unconnectedSet[c.designator]; },
+            "ICs with unconnected pins");
+        }, 50);
+      },
+    },
+    {
+      label: "Floating nets",
+      detail: floating.length ? floating.length + " with <= 1 pin" : "none",
+      severity: floating.length ? "err" : "ok",
+      missingCount: floating.length,
+      jump: function(){
+        showTab("nets");
+        setTimeout(function(){
+          renderNetsFiltered(nets, function(n){
+            const pc = n.pin_count != null ? n.pin_count : n.pins;
+            return (pc || 0) <= 1 && n.name && !isPowerNet(n.name);
+          }, "floating nets");
+        }, 50);
+      },
+    },
+    {
+      label: "Auto-named nets",
+      detail: anon.length ? anon.length + " with NetU?_? names" : "none",
+      severity: anon.length > 30 ? "warn" : "muted",
+      missingCount: anon.length,
+      jump: function(){
+        showTab("nets");
+        setTimeout(function(){
+          renderNetsFiltered(nets,
+            function(n){ return n.name && anonRe.test(n.name); },
+            "auto-named nets");
+        }, 50);
+      },
+    },
+    {
+      label: "High-fanout nets",
+      detail: highFan.length ? highFan.length + " with >= 16 pins" : "none",
+      severity: "info",
+      missingCount: highFan.length,
+      jump: function(){
+        showTab("nets");
+        setTimeout(function(){
+          renderNetsFiltered(nets, function(n){
+            const pc = n.pin_count != null ? n.pin_count : n.pins;
+            return (pc || 0) >= 16;
+          }, "high-fanout nets");
+        }, 50);
+      },
+    },
+  ];
+
+  // Baseline counts -- set on the first render of this session so the
+  // EE can iterate (fix decoupling, recompile, refresh dashboard) and
+  // see the delta. Click "reset baseline" to snapshot the current state
+  // as the new zero.
+  if (!designHealthBaseline) {
+    designHealthBaseline = {};
+    rows.forEach(function(r){
+      designHealthBaseline[r.label] = r.missingCount || 0;
+    });
+  }
+
+  root.innerHTML = "";
+  const t = el("table", {class:"data"});
+  t.appendChild(el("thead", {}, el("tr", {},
+    el("th", {}, "signal"),
+    el("th", {}, "status"),
+    el("th", {}, "detail"),
+    el("th", {style:"width:90px;"}, "since open"),
+    el("th", {}, ""),
+  )));
+  const tb = el("tbody", {});
+  rows.forEach(function(r){
+    const tr = el("tr", {});
+    tr.appendChild(el("td", {}, r.label));
+    tr.appendChild(el("td", {},
+      el("span", {class:"tag " + r.severity},
+        r.severity === "ok" ? "clean"
+        : r.severity === "muted" ? "n/a"
+        : r.severity === "info" ? "info"
+        : r.severity === "warn" ? "review"
+        : "issue")));
+    tr.appendChild(el("td", {class:"hint"}, r.detail));
+
+    // Delta cell. Compares current missingCount to the baseline.
+    // Negative delta (count went down) = improvement = "ok" tag.
+    // Positive delta (count went up) = regression = "err" tag.
+    const cur = r.missingCount || 0;
+    const base = designHealthBaseline[r.label];
+    const dcell = el("td", {});
+    if (base != null) {
+      const delta = cur - base;
+      if (delta === 0) {
+        dcell.appendChild(el("span", {class:"hint"}, "same"));
+      } else if (delta < 0) {
+        dcell.appendChild(el("span",
+          {class:"tag ok",
+           title:"baseline was " + base + ", now " + cur},
+          delta + " (fixed)"));
+      } else {
+        dcell.appendChild(el("span",
+          {class:"tag err",
+           title:"baseline was " + base + ", now " + cur},
+          "+" + delta + " (new)"));
+      }
+    }
+    tr.appendChild(dcell);
+
+    const action = el("td", {});
+    if (r.missingCount > 0 && r.jump) {
+      const b = el("button",
+        {style:"font-size:11px;",
+         title:"jump to the relevant tab with the matching filter applied"},
+        "investigate >");
+      b.addEventListener("click", r.jump);
+      action.appendChild(b);
+    }
+    tr.appendChild(action);
+    tb.appendChild(tr);
+  });
+  t.appendChild(tb);
+  root.appendChild(t);
+
+  // Copy-report + reset-baseline buttons.
+  const tools = el("div", {class:"row-actions", style:"margin-top:10px;"});
+  const copyBtn = el("button", {style:"font-size:12px;"},
+    "copy report to clipboard");
+  copyBtn.addEventListener("click", function(){
+    const md = buildHealthMarkdown(rows, bom, nets, {
+      dec: dec, dsCov: dsCov, ncIc: ncIc, mismatch: mismatch,
+      mpn: mpn, hpc: hpc, fpCov: fpCov, cont: cont,
+    });
+    navigator.clipboard.writeText(md).then(function(){
+      showToast("review report copied (" + md.length + " chars)", "ok");
+    }).catch(function(e){
+      showToast("clipboard failed: " + e.message, "err");
+    });
+  });
+  tools.appendChild(copyBtn);
+
+  // Reset baseline: snapshot the CURRENT counts so every future delta
+  // is measured from this moment. Useful workflow: after fixing a
+  // batch of issues, click this and watch the deltas zero out.
+  const resetBtn = el("button",
+    {style:"font-size:12px;",
+     title:"Snapshot the current counts as the new baseline. Useful "
+         + "after fixing a batch of issues -- the deltas reset to zero."},
+    "reset baseline");
+  resetBtn.addEventListener("click", function(){
+    designHealthBaseline = null;   // next render rebuilds from current
+    loadProjectHealth();
+    showToast("baseline reset to current state", "ok");
+  });
+  tools.appendChild(resetBtn);
+  root.appendChild(tools);
+
+  // Sheet load breakdown -- runs from the same BOM we just analyzed.
+  renderSheetBreakdown(bom);
+}
+
+// For multi-sheet projects, group BOM by sheet name and show counts +
+// class distribution per sheet. Each row is clickable to open the
+// Components tab filtered to that sheet. Hides itself entirely for
+// single-sheet designs (no breakdown is useful when everything's on
+// one sheet).
+function renderSheetBreakdown(bom) {
+  const panel = $("#project-sheets-panel");
+  const root = $("#project-sheets-body");
+  if (!panel || !root) return;
+
+  // Bucket by sheet. Field varies between snapshot shapes -- check the
+  // usual candidates and fall back to "(unspecified)" for components
+  // that don't carry a sheet name.
+  const bySheet = {};
+  bom.forEach(function(c){
+    const sheet = c.sheet || c.document || c.document_path
+                || c.sheet_path || "(unspecified)";
+    // Shorten full paths to filename for the row label.
+    const label = sheet.split(/[\\\/]/).pop() || sheet;
+    if (!bySheet[label]) bySheet[label] = {
+      raw: sheet, items: [], counts: {ic:0, passive:0, semi:0, connector:0, other:0},
+    };
+    bySheet[label].items.push(c);
+    const cls = c._class || componentClass(c.designator || "");
+    bySheet[label].counts[cls] = (bySheet[label].counts[cls] || 0) + 1;
+  });
+  const labels = Object.keys(bySheet);
+  if (labels.length < 2) {
+    // Single sheet -- the breakdown is just "everything on one sheet",
+    // which the Components tab already shows. Hide the panel.
+    panel.hidden = true;
+    return;
+  }
+  panel.hidden = false;
+  root.innerHTML = "";
+
+  const total = bom.length;
+  // Sort: most-loaded sheet first so the heaviest review work surfaces.
+  labels.sort(function(a, b){
+    return bySheet[b].items.length - bySheet[a].items.length;
+  });
+
+  const t = el("table", {class:"data"});
+  t.appendChild(el("thead", {}, el("tr", {},
+    el("th", {}, "sheet"),
+    el("th", {class:"num"}, "components"),
+    el("th", {}, "share"),
+    el("th", {}, "by class"),
+    el("th", {}, ""),
+  )));
+  const tb = el("tbody", {});
+  labels.forEach(function(label){
+    const g = bySheet[label];
+    const n = g.items.length;
+    const pct = total ? Math.round(100 * n / total) : 0;
+    const tr = el("tr", {});
+    tr.appendChild(el("td", {class:"mono"}, label));
+    tr.appendChild(el("td", {class:"num"}, fmt(n)));
+    // Bar visualisation of share. Helps "sheet 3 has 60% of components"
+    // pop visually for the EE without needing percentages.
+    const barWrap = el("td", {style:"min-width:120px;"});
+    barWrap.appendChild(el("div",
+      {style:"display:inline-block; height:10px; background:var(--accent); "
+        + "width:" + Math.max(2, pct) + "px; vertical-align:middle; "
+        + "border-radius:2px;"}));
+    barWrap.appendChild(el("span",
+      {class:"hint", style:"margin-left:6px;"}, pct + "%"));
+    tr.appendChild(barWrap);
+    // Per-class breakdown.
+    const cls = el("td", {});
+    const order = ["ic","passive","semi","connector","other"];
+    order.forEach(function(k){
+      if (!g.counts[k]) return;
+      cls.appendChild(el("span",
+        {class:"tag " + (COMP_CLASS_TAG[k] || "muted"),
+         style:"margin-right:4px;"},
+        k + ":" + g.counts[k]));
+    });
+    tr.appendChild(cls);
+    const action = el("td", {});
+    const btn = el("button",
+      {style:"font-size:11px;",
+       title:"filter Components to this sheet"},
+      "show >");
+    btn.addEventListener("click", function(){
+      const sheetRaw = g.raw;
+      showTab("components");
+      setTimeout(function(){
+        renderComponentsFiltered(bom, function(c){
+          const s = c.sheet || c.document || c.document_path || c.sheet_path || "";
+          return s === sheetRaw;
+        }, "components on " + label);
+      }, 50);
+    });
+    action.appendChild(btn);
+    tr.appendChild(action);
+    tb.appendChild(tr);
+  });
+  t.appendChild(tb);
+  root.appendChild(t);
+}
+
+// Baseline counts for the Design Health card -- captured on the first
+// render of this dashboard session. Re-captured when the user clicks
+// "reset baseline" so the iteration cycle (fix-recompile-refresh) gets
+// fresh deltas. Cleared on page reload.
+var designHealthBaseline = null;
+
+// Render the design-health rows as a Markdown checklist plus per-signal
+// detail sections. Goal: pasteable into any review surface where it'll
+// render reasonably -- GitHub PR, Slack, JIRA, plain text email.
+function buildHealthMarkdown(rows, bom, nets, an) {
+  const sevSym = { ok: "x", info: "-", warn: "!", err: "X", muted: " " };
+  const projName = (state.data.project && state.data.project.focused
+                    && state.data.project.focused.data
+                    && state.data.project.focused.data.project_name) || "design";
+  const ts = new Date().toISOString().replace("T", " ").slice(0, 19) + " UTC";
+
+  let md = "# Design health -- " + projName + "\n";
+  md += "_Generated " + ts + " by EDA Agent dashboard._\n\n";
+  md += "## Summary\n\n";
+  rows.forEach(function(r){
+    md += "- [" + (sevSym[r.severity] || " ") + "] **" + r.label + "** -- "
+       + r.detail + "\n";
+  });
+  md += "\n";
+
+  // Per-signal detail blocks for the actionable categories. Skip the
+  // muted / clean rows; if a signal is "ok" there's nothing to list.
+  function block(title, items) {
+    if (!items || !items.length) return;
+    md += "### " + title + " (" + items.length + ")\n\n";
+    items.slice(0, 50).forEach(function(it){ md += "- " + it + "\n"; });
+    if (items.length > 50) md += "- _... and " + (items.length - 50) + " more_\n";
+    md += "\n";
+  }
+  block("ICs missing local decoupling",
+    (an.dec.missing || []).map(function(d){ return "`" + d + "`"; }));
+  block("ICs with partial decoupling",
+    (an.dec.partial || []).map(function(d){ return "`" + d + "`"; }));
+  block("ICs without datasheet link",
+    (an.dsCov.withoutDs || []).map(function(d){ return "`" + d + "`"; }));
+  block("Components without footprint",
+    (an.fpCov.withoutFp || []).map(function(d){ return "`" + d + "`"; }));
+  block("ICs with unconnected pins",
+    (an.ncIc.icsWithUnconnected || []).map(function(d){
+      return "`" + d + "`"; }));
+  block("ICs with pin/net naming mismatch",
+    (an.mismatch.mismatched || []).map(function(d){
+      return "`" + d + "`"; }));
+  block("MPN conflicts in (lib_ref, value) groups",
+    (an.mpn.conflicts || []).map(function(c){
+      return "`" + c.lib + "` -- value `" + c.val + "` -> "
+           + c.mpns.length + " MPNs: " + c.mpns.map(function(m){
+               return "`" + m + "`"; }).join(", ");
+    }));
+  block("Possible driver contention nets",
+    (an.cont.conflicts || []).map(function(c){
+      return "`" + c.net + "` -- " + c.count + " driver-like pins: "
+           + c.drivers.slice(0, 8).map(function(p){
+               return "`" + p + "`"; }).join(", ")
+           + (c.drivers.length > 8 ? ", ..." : "");
+    }));
+  block("High-pin-count ICs (>= 200 pins)",
+    (an.hpc.huge || []).map(function(d){ return "`" + d + "`"; }));
+  block("High-pin-count ICs (>= 100 pins)",
+    (an.hpc.large || []).map(function(d){ return "`" + d + "`"; }));
+
+  md += "\n_Source: ";
+  md += bom.length + " components, " + (nets || []).length + " nets._\n";
+  return md;
 }
 
 function renderProjectHeader(focused, path) {
@@ -1367,6 +3149,13 @@ function kindTag(kind) {
   return "muted";
 }
 
+// Severity-filter state persists for the lifetime of the page so a
+// reload of the messages panel doesn't reset what the user was looking
+// at. Defaults: errors + warnings on, info off (info is overwhelmingly
+// dominated by "rebuild started" / "annotation OK" lines an EE doesn't
+// need to scroll through).
+var msgFilter = { err: true, warn: true, info: false };
+
 async function renderProjectMessages() {
   const root = $("#project-messages");
   const msgs = await fetchJSON("/api/project/messages");
@@ -1380,6 +3169,40 @@ async function renderProjectMessages() {
     root.appendChild(emptyBox("no compiler messages"));
     return;
   }
+  // Classify once, count for the headline chips.
+  items.forEach(function(m){
+    m._tier = severityTag(m.class || m.severity || "");
+  });
+  const counts = { err: 0, warn: 0, info: 0 };
+  items.forEach(function(m){ counts[m._tier] = (counts[m._tier] || 0) + 1; });
+
+  // Top strip: per-tier toggle chips that show the count and act as
+  // a filter. Persistent across re-renders via msgFilter.
+  const strip = el("div", {class:"row-actions", style:"margin-bottom:10px;"});
+  strip.appendChild(el("span", {class:"hint"}, "filter: "));
+  ["err", "warn", "info"].forEach(function(tier){
+    const labels = {err: "errors", warn: "warnings", info: "info"};
+    const tag = el("span",
+      {class:"tag " + tier + (msgFilter[tier] ? "" : " muted"),
+       style:"cursor:pointer; user-select:none;",
+       title:"click to toggle"},
+      counts[tier] + " " + labels[tier] + (msgFilter[tier] ? " (on)" : " (off)"));
+    tag.addEventListener("click", function(){
+      msgFilter[tier] = !msgFilter[tier];
+      renderProjectMessages();
+    });
+    strip.appendChild(tag);
+  });
+  root.appendChild(strip);
+
+  // Filter to active tiers.
+  const visible = items.filter(function(m){ return msgFilter[m._tier]; });
+  if (!visible.length) {
+    root.appendChild(emptyBox(
+      "0 messages match the current filter -- toggle a chip above"));
+    return;
+  }
+
   const t = el("table", {class:"data"});
   t.appendChild(el("thead", {}, el("tr", {},
     el("th", {style:"width:80px;"}, "class"),
@@ -1387,11 +3210,11 @@ async function renderProjectMessages() {
     el("th", {style:"width:140px;"}, "doc"),
   )));
   const tb = el("tbody", {});
-  items.slice(0, 200).forEach(function(m){
+  visible.slice(0, 200).forEach(function(m){
     const cls = (m.class || m.severity || "").toString();
     tb.appendChild(el("tr", {},
-      el("td", {}, el("span", {class:"tag " + severityTag(cls)}, cls || "info")),
-      el("td", {}, m.message || m.text || ""),
+      el("td", {}, el("span", {class:"tag " + m._tier}, cls || m._tier)),
+      el("td", {html: linkifyMessage(m.message || m.text || "")}),
       el("td", {class:"mono", style:"color:var(--text-dim); font-size:11px;"},
         (m.document || m.doc || "").split(/[\\\/]/).pop()),
     ));
@@ -1399,6 +3222,48 @@ async function renderProjectMessages() {
   t.appendChild(tb);
   root.appendChild(t);
 }
+
+// Turn designators and net names mentioned in a compiler message into
+// clickable spans that open the matching drawer. Altium messages
+// commonly cite refdes via "[U1.5]" or "U1-5" or just "U1"; net names
+// are usually written in quotes or after "net ". We use a conservative
+// regex so prose words don't get tagged. The output is HTML; callers
+// use `html:` on el() so it's set as innerHTML.
+function linkifyMessage(text) {
+  const escaped = String(text || "")
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  // Designator: 1-4 capital letters followed by digits, word-boundary.
+  // Skip common false positives like "OK", "ERROR", "NET".
+  const skipDesigs = {OK:1, ERR:1, ERROR:1, NET:1, BUS:1, GND:1, PIN:1,
+                      ALL:1, ANY:1, DC:1, AC:1, NC:1, ON:1, OFF:1,
+                      LOW:1, HIGH:1, IO:1};
+  return escaped.replace(
+    /\b([A-Z]{1,4}\d{1,4})(\.[0-9A-Z_]+)?\b/g,
+    function(m, des, pinPart) {
+      if (skipDesigs[des]) return m;
+      return '<a href="#" class="msg-link" data-des="' + des + '" '
+           + 'title="open ' + des + ' drawer">' + m + '</a>';
+    }
+  ).replace(
+    /\b(net|Net|NET)\s+["‘’“”]?([A-Z][A-Z0-9_\/\-+]{2,})["‘’“”]?/g,
+    function(m, kw, name) {
+      return kw + ' <a href="#" class="msg-link" data-net="' + name + '" '
+           + 'title="open net drawer">' + name + '</a>';
+    }
+  );
+}
+
+// Delegated click handler. Hooked once at boot so freshly-rendered
+// messages get it automatically without re-binding.
+document.addEventListener("click", function(ev) {
+  const a = ev.target && ev.target.closest && ev.target.closest("a.msg-link");
+  if (!a) return;
+  ev.preventDefault();
+  const des = a.getAttribute("data-des");
+  const net = a.getAttribute("data-net");
+  if (des) gotoComp(des);
+  else if (net) gotoNet(net);
+});
 function severityTag(s) {
   s = (s || "").toLowerCase();
   if (s.indexOf("err") === 0) return "err";
@@ -1443,6 +3308,331 @@ function analyzeBom(comps) {
   };
 }
 
+// Group BOM by (lib_ref, value) and find groups where 2+ distinct MPNs
+// are assigned. That's almost always a bug -- two presumably-identical
+// parts pointing at different manufacturer MPNs either means one row
+// was forked (typo / accidental override) or means the design genuinely
+// wants two sources but lost the alternates table. Either way, an EE
+// reviewing the BOM should see it before the purchase pass.
+function analyzeMpnConsistency(allComps) {
+  const groups = {};   // "lib_ref|value" -> { mpns: Set, desigs: [] }
+  allComps.forEach(function(c){
+    const lib = (c.lib_ref || "").trim();
+    const val = (c.value || c.comment || "").trim();
+    const mpn = (c.mpn || c.manufacturer_part_number || "").trim();
+    if (!lib && !val) return;   // skip totally blank rows
+    if (!mpn) return;           // missing MPN handled separately
+    const key = lib + "|" + val;
+    if (!groups[key]) groups[key] = { mpns: {}, desigs: [], lib: lib, val: val };
+    groups[key].mpns[mpn] = true;
+    groups[key].desigs.push({ des: c.designator || "", mpn: mpn });
+  });
+  const conflicts = [];
+  const conflictDesigSet = {};
+  Object.keys(groups).forEach(function(k){
+    const g = groups[k];
+    const mpnList = Object.keys(g.mpns);
+    if (mpnList.length >= 2) {
+      conflicts.push({
+        lib: g.lib, val: g.val, mpns: mpnList, desigs: g.desigs,
+      });
+      g.desigs.forEach(function(d){ conflictDesigSet[d.des] = true; });
+    }
+  });
+  return { conflicts: conflicts, conflictDesigSet: conflictDesigSet };
+}
+
+// How many components have a usable footprint assigned. Without a
+// footprint Altium won't place the part on the PCB -- this is the
+// gating signal between "schematic done" and "ready to lay out".
+// Counted across all components (not just ICs) since every part with a
+// designator goes on the board.
+function analyzeFootprintCoverage(allComps) {
+  const out = { count: 0, withFp: [], withoutFp: [], missingSet: {} };
+  allComps.forEach(function(c){
+    if (!c.designator) return;
+    out.count++;
+    const fp = String(c.footprint || c.footprint_name || "").trim();
+    if (fp) out.withFp.push(c.designator);
+    else { out.withoutFp.push(c.designator);
+           out.missingSet[c.designator] = true; }
+  });
+  return out;
+}
+
+// Cross-design driver contention. Walks every net, classifies each pin
+// from its NAME (using the same rolePin signature the net drawer uses),
+// and flags nets with 2+ driver-like pins. Skips power/ground nets and
+// nets whose name matches an open-drain bus pattern (SDA/SCL/INT/I2C).
+// Same heuristic as the net-drawer topology view; this surface shows
+// the AGGREGATE so an EE can see "5 nets need contention review" at
+// the project level without drilling into every net individually.
+function analyzeContentionNets(allNets, allPins) {
+  const driverRe = /\b(TX|MOSI|SCLK|SCK|MCLK|DOUT|OUT(PUT)?|_O$|Q$|N?Q|CLK_OUT|EN|OE)\b/i;
+  const odBusRe = /\b(SDA|SCL|INT[_\-]?|OD|OPEN_DRAIN|I2C|SMB(US)?)\b/i;
+  // Index pins by net name.
+  const byNet = {};
+  (allPins || []).forEach(function(p){
+    if (!p || !p.net) return;
+    if (!byNet[p.net]) byNet[p.net] = [];
+    byNet[p.net].push(p);
+  });
+  const upperSet = {};
+  (allNets || []).forEach(function(n){
+    if (n.name) upperSet[n.name.toUpperCase()] = true;
+  });
+  const conflicts = [];
+  const conflictSet = {};
+  Object.keys(byNet).forEach(function(net){
+    const cls = netClass(net, upperSet);
+    if (cls === "power" || cls === "ground") return;
+    if (odBusRe.test(net)) return;
+    let driverCount = 0;
+    const drivers = [];
+    byNet[net].forEach(function(p){
+      const name = p.pin_name || p.name || "";
+      if (driverRe.test(String(name))) {
+        driverCount++;
+        drivers.push((p.component || "?") + "." + (p.pin || p.designator || "?"));
+      }
+    });
+    if (driverCount >= 2) {
+      conflicts.push({ net: net, count: driverCount, drivers: drivers });
+      conflictSet[net] = true;
+    }
+  });
+  return { conflicts: conflicts, conflictSet: conflictSet };
+}
+
+// Surface ICs with high pin counts. These warrant disproportionate
+// review effort: more pinouts to verify against datasheet, more power
+// pins to decouple, more nets they participate in. Tiers are heuristic
+// thresholds matching typical part classes:
+//   >=200  : large FPGAs, big SoCs, advanced microcontrollers
+//   >=100  : full-feature MCUs, mid-tier FPGAs, complex ASSPs
+//   >=50   : 32-bit MCUs, ADCs, motor controllers, mid-pin ICs
+// Below 50 is "normal IC" territory and not flagged.
+function analyzeHighPinIcs(allComps) {
+  const out = {
+    icCount: 0,
+    huge: [], hugeSet: {},         // >= 200
+    large: [], largeSet: {},       // >= 100
+    medium: [], mediumSet: {},     // >= 50
+    flaggedSet: {},                // union for the "investigate" filter
+  };
+  allComps.forEach(function(c){
+    if (c._class !== "ic") return;
+    out.icCount++;
+    const pc = (c.pins || []).length
+            || (c.pin_count != null ? c.pin_count : 0);
+    if (!pc) return;
+    const des = c.designator || "";
+    if (pc >= 200) { out.huge.push(des); out.hugeSet[des] = true;
+                     out.flaggedSet[des] = true; }
+    else if (pc >= 100) { out.large.push(des); out.largeSet[des] = true;
+                          out.flaggedSet[des] = true; }
+    else if (pc >= 50) { out.medium.push(des); out.mediumSet[des] = true;
+                         out.flaggedSet[des] = true; }
+  });
+  return out;
+}
+
+// Find ICs where at least one pin's name implies a power/ground role
+// (VCC, VDD, VBAT, VREF, GND, VSS, ...) but its net is NOT a matching
+// rail. Returns { mismatched: [designators], mismatchedSet, icCount }.
+// The check is intentionally conservative: only flags clear-cut name
+// signatures so a custom "VCC_INT" pin that's wired to "+3V3_REGD"
+// doesn't false-positive (both are power, the regex still matches "VCC"
+// and isPowerNet("+3V3_REGD") returns true).
+function analyzePinNetMismatch(allComps) {
+  const out = { icCount: 0, mismatched: [], mismatchedSet: {} };
+  // Conservative power-pin signature -- start of name, with optional
+  // analog/digital/peripheral prefix letter. Matches VCC, VDD, AVCC,
+  // AVDD, DVCC, DVDD, PVDD, NVDD, VBAT, VBUS, VIN, VREF, VAA, etc.
+  const powerNameRe =
+    /^(V(CC|DD|BAT|BUS|IN|REF|AA|CORE)|[ADPNT](V(CC|DD)))(_|$|[A-Z]?[0-9])/i;
+  const groundNameRe = /^(GND|VSS|AGND|DGND|PGND|SGND|VSSA?)(_|$|[0-9])/i;
+  allComps.forEach(function(c){
+    if (c._class !== "ic") return;
+    out.icCount++;
+    let hit = false;
+    (c.pins || []).forEach(function(p){
+      if (!p || !p.name || !p.net) return;
+      const isPwrName = powerNameRe.test(String(p.name));
+      const isGndName = groundNameRe.test(String(p.name));
+      if (!isPwrName && !isGndName) return;
+      const onPower = isPowerNet(p.net);
+      const onGround = isGroundNet(p.net);
+      if (isGndName && !onGround) { hit = true; return; }
+      if (isPwrName && !isGndName && !onPower) { hit = true; return; }
+    });
+    if (hit) {
+      const des = c.designator || "";
+      out.mismatched.push(des);
+      out.mismatchedSet[des] = true;
+    }
+  });
+  return out;
+}
+
+// Walk every IC's parameters via the existing pickDatasheetLinks helper,
+// which already understands the Altium-side spots a datasheet URL can
+// live (HelpURL, Datasheet, ComponentLink1URL..4URL). Returns lookup
+// sets so the click chip can filter the table.
+function analyzeDatasheetCoverage(allComps) {
+  const out = {
+    icCount: 0, withDs: [], withoutDs: [],
+    missingSet: {},
+  };
+  allComps.forEach(function(c){
+    if (c._class !== "ic") return;
+    out.icCount++;
+    const links = pickDatasheetLinks(c);
+    const des = c.designator || "";
+    if (links.length) out.withDs.push(des);
+    else { out.withoutDs.push(des); out.missingSet[des] = true; }
+  });
+  return out;
+}
+
+// Find IC pins with no net (empty, null, or the placeholder "?" we use
+// when the compile didn't assign one). Skip pins whose name strongly
+// looks like an explicit NC marker -- "NC", "DNC", "n/c", "NoConnect"
+// -- since those are deliberately unconnected by the part designer.
+function analyzeUnconnectedIcPins(allComps) {
+  const ncNameRe = /^(NC|N\.C\.|DNC|N\/C|NO[ _-]?CONNECT|RSVD|RESERVED)/i;
+  const out = {
+    icCount: 0, unconnectedCount: 0,
+    icsWithUnconnected: [], unconnectedSet: {},
+  };
+  allComps.forEach(function(c){
+    if (c._class !== "ic") return;
+    out.icCount++;
+    let badPins = 0;
+    (c.pins || []).forEach(function(p){
+      if (!p) return;
+      // Skip pins the part designer marked NC -- those are not bugs.
+      if (p.name && ncNameRe.test(String(p.name))) return;
+      const net = p.net;
+      const empty = net == null || net === "" || net === "?";
+      if (empty) badPins++;
+    });
+    if (badPins > 0) {
+      const des = c.designator || "";
+      out.icsWithUnconnected.push(des);
+      out.unconnectedSet[des] = true;
+      out.unconnectedCount += badPins;
+    }
+  });
+  return out;
+}
+
+// For each IC, look at every pin whose net looks like a power/ground rail
+// (or whose pin NAME matches a power-pin signature -- VCC, VDD, VBAT, etc.).
+// A power pin is "covered" iff at least one capacitor (designator starts
+// with C) shares that net. ICs are bucketed:
+//   fullyCovered: every power pin has >=1 cap on its net.
+//   partial:      some power pins covered, some not.
+//   missing:      no power pin has any cap on its net.
+// Returns counts + lookup sets for the click-to-list filter.
+function analyzeDecoupling(allComps) {
+  // Build net -> set of cap designators index.
+  const capByNet = {};
+  allComps.forEach(function(c){
+    const d = c.designator || "";
+    if (!/^C/i.test(d)) return;   // capacitors only
+    (c.pins || []).forEach(function(p){
+      if (!p || !p.net) return;
+      const n = String(p.net);
+      if (!capByNet[n]) capByNet[n] = [];
+      capByNet[n].push(d);
+    });
+  });
+  // Power-pin name pattern: covers VCC, VDD, VSS, GND, V+, V-, AVDD,
+  // DVDD, AVCC, DVCC, VBAT, VREF, VIO, VCORE, VLDO, VBUS, VREG, AVSS,
+  // DVSS, PVDD, NVDD, etc. The point isn't to be exhaustive -- the
+  // point is to catch the obvious cases an EE wants flagged.
+  const powerPinRe = /^(V(CC|DD|SS|BAT|REF|IO|CORE|BUS|LDO|REG|IN|OUT)|VR?\+|V-|[ADP](VCC|VDD|VSS|GND)|GND|VDDA?|VSSA?)/i;
+  function pinIsPower(p) {
+    if (!p) return false;
+    if (p.net && (isPowerNet(p.net) || isGroundNet(p.net))) return true;
+    if (p.name && powerPinRe.test(p.name)) return true;
+    return false;
+  }
+  const out = {
+    icCount: 0,
+    fullyCovered: [], partial: [], missing: [],
+    fullySet: {}, partialSet: {}, missingSet: {},
+  };
+  allComps.forEach(function(c){
+    if (c._class !== "ic") return;
+    const pins = c.pins || [];
+    // Power pins of THIS component, mapped to coverage flag.
+    const powerPins = pins.filter(pinIsPower);
+    if (!powerPins.length) return;   // no recognised power pins; skip
+    out.icCount++;
+    const covered = powerPins.filter(function(p){
+      return p.net && (capByNet[p.net] || []).length > 0;
+    });
+    const des = c.designator || "";
+    if (covered.length === powerPins.length) {
+      out.fullyCovered.push(des); out.fullySet[des] = true;
+    } else if (covered.length === 0) {
+      out.missing.push(des); out.missingSet[des] = true;
+    } else {
+      out.partial.push(des); out.partialSet[des] = true;
+    }
+  });
+  return out;
+}
+
+// Generic subset-view for the Components table -- mirrors the Nets-tab
+// counterpart. Banner names the subset and offers "show all" reset.
+function renderComponentsFiltered(allComps, pred, subsetLabel) {
+  const root = $("#comp-body");
+  root.innerHTML = "";
+  const rows = allComps.filter(pred);
+  const banner = el("div", {class:"row-actions", style:"margin-bottom:8px;"});
+  banner.appendChild(el("span", {class:"hint"},
+    "viewing " + rows.length + " " + subsetLabel + ":"));
+  const back = el("button", {style:"font-size:12px;"}, "show all");
+  back.addEventListener("click", function(){ renderComponents(); });
+  banner.appendChild(back);
+  root.appendChild(banner);
+  if (!rows.length) {
+    root.appendChild(emptyBox("none in this subset"));
+    return;
+  }
+  const cols = pickColumns(rows[0], [
+    "designator", "comment", "value", "footprint",
+    "manufacturer", "mpn", "description", "quantity", "library", "lib_ref",
+  ]);
+  const t = el("table", {class:"data"});
+  const head = el("tr", {});
+  head.appendChild(el("th", {}, "class"));
+  cols.forEach(function(c){ head.appendChild(el("th", {}, c)); });
+  t.appendChild(el("thead", {}, head));
+  const tb = el("tbody", {});
+  rows.slice(0, 600).forEach(function(row){
+    const tr = el("tr", {style:"cursor:pointer;"});
+    tr.addEventListener("click", function(){
+      if (row.designator) gotoComp(row.designator);
+    });
+    tr.appendChild(el("td", {},
+      el("span", {class:"tag " + (COMP_CLASS_TAG[row._class] || "muted")},
+        row._class)));
+    cols.forEach(function(c){
+      const isMono = ["designator","footprint","mpn","lib_ref"].indexOf(c) >= 0;
+      tr.appendChild(el("td", {class: isMono ? "mono" : ""},
+        renderCellValue(row[c], c)));
+    });
+    tb.appendChild(tr);
+  });
+  t.appendChild(tb);
+  root.appendChild(t);
+  $("#comp-count").textContent = rows.length + " (" + subsetLabel + ")";
+}
+
 function renderComponents() {
   const root = $("#comp-body");
   const summary = $("#comp-summary");
@@ -1482,6 +3672,130 @@ function renderComponents() {
       title:"Values used by exactly one component -- consolidation candidates"},
       bomA.singleUse + " single-use values"));
   summary.appendChild(aStrip);
+
+  // Datasheet coverage: how many ICs actually have a datasheet link the
+  // dashboard can resolve. Without a datasheet the agent can't review
+  // pinout / ratings / behaviour and the user has to do it manually,
+  // which makes "datasheet missing" a real-world blocker on every IC.
+  const dsCov = analyzeDatasheetCoverage(all);
+  if (dsCov.icCount) {
+    const sStrip = el("div", {class:"row-actions", style:"margin-top:6px;"});
+    sStrip.appendChild(el("span", {class:"hint"}, "datasheets: "));
+    sStrip.appendChild(el("span",
+      {class:"tag " + (dsCov.withDs.length === dsCov.icCount ? "ok"
+                       : dsCov.withDs.length ? "warn" : "err")},
+      dsCov.withDs.length + "/" + dsCov.icCount + " ICs linked"));
+    if (dsCov.withoutDs.length) {
+      const tag = el("span",
+        {class:"tag warn", style:"cursor:pointer;",
+         title:"ICs with NO HelpURL / ComponentLink1URL / Datasheet "
+             + "parameter. The agent needs these to ground review work; "
+             + "without them every check is guesswork."},
+        dsCov.withoutDs.length + " missing");
+      tag.addEventListener("click", function(){
+        renderComponentsFiltered(all,
+          function(c){ return dsCov.missingSet[c.designator]; },
+          "ICs without a datasheet link");
+      });
+      sStrip.appendChild(tag);
+    }
+    summary.appendChild(sStrip);
+  }
+
+  // Pin-name vs net naming consistency. Find ICs where a pin named
+  // VCC/VDD/VBAT/etc. is on a NON-power net, or a pin named GND/VSS
+  // is on a NON-ground net. This is a class of bug ERC won't flag --
+  // the wire is connected, the rule just expects "VCC pin should be
+  // on a power net" which is a design-intent check, not an electrical
+  // one. Catching it here saves a real-world brown-out incident.
+  const mismatch = analyzePinNetMismatch(all);
+  if (mismatch.icCount && mismatch.mismatched.length) {
+    const mStrip = el("div", {class:"row-actions", style:"margin-top:6px;"});
+    mStrip.appendChild(el("span", {class:"hint"}, "naming: "));
+    const tag = el("span",
+      {class:"tag err", style:"cursor:pointer;",
+       title:"ICs where a pin named VCC/VDD/GND/VSS is wired to a net "
+           + "whose name doesn't match. Often a wire-up error or a swapped "
+           + "rail. ERC won't catch this."},
+      mismatch.mismatched.length + " IC(s) with pin/net name mismatch");
+    tag.addEventListener("click", function(){
+      renderComponentsFiltered(all,
+        function(c){ return mismatch.mismatchedSet[c.designator]; },
+        "ICs with pin/net naming mismatch");
+    });
+    mStrip.appendChild(tag);
+    summary.appendChild(mStrip);
+  }
+
+  // Unconnected IC pins. A passive with one floating pad can be
+  // intentional (test point, mounting hole, RF shield tab); an IC pin
+  // left blank is almost always either an oversight or a missing
+  // explicit-NC directive. The latter still passes ERC silently if
+  // the rule is set to "report no-connect", so surfacing these is
+  // genuine added value beyond what compile messages show.
+  const ncIc = analyzeUnconnectedIcPins(all);
+  if (ncIc.icCount) {
+    const uStrip = el("div", {class:"row-actions", style:"margin-top:6px;"});
+    uStrip.appendChild(el("span", {class:"hint"}, "IC pins: "));
+    if (ncIc.unconnectedCount) {
+      const tag = el("span",
+        {class:"tag err", style:"cursor:pointer;",
+         title:"IC pins with no net assigned (or named '?' / empty). "
+             + "Each is either a missing wire or a missing No-ERC mark."},
+        ncIc.unconnectedCount + " unconnected across "
+        + ncIc.icsWithUnconnected.length + " IC(s)");
+      tag.addEventListener("click", function(){
+        renderComponentsFiltered(all,
+          function(c){ return ncIc.unconnectedSet[c.designator]; },
+          "ICs with unconnected pins");
+      });
+      uStrip.appendChild(tag);
+      summary.appendChild(uStrip);
+    }
+  }
+
+  // Decoupling coverage. For every IC, find its power-pin nets and
+  // count how many of those nets host a local bypass capacitor. This
+  // is the single most-skipped check in design review: a missed local
+  // cap doesn't fail ERC, doesn't fail DRC, but bites at first power-on.
+  // We compute it from the snapshot's per-component pin list (already
+  // includes nets) so the cost is zero extra IPC.
+  const dec = analyzeDecoupling(all);
+  if (dec.icCount) {
+    const dStrip = el("div", {class:"row-actions", style:"margin-top:6px;"});
+    dStrip.appendChild(el("span", {class:"hint"}, "decoupling: "));
+    if (dec.fullyCovered.length) {
+      dStrip.appendChild(el("span", {class:"tag ok"},
+        dec.fullyCovered.length + "/" + dec.icCount + " ICs covered"));
+    }
+    if (dec.partial.length) {
+      const tag = el("span",
+        {class:"tag warn", style:"cursor:pointer;",
+         title:"ICs where at least one power pin has NO bypass cap on its net."},
+        dec.partial.length + " ICs partial");
+      tag.addEventListener("click", function(){
+        renderComponentsFiltered(all,
+          function(c){ return dec.partialSet[c.designator]; },
+          "ICs with partially-decoupled power pins");
+      });
+      dStrip.appendChild(tag);
+    }
+    if (dec.missing.length) {
+      const tag = el("span",
+        {class:"tag err", style:"cursor:pointer;",
+         title:"ICs with power pins that share NO net with any capacitor. "
+             + "Likely missing local bypass."},
+        dec.missing.length + " ICs missing");
+      tag.addEventListener("click", function(){
+        renderComponentsFiltered(all,
+          function(c){ return dec.missingSet[c.designator]; },
+          "ICs with no local decoupling caps");
+      });
+      dStrip.appendChild(tag);
+    }
+    summary.appendChild(dStrip);
+  }
+
   if (bomA.valueList.length) {
     const topStrip = el("div", {class:"row-actions", style:"margin-top:6px;"});
     topStrip.appendChild(el("span", {class:"hint"}, "top values: "));
@@ -1520,10 +3834,22 @@ function renderComponents() {
     "manufacturer", "mpn", "description", "quantity", "library", "lib_ref",
     "pins",
   ]);
+  // Apply current sort state. Default: stable input order. Click any
+  // column header to toggle sort by that column; click again to reverse.
+  if (compSortState.col) {
+    const c = compSortState.col, dir = compSortState.dir === "desc" ? -1 : 1;
+    rows.sort(function(a, b){
+      return cmpCellValues(getSortableValue(a, c), getSortableValue(b, c)) * dir;
+    });
+  }
   const t = el("table", {class:"data"});
   const head = el("tr", {});
-  head.appendChild(el("th", {}, "class"));
-  cols.forEach(function(c){ head.appendChild(el("th", {}, c)); });
+  head.appendChild(makeSortableTh("class", "_class", compSortState,
+    function(){ renderComponents(); }));
+  cols.forEach(function(c){
+    head.appendChild(makeSortableTh(c, c, compSortState,
+      function(){ renderComponents(); }));
+  });
   t.appendChild(el("thead", {}, head));
   const tb = el("tbody", {});
   rows.slice(0, 600).forEach(function(row){
@@ -1531,7 +3857,7 @@ function renderComponents() {
     tr.addEventListener("click", function(ev){
       // Don't trigger drawer if user clicked an inline link.
       if (ev.target.tagName === "A") return;
-      if (row.designator) openComponentDrawer(row.designator);
+      if (row.designator) gotoComp(row.designator);
     });
     tr.appendChild(el("td", {},
       el("span", {class:"tag " + (COMP_CLASS_TAG[row._class] || "muted")},
@@ -1545,6 +3871,72 @@ function renderComponents() {
   });
   t.appendChild(tb);
   root.appendChild(t);
+}
+
+// Per-table sort state. {col: <field-name>, dir: "asc"|"desc"} or
+// {col:null} for the natural input order.
+var compSortState = { col: null, dir: "asc" };
+var netSortState  = { col: null, dir: "asc" };
+
+// Build a <th> that responds to clicks by toggling sort on the given
+// data-key. ``state`` is the per-table sort state object (mutated in
+// place). ``onChange`` is called after the state changes; it should
+// re-render the table.
+function makeSortableTh(label, key, state, onChange) {
+  const isActive = state.col === key;
+  const arrow = isActive
+    ? (state.dir === "desc" ? " v" : " ^")
+    : "";
+  const th = el("th",
+    {style:"cursor:pointer; user-select:none;",
+     title:"click to sort by " + label + " (click again to reverse)"},
+    label + arrow);
+  th.addEventListener("click", function(){
+    if (state.col === key) {
+      // Same column: toggle asc/desc, or back to natural order on the
+      // third click so the user can always escape a sort.
+      if (state.dir === "asc") state.dir = "desc";
+      else if (state.dir === "desc") { state.col = null; state.dir = "asc"; }
+      else state.dir = "asc";
+    } else {
+      state.col = key; state.dir = "asc";
+    }
+    onChange();
+  });
+  return th;
+}
+
+// Pull a sortable scalar out of a row for the given field. Handles the
+// quirks of the BOM/nets shapes: pin arrays compare by length, missing
+// values sort last (treated as "" for strings or -Infinity for numbers).
+function getSortableValue(row, key) {
+  if (!row) return null;
+  let v = row[key];
+  // Fall back across the alternate names different sources use.
+  if (v == null) {
+    if (key === "pins") v = row.pin_count;
+    else if (key === "designator") v = row.designator || row.refdes;
+    else if (key === "mpn") v = row.manufacturer_part_number;
+    else if (key === "footprint") v = row.footprint_name;
+    else if (key === "value") v = row.comment;
+  }
+  if (Array.isArray(v)) return v.length;
+  return v;
+}
+
+function cmpCellValues(a, b) {
+  // Nulls sort last regardless of asc/desc -- "no data" is never the
+  // most-interesting row.
+  const an = (a == null || a === ""), bn = (b == null || b === "");
+  if (an && bn) return 0;
+  if (an) return 1;
+  if (bn) return -1;
+  // Numbers vs strings: try numeric first, fall back to lexicographic.
+  const af = Number(a), bf = Number(b);
+  if (!isNaN(af) && !isNaN(bf) && isFinite(af) && isFinite(bf))
+    return af - bf;
+  return String(a).localeCompare(String(b),
+    undefined, {numeric: true, sensitivity: "base"});
 }
 
 function renderCellValue(v, colName) {
@@ -1583,6 +3975,56 @@ function pickColumns(sampleRow, preferred) {
 async function loadNets() {
   state.data.nets = await fetchJSON("/api/project/nets");
   renderNets();
+}
+
+// Subset-view: re-render the Nets table showing only nets that pass
+// ``pred``, with a banner naming the subset and a "show all" reset.
+// Bypasses the normal text/class filter so the user can click a review
+// chip ("3 floating") and land on exactly those rows without losing
+// the rest of the summary state.
+function renderNetsFiltered(all, pred, subsetLabel) {
+  const root = $("#net-body");
+  root.innerHTML = "";
+  const rows = all.filter(pred);
+  rows.sort(function(a, b){
+    const pa = a.pin_count != null ? a.pin_count : (a.pins || 0);
+    const pb = b.pin_count != null ? b.pin_count : (b.pins || 0);
+    return pb - pa;
+  });
+  const banner = el("div", {class:"row-actions", style:"margin-bottom:8px;"});
+  banner.appendChild(el("span", {class:"hint"},
+    "viewing " + rows.length + " " + subsetLabel + ":"));
+  const back = el("button", {style:"font-size:12px;"}, "show all");
+  back.addEventListener("click", function(){ renderNets(); });
+  banner.appendChild(back);
+  root.appendChild(banner);
+
+  if (!rows.length) {
+    root.appendChild(emptyBox("none in this subset"));
+    return;
+  }
+  const t = el("table", {class:"data"});
+  t.appendChild(el("thead", {}, el("tr", {},
+    el("th", {}, "name"),
+    el("th", {class:"num"}, "pins"),
+    el("th", {class:"num"}, "components"),
+  )));
+  const tb = el("tbody", {});
+  rows.slice(0, 1000).forEach(function(n){
+    const tr = el("tr", {style:"cursor:pointer;"});
+    tr.addEventListener("click", function(){
+      if (n.name) gotoNet(n.name);
+    });
+    tr.appendChild(el("td", {class:"mono"}, n.name || ""));
+    tr.appendChild(el("td", {class:"num"},
+      fmt(n.pin_count != null ? n.pin_count : n.pins)));
+    tr.appendChild(el("td", {class:"num"},
+      fmt(n.node_count != null ? n.node_count : n.nodes)));
+    tb.appendChild(tr);
+  });
+  t.appendChild(tb);
+  root.appendChild(t);
+  $("#net-count").textContent = rows.length + " (" + subsetLabel + ")";
 }
 
 function aggregateNets(r) {
@@ -1643,6 +4085,51 @@ function netClass(name, upperSet) {
   if (/(RESET|NRST|MRST|_RST|^RST|POR)/.test(u)) return "reset";
   if (upperSet && diffSibling(u, upperSet)) return "diff";
   return "signal";
+}
+
+// Group net names into differential pairs. Returns [{base, p, n, suffix}].
+// Each pair appears once -- if we matched FOO_P/FOO_N we don't also
+// emit FOO_N/FOO_P. The detection mirrors diffSibling's suffix table.
+function detectDiffPairs(names) {
+  const upper = {};
+  names.forEach(function(n){ if (n) upper[n.toUpperCase()] = n; });
+  // Underscored or sigil-style suffixes only. Bare "P"/"N" matches false
+  // positives like CIN/CIP that aren't differential pairs at all, so
+  // we don't include it -- the rare library that uses bare polarity
+  // suffixes still wins via the +/- form for most common cases.
+  const suffixPairs = [["_P","_N"], ["_DP","_DM"], ["_POS","_NEG"],
+                       ["+","-"]];
+  const seen = {};
+  const out = [];
+  Object.keys(upper).forEach(function(u){
+    if (seen[u]) return;
+    for (let i = 0; i < suffixPairs.length; i++) {
+      const a = suffixPairs[i][0], b = suffixPairs[i][1];
+      // Try u ending in a, sibling = base + b.
+      if (u.length > a.length && u.slice(-a.length) === a) {
+        const base = u.slice(0, -a.length);
+        const sib = base + b;
+        if (upper[sib] && !seen[sib]) {
+          seen[u] = true; seen[sib] = true;
+          out.push({base: base, p: upper[u], n: upper[sib],
+                    suffix: a + "/" + b});
+          return;
+        }
+      }
+      // Symmetric: u ending in b, sibling = base + a.
+      if (u.length > b.length && u.slice(-b.length) === b) {
+        const base = u.slice(0, -b.length);
+        const sib = base + a;
+        if (upper[sib] && !seen[sib]) {
+          seen[u] = true; seen[sib] = true;
+          out.push({base: base, p: upper[sib], n: upper[u],
+                    suffix: a + "/" + b});
+          return;
+        }
+      }
+    }
+  });
+  return out;
 }
 
 function detectBuses(names) {
@@ -1727,6 +4214,84 @@ function renderNets() {
     });
     summary.appendChild(busStrip);
   }
+
+  // Differential pairs -- show pairs as paired chips so high-speed/SI
+  // review can spot them at-a-glance. Each chip links to the +ve net's
+  // drawer (which already shows the -ve sibling under "diff partner"),
+  // and click-to-locate on the canvas highlights both at once.
+  const diffPairs = detectDiffPairs(all.map(function(n){ return n.name || ""; }));
+  if (diffPairs.length) {
+    const dpStrip = el("div", {class:"row-actions", style:"margin-top:6px;"});
+    dpStrip.appendChild(el("span", {class:"hint"},
+      diffPairs.length + " diff pair(s): "));
+    diffPairs.slice(0, 24).forEach(function(dp){
+      const tag = el("span",
+        {class:"tag ok", style:"cursor:pointer; font-family:ui-monospace,monospace;",
+         title:"+: " + dp.p + "\n-: " + dp.n
+             + "\nclick: open positive sibling's drawer"},
+        dp.base + " (" + dp.suffix + ")");
+      tag.addEventListener("click", function(){ gotoNet(dp.p); });
+      dpStrip.appendChild(tag);
+    });
+    if (diffPairs.length > 24)
+      dpStrip.appendChild(el("span", {class:"hint"},
+        "+" + (diffPairs.length - 24) + " more"));
+    summary.appendChild(dpStrip);
+  }
+  // Structural-quality findings. These aren't ERC -- they're the
+  // shape-of-the-netlist signals an EE reviewer wants up-front rather
+  // than buried in a 500-row table.
+  //
+  // floating: pin_count <= 1. Either an intentional NC (rare on a real
+  // schematic -- usually marked with a No-ERC directive) or a wire that
+  // never reached its destination. Worth a click.
+  //
+  // anon: Altium auto-names unrouted-but-wire-connected pins as
+  // "NetU1_5" / "NetR4_2" etc. High anon counts indicate signals never
+  // got a human-readable name -- harmless functionally but a review
+  // smell.
+  const floating = all.filter(function(n){
+    const pc = n.pin_count != null ? n.pin_count : n.pins;
+    return (pc || 0) <= 1 && n.name && !isPowerNet(n.name);
+  });
+  const anonRe = /^Net[A-Z][A-Z0-9_]*_\d+$/i;
+  const anon = all.filter(function(n){ return n.name && anonRe.test(n.name); });
+  if (floating.length || anon.length) {
+    const qStrip = el("div", {class:"row-actions", style:"margin-top:6px;"});
+    qStrip.appendChild(el("span", {class:"hint"}, "review: "));
+    if (floating.length) {
+      const tag = el("span",
+        {class:"tag err", style:"cursor:pointer;",
+         title:"Nets with <=1 pin. Either intentional NC or a missed connection."},
+        floating.length + " floating");
+      tag.addEventListener("click", function(){
+        // Filter the table to just the floating nets via a marker
+        // prefix; renderNets re-runs and the user sees only those.
+        $("#net-filter").value = "";   // clear free-text
+        renderNetsFiltered(all, function(n){
+          const pc = n.pin_count != null ? n.pin_count : n.pins;
+          return (pc || 0) <= 1 && n.name && !isPowerNet(n.name);
+        }, "floating nets");
+      });
+      qStrip.appendChild(tag);
+    }
+    if (anon.length) {
+      const tag = el("span",
+        {class:"tag muted", style:"cursor:pointer;",
+         title:"Auto-named nets (NetU1_5 etc) -- not labelled by the designer. "
+             + "Functionally fine but a review smell on critical signals."},
+        anon.length + " auto-named");
+      tag.addEventListener("click", function(){
+        $("#net-filter").value = "";
+        renderNetsFiltered(all, function(n){
+          return n.name && anonRe.test(n.name);
+        }, "auto-named nets");
+      });
+      qStrip.appendChild(tag);
+    }
+    summary.appendChild(qStrip);
+  }
+
   // Standard interfaces detected from net-name signatures.
   const ifaces = detectInterfaces(all.map(function(n){ return n.name || ""; }));
   if (ifaces.length) {
@@ -1760,26 +4325,65 @@ function renderNets() {
     root.appendChild(emptyBox("no matching nets"));
     return;
   }
+  // Sort highest-fanout first so the busy/clock/reset/power rails (and
+  // any accidentally-shared signal names) surface immediately. This is
+  // the single most actionable view of a netlist for review work --
+  // outliers in pin-count are almost always either intentional (a
+  // hub-and-spoke bus, a global clock) or a bug (a typo collapsing two
+  // distinct signals into one). Either way the EE wants to see them.
+  // Default sort: pin count descending so the busy/clock/reset/power
+  // rails surface first. Overridden if the user clicked a column header.
+  if (netSortState.col) {
+    const c = netSortState.col, dir = netSortState.dir === "desc" ? -1 : 1;
+    rows.sort(function(a, b){
+      return cmpCellValues(getSortableValue(a, c), getSortableValue(b, c)) * dir;
+    });
+  } else {
+    rows.sort(function(a, b){
+      const pa = a.pin_count != null ? a.pin_count : (a.pins || 0);
+      const pb = b.pin_count != null ? b.pin_count : (b.pins || 0);
+      return pb - pa;
+    });
+  }
+
+  // High-fanout watermark: log-scaled badge so a 20-pin clock looks
+  // different from a 4-pin signal without needing a hardcoded cliff.
+  function fanBadge(p) {
+    if (!p || p < 4) return null;
+    if (p >= 32) return {label: "very high", cls: "warn"};
+    if (p >= 16) return {label: "high",      cls: "info"};
+    if (p >= 8)  return {label: "elevated",  cls: "muted"};
+    return null;
+  }
+
   const t = el("table", {class:"data"});
-  t.appendChild(el("thead", {}, el("tr", {},
-    el("th", {}, "name"),
-    el("th", {}, "class"),
-    el("th", {class:"num"}, "pins"),
-    el("th", {class:"num"}, "components"),
-  )));
+  const netHead = el("tr", {});
+  netHead.appendChild(makeSortableTh("name", "name", netSortState,
+    function(){ renderNets(); }));
+  netHead.appendChild(makeSortableTh("class", "_class", netSortState,
+    function(){ renderNets(); }));
+  netHead.appendChild(makeSortableTh("pins", "pin_count", netSortState,
+    function(){ renderNets(); }));
+  netHead.appendChild(makeSortableTh("components", "node_count", netSortState,
+    function(){ renderNets(); }));
+  netHead.appendChild(el("th", {}, "fanout"));
+  t.appendChild(el("thead", {}, netHead));
   const tb = el("tbody", {});
   rows.slice(0, 1000).forEach(function(n){
     const tr = el("tr", {style:"cursor:pointer;"});
     tr.addEventListener("click", function(){
-      if (n.name) openNetDrawer(n.name);
+      if (n.name) gotoNet(n.name);
     });
     tr.appendChild(el("td", {class:"mono"}, n.name || ""));
     tr.appendChild(el("td", {},
       el("span", {class:"tag " + (NET_CLASS_TAG[n._class] || "muted")}, n._class)));
-    tr.appendChild(el("td", {class:"num"},
-      fmt(n.pin_count != null ? n.pin_count : n.pins)));
+    const pc = n.pin_count != null ? n.pin_count : n.pins;
+    tr.appendChild(el("td", {class:"num"}, fmt(pc)));
     tr.appendChild(el("td", {class:"num"},
       fmt(n.node_count != null ? n.node_count : n.nodes)));
+    const b = fanBadge(pc);
+    tr.appendChild(el("td", {},
+      b ? el("span", {class:"tag " + b.cls, title:"pin_count="+pc}, b.label) : ""));
     tb.appendChild(tr);
   });
   t.appendChild(tb);
@@ -1793,6 +4397,21 @@ function isPowerNet(name) {
       || n.indexOf("VDD") === 0 || n.indexOf("VSS") === 0 || n.charAt(0) === "+"
       || n.indexOf("AGND") === 0 || n.indexOf("DGND") === 0
       || /^V[0-9]/.test(n) || n.indexOf("V3V3") >= 0 || n.indexOf("V5V") >= 0;
+}
+
+// Ground-specific predicate. Two callsites (netClass, passiveRole) were
+// referencing this without it being defined -- a silent ReferenceError
+// that only fires when those paths run. Splitting it out from isPowerNet
+// so the netClass "ground" branch is reachable and the BOM passive-role
+// detector can distinguish a GND-side decoupling cap from a rail-side one.
+function isGroundNet(name) {
+  if (!name) return false;
+  const n = name.toUpperCase();
+  return n === "GND" || n === "VSS"
+      || n.indexOf("GND") === 0 || n.indexOf("AGND") === 0
+      || n.indexOf("DGND") === 0 || n.indexOf("PGND") === 0
+      || n.indexOf("SGND") === 0 || n.indexOf("EARTH") === 0
+      || /^GND[_\-0-9]/.test(n);
 }
 
 /* ============================ LIBRARIES ============================ */
@@ -2674,21 +5293,69 @@ async function globalSearch() {
   const box = $("#global-results");
   if (!q) { box.hidden = true; box.innerHTML = ""; box._hits = null; return; }
   const comps = await getBomComponents();
-  const hits = [], seen = {};
-  comps.forEach(function(c){
+  const hits = [], seenComp = {}, seenNet = {};
+  // The hit shape stays {kind, label, sub, exact} so globalSearchOpen
+  // can stay simple. We add new field-source matches that resolve to
+  // a component drill-in -- e.g. matching "STM32" via MPN still opens
+  // the matching component's drawer, with sub:"mpn:STM32...".
+  function pushComp(c, sub, exact) {
     const d = c.designator || "";
-    if (d && d.toLowerCase().indexOf(q) >= 0)
-      hits.push({ kind:"comp", label:d, sub:c.comment || "",
-                  exact:d.toLowerCase().indexOf(q) === 0 });
+    if (!d || seenComp[d]) return;
+    seenComp[d] = true;
+    hits.push({ kind:"comp", label:d, sub:sub, exact:!!exact });
+  }
+  function pushNet(name, sub, exact) {
+    if (!name || name === "?" || seenNet[name]) return;
+    seenNet[name] = true;
+    hits.push({ kind:"net", label:name, sub:sub, exact:!!exact });
+  }
+  // Designator match.
+  comps.forEach(function(c){
+    const d = (c.designator || "").toLowerCase();
+    if (d && d.indexOf(q) >= 0) pushComp(c, c.comment || "", d.indexOf(q) === 0);
   });
+  // Field-source matches: lib_ref, mpn, footprint, value, manufacturer,
+  // description. Sub tells the EE WHY the row matched.
+  const fieldSrcs = [
+    {key: "lib_ref",   label: "lib_ref"},
+    {key: "mpn",       label: "mpn"},
+    {key: "manufacturer_part_number", label: "mpn"},
+    {key: "footprint", label: "footprint"},
+    {key: "footprint_name", label: "footprint"},
+    {key: "value",     label: "value"},
+    {key: "comment",   label: "value"},
+    {key: "manufacturer", label: "mfr"},
+    {key: "description",  label: "desc"},
+  ];
+  comps.forEach(function(c){
+    fieldSrcs.forEach(function(s){
+      const v = c[s.key];
+      if (!v) return;
+      const vs = String(v).toLowerCase();
+      if (vs.indexOf(q) >= 0)
+        pushComp(c, s.label + ": " + String(v).slice(0, 40),
+                 vs.indexOf(q) === 0);
+    });
+  });
+  // Pin-name match -- opens the OWNING COMPONENT's drawer with a sub
+  // describing which pin matched. Useful for "find all parts with a pin
+  // named TX" workflows.
+  comps.forEach(function(c){
+    (c.pins || []).forEach(function(p){
+      const pn = (p.name || p.pin_name || "");
+      if (pn && pn.toLowerCase().indexOf(q) >= 0)
+        pushComp(c, "pin " + (p.des || p.designator || "?") + ":" + pn,
+                 pn.toLowerCase().indexOf(q) === 0);
+    });
+  });
+  // Net-name match (already net-keyed dedup so a net mentioned by
+  // many pins doesn't repeat in the dropdown).
   comps.forEach(function(c){
     (c.pins || []).forEach(function(p){
       const n = p.net;
-      if (n && n !== "?" && !seen[n] && n.toLowerCase().indexOf(q) >= 0) {
-        seen[n] = true;
-        hits.push({ kind:"net", label:n, sub:"net",
-                    exact:n.toLowerCase().indexOf(q) === 0 });
-      }
+      if (!n) return;
+      const nl = String(n).toLowerCase();
+      if (nl.indexOf(q) >= 0) pushNet(n, "net", nl.indexOf(q) === 0);
     });
   });
   hits.sort(function(a, b){
@@ -2715,13 +5382,269 @@ async function globalSearch() {
   box.hidden = false;
 }
 
+// Build the PCB layer-toggle sidebar OUTSIDE the SVG. Pulls the layer
+// list from /api/drawing/pcb/layers, renders one checkbox per layer,
+// and on toggle directly mutates the matching <g data-layer="X"> group's
+// visibility on the inline SVG. Restores prior state from sessionStorage
+// so a re-render or sheet-switch doesn't reset the user's view.
+// Layer name -> { swatch fill, section }. Swatch colours mirror the
+// renderer's default per-layer fills so the sidebar acts as a legend.
+// Section assignments group related layers (copper / overlay / etc.)
+// so a long layer list stays scannable.
+var LAYER_META = {
+  TopLayer:       { color:"#d94343", section:"copper" },
+  BottomLayer:    { color:"#3b82f6", section:"copper" },
+  MultiLayer:     { color:"#a3a3a3", section:"copper" },
+  TopOverlay:     { color:"#e3e3e3", section:"overlay" },
+  BottomOverlay:  { color:"#e3e3e3", section:"overlay" },
+  TopSolder:      { color:"#8a4fc6", section:"solder/paste" },
+  BottomSolder:   { color:"#8a4fc6", section:"solder/paste" },
+  TopPaste:       { color:"#b87a3c", section:"solder/paste" },
+  BottomPaste:    { color:"#b87a3c", section:"solder/paste" },
+  KeepOutLayer:   { color:"#e0af68", section:"mechanical" },
+  Outline:        { color:"#ffffff", section:"mechanical" },
+  Designators:    { color:"#7dcfff", section:"annotation" },
+};
+function layerMeta(name) {
+  if (LAYER_META[name]) return LAYER_META[name];
+  // Mid<N> -> copper; everything else -> "other".
+  if (/^Mid\d+/.test(name)) return { color:"#94a3b8", section:"copper" };
+  if (/^Internal\d*Plane/i.test(name)) return { color:"#6b7280", section:"copper" };
+  if (/Drill/i.test(name)) return { color:"#9ca3af", section:"mechanical" };
+  if (/Mechanical/i.test(name)) return { color:"#e0af68", section:"mechanical" };
+  return { color:"#888888", section:"other" };
+}
+
+async function loadDrawingLayers(svg) {
+  const list = $("#drawing-layers-list");
+  if (!list) return;
+  list.innerHTML = "<div class='empty' style='font-size:11px;'>loading...</div>";
+  const r = await fetchJSON("/api/drawing/pcb/layers");
+  if (!r || !r.ok || !Array.isArray(r.layers) || !r.layers.length) {
+    list.innerHTML = "<div class='empty' style='font-size:11px;'>no layers</div>";
+    return;
+  }
+  let saved;
+  try { saved = JSON.parse(sessionStorage.getItem("pcbLayerState") || "{}"); }
+  catch (e) { saved = {}; }
+  list.innerHTML = "";
+
+  // Top action row: show-all / hide-all bulk toggles.
+  const actions = el("div", {class:"layer-actions"});
+  const showAll = el("button", {title:"Show all layers"}, "show all");
+  const hideAll = el("button", {title:"Hide all layers"}, "hide all");
+  list.appendChild(actions);
+  actions.appendChild(showAll);
+  actions.appendChild(hideAll);
+
+  // Group by section, in deterministic order.
+  const sectionOrder = ["copper", "overlay", "solder/paste",
+                        "mechanical", "annotation", "other"];
+  const bySection = {};
+  r.layers.forEach(function(name){
+    const meta = layerMeta(name);
+    if (!bySection[meta.section]) bySection[meta.section] = [];
+    bySection[meta.section].push({ name: name, meta: meta });
+  });
+
+  const cbList = [];
+  sectionOrder.forEach(function(sec){
+    const entries = bySection[sec];
+    if (!entries || !entries.length) return;
+    const section = el("div", {class:"layer-section"});
+    section.appendChild(el("div", {class:"layer-section-title"}, sec));
+    entries.forEach(function(e){
+      const name = e.name;
+      const meta = e.meta;
+      const checked = saved[name] !== false;
+      const row = el("label", {});
+      const cb = el("input", {type:"checkbox", "data-layer": name});
+      cb.checked = checked;
+      cb.addEventListener("change", function(){
+        applyLayerVisibility(svg, name, cb.checked);
+        try {
+          const cur = JSON.parse(sessionStorage.getItem("pcbLayerState") || "{}");
+          cur[name] = cb.checked;
+          sessionStorage.setItem("pcbLayerState", JSON.stringify(cur));
+        } catch (ex) {}
+      });
+      const swatch = el("span", {class:"layer-swatch",
+                                 style:"background:" + meta.color + ";"});
+      const lbl = el("span", {class:"layer-name"}, name);
+      row.appendChild(cb);
+      row.appendChild(swatch);
+      row.appendChild(lbl);
+      section.appendChild(row);
+      cbList.push(cb);
+      if (!checked) applyLayerVisibility(svg, name, false);
+    });
+    list.appendChild(section);
+  });
+
+  function bulkSet(visible) {
+    cbList.forEach(function(cb){
+      cb.checked = visible;
+      cb.dispatchEvent(new Event("change"));
+    });
+  }
+  showAll.addEventListener("click", function(){ bulkSet(true);  });
+  hideAll.addEventListener("click", function(){ bulkSet(false); });
+}
+
+function applyLayerVisibility(svg, layer, visible) {
+  if (!svg) return;
+  svg.querySelectorAll('g[data-layer="' + cssEscape(layer) + '"]').forEach(function(g){
+    g.style.display = visible ? "" : "none";
+  });
+}
+
+// Restore the PCB SVG's layer-toggle checkboxes from sessionStorage,
+// then trigger the renderer's inline change-handler script so the
+// matching <g data-layer="..."> groups update their visibility. Hooks
+// a change listener on each checkbox to keep the stored state fresh
+// while the user interacts.
+function restorePcbLayerState(svg) {
+  let saved;
+  try { saved = JSON.parse(sessionStorage.getItem("pcbLayerState") || "{}"); }
+  catch (e) { saved = {}; }
+  const cbs = svg.querySelectorAll('input.layer-cb[data-layer]');
+  cbs.forEach(function(cb){
+    const layer = cb.getAttribute("data-layer");
+    if (saved[layer] != null && cb.checked !== saved[layer]) {
+      cb.checked = saved[layer];
+      // The renderer wires the visibility update on a `change` event,
+      // so dispatch one to make the matching layer group show/hide.
+      cb.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+    // Keep the stored state in sync with future user interaction.
+    cb.addEventListener("change", function(){
+      try {
+        const cur = JSON.parse(sessionStorage.getItem("pcbLayerState") || "{}");
+        cur[layer] = cb.checked;
+        sessionStorage.setItem("pcbLayerState", JSON.stringify(cur));
+      } catch (e) {}
+    });
+  });
+}
+
+// Drawer history. Tracks every drilled-into component/net so the user
+// can walk back through a chain of references. The history is stored
+// as {kind, label} entries; back navigation pops and reopens via the
+// low-level drawer functions WITHOUT pushing (to avoid loops).
+var drawerHistory = [];
+var drawerHistorySuspendPush = false;
+
+function pushDrawerHistory(kind, label) {
+  if (drawerHistorySuspendPush) return;
+  if (!kind || !label) return;
+  const last = drawerHistory[drawerHistory.length - 1];
+  // Skip consecutive duplicates (e.g. re-clicking the same component).
+  if (last && last.kind === kind && last.label === label) return;
+  drawerHistory.push({ kind: kind, label: label });
+  if (drawerHistory.length > 30) drawerHistory.shift();
+  renderDrawerBreadcrumb();
+}
+
+function renderDrawerBreadcrumb() {
+  const back = $("#drawer-back");
+  const bc = $("#drawer-breadcrumb");
+  if (!back || !bc) return;
+  // The CURRENT entry is the last one in history. Back walks to the
+  // previous, so we hide both UI affordances when there's only one
+  // entry (or none).
+  if (drawerHistory.length < 2) {
+    back.hidden = true; bc.style.display = "none"; bc.innerHTML = "";
+    return;
+  }
+  back.hidden = false;
+  bc.style.display = "block";
+  bc.innerHTML = "";
+  // Show up to last 5 entries before the current one, oldest first.
+  const tail = drawerHistory.slice(-6, -1);
+  tail.forEach(function(e, i){
+    const a = el("a",
+      {href:"#", style:"color:var(--text-dim); margin-right:4px;",
+       title:"jump to " + e.kind + " " + e.label,
+       onclick: function(ev){
+         ev.preventDefault();
+         jumpDrawerHistory(drawerHistory.length - tail.length + i - 1);
+       }},
+      e.label);
+    bc.appendChild(a);
+    bc.appendChild(document.createTextNode(" -> "));
+  });
+  bc.appendChild(el("span",
+    {style:"color:var(--text);"},
+    drawerHistory[drawerHistory.length - 1].label));
+}
+
+function drawerBack() {
+  if (drawerHistory.length < 2) return;
+  drawerHistory.pop();   // drop current
+  const target = drawerHistory[drawerHistory.length - 1];
+  // Reopen WITHOUT pushing so we don't extend the trail.
+  drawerHistorySuspendPush = true;
+  try {
+    if (target.kind === "comp") openComponentDrawer(target.label);
+    else openNetDrawer(target.label);
+  } finally { drawerHistorySuspendPush = false; }
+  renderDrawerBreadcrumb();
+}
+
+function jumpDrawerHistory(index) {
+  if (index < 0 || index >= drawerHistory.length) return;
+  // Truncate to that index inclusive; reopen that entry.
+  drawerHistory = drawerHistory.slice(0, index + 1);
+  const target = drawerHistory[drawerHistory.length - 1];
+  drawerHistorySuspendPush = true;
+  try {
+    if (target.kind === "comp") openComponentDrawer(target.label);
+    else openNetDrawer(target.label);
+  } finally { drawerHistorySuspendPush = false; }
+  renderDrawerBreadcrumb();
+}
+
+// Two helpers that say "I want to follow this connection -- open its
+// drawer AND move the canvas to it". Used everywhere a user is
+// navigating BY REFERENCE (a tag in another drawer, a row in a table,
+// a global search hit). NOT used by the SVG click handler -- there the
+// user is already pointing AT the element, so re-zooming would be
+// disorienting. Keep these tight: one drawer call + one locate call.
+function gotoComp(des) {
+  if (!des) return;
+  openComponentDrawer(des);
+  locateOnCanvas("comp", des);
+}
+function gotoNet(name) {
+  if (!name) return;
+  openNetDrawer(name);
+  locateOnCanvas("net", name);
+}
+
 function globalSearchOpen(h) {
   if (!h) return;
   $("#global-results").hidden = true;
   $("#global-search").value = "";
   $("#global-search").blur();
-  if (h.kind === "comp") openComponentDrawer(h.label);
-  else openNetDrawer(h.label);
+  // gotoComp / gotoNet both open the drill-in drawer AND move the SVG
+  // canvas onto the match. The search bar therefore acts as a navigator
+  // for both panes at once.
+  if (h.kind === "comp") gotoComp(h.label);
+  else gotoNet(h.label);
+}
+
+// Pan + highlight a designator or net on whichever SVG is in the
+// Drawing tab's host. Safe to call even if Drawing isn't loaded -- it's
+// a no-op then. Caller passes kind "comp" or "net".
+function locateOnCanvas(kind, name) {
+  const host = $("#drawing-host");
+  if (!host) return;
+  const svg = host.querySelector("svg");
+  if (!svg) return;
+  const attr = kind === "comp" ? "data-designator" : "data-net";
+  const sel = "[" + attr + '="' + cssEscape(name) + '"]';
+  const moved = svgLocateBySelector(svg, sel);
+  if (moved) svgMarkSelected(svg, kind, name);
 }
 
 /* ============================ Theme ============================ */
@@ -2835,6 +5758,23 @@ window.addEventListener("DOMContentLoaded", function(){
 
   $("#drawer-close").addEventListener("click", function(){
     $("#drawer").classList.remove("open");
+    // Reset history when the drawer is fully closed -- the next
+    // open is the start of a new investigation trail.
+    drawerHistory = [];
+    renderDrawerBreadcrumb();
+  });
+  $("#drawer-back").addEventListener("click", drawerBack);
+  // Alt+Left also walks back through the drawer history. Skip when
+  // a text input owns focus so it doesn't fight with browser undo.
+  document.addEventListener("keydown", function(ev) {
+    if (ev.altKey && ev.key === "ArrowLeft") {
+      const t = ev.target;
+      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA")) return;
+      if (drawerHistory.length >= 2) {
+        drawerBack();
+        ev.preventDefault();
+      }
+    }
   });
   $("#health-run").addEventListener("click", runHealth);
 
@@ -2846,13 +5786,33 @@ window.addEventListener("DOMContentLoaded", function(){
   // Global search wiring.
   $("#global-search").addEventListener("input", globalSearch);
   $("#global-search").addEventListener("keydown", function(ev){
+    const box = $("#global-results");
+    const hits = box._hits || [];
     if (ev.key === "Enter") {
-      const hits = $("#global-results")._hits;
-      if (hits && hits.length) globalSearchOpen(hits[0]);
+      // Pick whichever row currently has .sel -- defaults to the first
+      // hit if the user never arrow-keyed.
+      const selRow = box.querySelector(".gs-row.sel");
+      const idx = selRow ? [].indexOf.call(box.querySelectorAll(".gs-row"), selRow) : 0;
+      if (hits.length) globalSearchOpen(hits[Math.max(0, idx)]);
     } else if (ev.key === "Escape") {
-      $("#global-results").hidden = true;
+      box.hidden = true;
       $("#global-search").value = "";
       $("#global-search").blur();
+    } else if (ev.key === "ArrowDown" || ev.key === "ArrowUp") {
+      // Move the .sel marker without unfocusing the input so the user
+      // can keep typing AND arrow-key through results.
+      ev.preventDefault();
+      const rows = box.querySelectorAll(".gs-row");
+      if (!rows.length) return;
+      let cur = -1;
+      rows.forEach(function(r, i){ if (r.classList.contains("sel")) cur = i; });
+      const next = ev.key === "ArrowDown"
+        ? Math.min(rows.length - 1, cur + 1)
+        : Math.max(0, cur - 1);
+      rows.forEach(function(r){ r.classList.remove("sel"); });
+      rows[next].classList.add("sel");
+      // Scroll into view if the dropdown is long enough to overflow.
+      rows[next].scrollIntoView({ block: "nearest" });
     }
   });
   document.addEventListener("click", function(ev){
@@ -2870,17 +5830,66 @@ window.addEventListener("DOMContentLoaded", function(){
     if (ev.key === "Escape") $("#drawer").classList.remove("open");
     if (ev.key === "r" || ev.key === "R") refreshActive();
     if (ev.key === "t" || ev.key === "T") toggleTheme();
-    if (ev.key === "1") showTab("project");
-    if (ev.key === "2") showTab("components");
-    if (ev.key === "3") showTab("nets");
-    if (ev.key === "4") showTab("libraries");
-    if (ev.key === "5") showTab("plan");
-    if (ev.key === "6") showTab("actions");
+    if (ev.key === "1") showTab("drawing");
+    if (ev.key === "2") showTab("project");
+    if (ev.key === "3") showTab("components");
+    if (ev.key === "4") showTab("nets");
+    if (ev.key === "5") showTab("libraries");
+    if (ev.key === "6") showTab("plan");
+    if (ev.key === "7") showTab("actions");
     if (ev.key === "0") showTab("status");
   });
 
+  // Drawing tab controls.
+  $$(".drawing-mode").forEach(function(b){
+    b.addEventListener("click", function(){ setDrawingMode(b.dataset.mode); });
+  });
+  $("#drawing-sheet").addEventListener("change", function(){
+    drawingState.sheet = this.value;
+    renderDrawing();
+  });
+  $("#drawing-refresh").addEventListener("click", renderDrawing);
+  $("#drawing-open").addEventListener("click", openDrawingInTab);
+  $("#drawing-selbar-clear").addEventListener("click", svgClearSelection);
+  $("#drawing-selbar-drawer").addEventListener("click", function(){
+    if (!drawingSelection) return;
+    if (drawingSelection.kind === "comp") openComponentDrawer(drawingSelection.name);
+    else openNetDrawer(drawingSelection.name);
+  });
+  // Esc anywhere clears the Drawing selection (and dismisses the
+  // drawer if it's open). Skip when a text input is focused so the
+  // user can still cancel out of the search bar with Esc.
+  document.addEventListener("keydown", function(ev) {
+    if (ev.key !== "Escape") return;
+    const t = ev.target;
+    if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA"
+              || t.tagName === "SELECT")) return;
+    if (drawingSelection) {
+      svgClearSelection();
+      ev.preventDefault();
+    }
+  });
+
+  // Schematic <-> PCB cross-probe: when the Drawing tab is active and
+  // the user is not typing, 's' switches to schematic, 'p' to PCB. Any
+  // current selection is carried across via setDrawingMode's existing
+  // logic. Mirrors Altium's native sch/pcb cross-probe behaviour.
+  document.addEventListener("keydown", function(ev) {
+    if (state.activeTab !== "drawing") return;
+    const t = ev.target;
+    if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA"
+              || t.tagName === "SELECT")) return;
+    if (ev.altKey || ev.ctrlKey || ev.metaKey || ev.shiftKey) return;
+    const k = ev.key.toLowerCase();
+    if (k === "s" && drawingState.mode !== "sch") {
+      setDrawingMode("sch"); ev.preventDefault();
+    } else if (k === "p" && drawingState.mode !== "pcb") {
+      setDrawingMode("pcb"); ev.preventDefault();
+    }
+  });
+
   connectSSE();
-  loadProject();
+  loadDrawing();
   pollIntent();
   pollHealth();
   setInterval(pollHealth, 3000);

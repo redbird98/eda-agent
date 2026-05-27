@@ -1919,7 +1919,7 @@ Function Proj_RunOutJob(Params : String; RequestId : String) : String;
 Var
     OutJobPath, ContainerName, S : String;
     IniFile : TIniFile;
-    FoundContainerName, ContainerType, RelativePath : String;
+    FoundContainerName, ContainerType, RelativePath, OutputDir : String;
     G, J : Integer;
     Found : Boolean;
     OutJobDoc : IServerDocument;
@@ -2044,7 +2044,28 @@ Begin
         RunProcess('WorkspaceManager:GenerateReport');
     End;
 
-    Result := BuildSuccessResponse(RequestId, '{"success":true,"container_name":"' + EscapeJsonString(ContainerName) + '","container_type":"' + EscapeJsonString(ContainerType) + '"}');
+    { Resolve the OutJob's configured output directory so callers can pick }
+    { up the produced files without having to re-parse the INI. The INI    }
+    { stores OutputBasePath relative to the OutJob; absolute paths pass    }
+    { through. Trailing slash normalised so Python can append filenames.   }
+    OutputDir := '';
+    If RelativePath <> '' Then
+    Begin
+        If (Length(RelativePath) >= 2) And (Copy(RelativePath, 2, 1) = ':') Then
+            OutputDir := RelativePath
+        Else
+            OutputDir := ExtractFilePath(OutJobPath) + RelativePath;
+        If (Length(OutputDir) > 0) And
+           (Copy(OutputDir, Length(OutputDir), 1) <> '\') Then
+            OutputDir := OutputDir + '\';
+    End;
+
+    Result := BuildSuccessResponse(RequestId,
+        '{"success":true' +
+        ',"container_name":"' + EscapeJsonString(ContainerName) + '"' +
+        ',"container_type":"' + EscapeJsonString(ContainerType) + '"' +
+        ',"relative_path":"' + EscapeJsonString(RelativePath) + '"' +
+        ',"output_dir":"' + EscapeJsonString(OutputDir) + '"}');
 End;
 
 {..............................................................................}

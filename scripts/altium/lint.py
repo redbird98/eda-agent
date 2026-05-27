@@ -201,6 +201,106 @@ RULE_PROBE_TEXT_WRITE = LineRule(
     description="ISch_Probe.Text/NetName aren't settable; probe auto-picks the net.",
 )
 
+# Known-wrong Altium enum identifier names. The SCH/PCB SDK exposes hundreds
+# of e* constants so a positive whitelist is unmanageable, but every time
+# the script blows up at runtime with "Undeclared identifier: eXxx" we add
+# the offender here so the next regression is caught at lint time, not
+# after a five-minute Altium restart cycle. Map: wrong name -> what to use
+# instead. Extend whenever the script engine surfaces another bogus name.
+KNOWN_WRONG_E_IDENTS = {
+    # eSchDoc was typed in a SchDoc/SchLib type-guard. There is no
+    # eSchDoc constant; SchServer.GetCurrentSchDocument only ever returns
+    # a SchDoc or SchLib (or Nil), so the second arm of the check is
+    # redundant -- drop it, or test only for eSchLib when you specifically
+    # need the library variant.
+    "eSchDoc": "drop the check (Nil-guard is enough) or test eSchLib for library docs",
+    # eSchDocument: similar mistake; the SDK does not expose this name.
+    "eSchDocument": "drop the check or test eSchLib for library docs",
+    # ePcbDoc: there is no ObjectId constant for the board itself; if you
+    # need to verify you're on a PCB, check IPCB_Board <> Nil.
+    "ePcbDoc": "no such constant; verify with PCBServer.GetCurrentPCBBoard <> Nil",
+}
+RULE_KNOWN_WRONG_E_IDENT = LineRule(
+    name="known-wrong-altium-enum",
+    pattern=re.compile(
+        r"\b(" + "|".join(re.escape(k) for k in KNOWN_WRONG_E_IDENTS) + r")\b"),
+    severity="error",
+    memory="delphiscript_altium_enum_typos.md",
+    description=(
+        "Altium SCH/PCB enum identifier does not exist; the script "
+        "engine reports Undeclared identifier at runtime."),
+)
+
+# Sibling rule: known-wrong METHOD names on Altium interfaces. Same
+# failure mode as the enum typos (Undeclared identifier at runtime,
+# uncatchable by Try/Except) but the offender is the .Method bit of
+# a member-access expression. Map: wrong name -> right name. Pattern
+# requires a leading dot so we don't match unrelated locals.
+KNOWN_WRONG_METHOD_NAMES = {
+    # ISch_Polyline / ISch_Polygon / ISch_Bezier / ISch_Wire / ISch_Bus
+    # expose the vertex-count getter as plural "Vertices". The singular
+    # form is what trips people up because the per-vertex getter IS
+    # singular: GetState_Vertex(i).
+    "GetState_VertexCount": "GetState_VerticesCount (plural)",
+}
+RULE_KNOWN_WRONG_METHOD = LineRule(
+    name="known-wrong-altium-method",
+    pattern=re.compile(
+        r"\.(" + "|".join(re.escape(k) for k in KNOWN_WRONG_METHOD_NAMES) + r")\b"),
+    severity="error",
+    memory="delphiscript_altium_enum_typos.md",
+    description=(
+        "Altium interface method name is wrong; the script engine "
+        "reports Undeclared identifier at runtime."),
+)
+
+# Third sibling: qualified property accesses that look right but aren't.
+# Same family of bug as the bare-method rule but the offending property
+# IS valid on a different interface in the SDK, so we can't blanket-ban
+# it -- we deny-list the specific Variable.Property pairs we've hit.
+# Each entry: ("VarName.Property", "the right name on this type"). The
+# matcher is whole-word for both halves so `MyPad.XSize` won't match
+# (which is fine; we add `MyPad.XSize` separately if it shows up).
+KNOWN_WRONG_PROPERTY_ACCESSES = {
+    # IPCB_Pad has layer-specific dimensions, not a bare XSize/YSize.
+    # The default top-layer pair is TopXSize / TopYSize; for inner layers
+    # use MidXSize / MidYSize, for bottom BotXSize / BotYSize.
+    "Pad.XSize": "Pad.TopXSize (top layer) or per-layer Mid/Bot variant",
+    "Pad.YSize": "Pad.TopYSize (top layer) or per-layer Mid/Bot variant",
+}
+RULE_KNOWN_WRONG_PROPERTY = LineRule(
+    name="known-wrong-altium-property",
+    pattern=re.compile(
+        r"\b(" + "|".join(
+            re.escape(k).replace(r"\.", r"\.") for k in KNOWN_WRONG_PROPERTY_ACCESSES
+        ) + r")\b"),
+    severity="error",
+    memory="delphiscript_altium_enum_typos.md",
+    description=(
+        "Altium interface property is wrong on this variable's type; "
+        "the script engine reports Undeclared identifier at runtime."),
+)
+
+# Wrong Altium server process strings. RunProcess accepts any string
+# silently, so a typo means the call is a no-op at runtime with no
+# error indication -- exactly the case that bit DRC. Per TR0124 Server
+# Process Reference, the documented process names are exact. Add
+# common-typo entries as we discover them.
+KNOWN_WRONG_PROCESS_NAMES = {
+    "PCB:RunDRC": "PCB:DesignRuleCheck (per TR0124, PCB:RunDRC is not a real process)",
+}
+RULE_KNOWN_WRONG_PROCESS = LineRule(
+    name="known-wrong-altium-process",
+    pattern=re.compile(
+        r"['\"](" + "|".join(re.escape(k) for k in KNOWN_WRONG_PROCESS_NAMES)
+        + r")['\"]"),
+    severity="error",
+    memory="delphiscript_altium_enum_typos.md",
+    description=(
+        "Altium server process name not in the TR0124 reference -- "
+        "RunProcess will silently no-op."),
+)
+
 
 LINE_RULES = [
     RULE_EMPTY_LITERAL_ARG,
@@ -213,6 +313,10 @@ LINE_RULES = [
     RULE_FOOTPRINT_NAME_WRITE,
     RULE_RULE_PRIORITY_WRITE,
     RULE_PROBE_TEXT_WRITE,
+    RULE_KNOWN_WRONG_E_IDENT,
+    RULE_KNOWN_WRONG_METHOD,
+    RULE_KNOWN_WRONG_PROPERTY,
+    RULE_KNOWN_WRONG_PROCESS,
 ]
 
 

@@ -263,13 +263,28 @@ Begin
         Exit;
     End;
 
-    { Map common menu paths to their process equivalents }
+    { Productive menu paths that have a dedicated handler -- delegate so   }
+    { the caller gets context-validation + violation counts back instead   }
+    { of a bare "success:true" that hides a silent no-op when there's no   }
+    { active PCB / SCH document. RunProcess never raises on missing        }
+    { context so the prior implementation reported success even when       }
+    { nothing actually ran.                                                 }
+    If MenuPath = 'Tools|Design Rule Check' Then
+    Begin
+        Result := PCB_RunDRC('{}', RequestId);
+        Exit;
+    End;
+    If MenuPath = 'Tools|Electrical Rules Check' Then
+    Begin
+        Result := Gen_RunERC('{}', RequestId);
+        Exit;
+    End;
+
+    { Map remaining common menu paths to their process equivalents.       }
+    { These are display-side commands where "did it fire" is the only     }
+    { reasonable success signal anyway.                                    }
     If MenuPath = 'File|Save All' Then
         ProcessName := 'WorkspaceManager:SaveAll'
-    Else If MenuPath = 'Tools|Design Rule Check' Then
-        ProcessName := 'PCB:RunDRC'
-    Else If MenuPath = 'Tools|Electrical Rules Check' Then
-        ProcessName := 'Sch:ERC'
     Else If MenuPath = 'Project|Compile' Then
         ProcessName := 'WorkspaceManager:Compile'
     Else If MenuPath = 'Edit|Select All' Then

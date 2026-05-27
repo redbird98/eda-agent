@@ -6514,6 +6514,853 @@ Begin
     End;
 End;
 
+{ Gen_GetSchGeometry - Walk the active SchDoc and emit every primitive's     }
+{ geometry as JSON, so a Python-side renderer can produce SVG independently  }
+{ of any third-party Altium parser. v1 surface:                              }
+{   - components: world position, orientation, designator, lib_ref, bbox    }
+{   - pins: world position, electrical-end / body direction, length         }
+{   - wires: vertex polylines                                                }
+{   - junctions, net labels, ports (with IOType + width), power ports       }
+{                                                                              }
+{ Coordinates are reported in mils. Symbol-internal primitives (rects,      }
+{ lines, arcs inside each symbol) are deferred to v2 - this v1 gives the    }
+{ renderer enough to draw recognizable boxed components with labelled pin   }
+{ stubs, wires, junctions, ports, and labels.                                }
+Function Gen_GetSchGeometry(Params : String; RequestId : String) : String;
+Var
+    SchDoc : ISch_Document;
+    Iter, PinIter, PrimIter, ParamIter, EntryIter : ISch_Iterator;
+    Obj, Prim : ISch_GraphicalObject;
+    Comp : ISch_Component;
+    Pin : ISch_Pin;
+    Wire : ISch_Wire;
+    NetLbl : ISch_NetLabel;
+    Port : ISch_Port;
+    Power : ISch_PowerObject;
+    Junct : ISch_Junction;
+    Rect : ISch_Rectangle;
+    RoundRect : ISch_RoundRectangle;
+    Line : ISch_Line;
+    Arc : ISch_Arc;
+    EllipArc : ISch_EllipticalArc;
+    Poly : ISch_Polyline;
+    Ellipse : ISch_Ellipse;
+    Bezier : ISch_Bezier;
+    ParamObj : ISch_Parameter;
+    SheetSym : ISch_SheetSymbol;
+    SheetEntry : ISch_SheetEntry;
+    Bus : ISch_Bus;
+    CompsJson, PinsJson, WiresJson, LabelsJson, PortsJson, PowerJson, JunctsJson : String;
+    SheetSymsJson, BusesJson, EntriesJson : String;
+    NumComps, NumWires, NumLabels, NumPorts, NumPower, NumJuncts, NumPins : Integer;
+    NumSheetSyms, NumBuses, NumEntries : Integer;
+    PrimJson, PrimPart, CompHeader, ParamsJson : String;
+    NumPrim, NumParams : Integer;
+    Loc : TLocation;
+    BBox : TCoordRect;
+    HasBBox : Boolean;
+    VtxN, V : Integer;
+    Vert : TLocation;
+    DesigText, LibRef, ElecStr, ParamName : String;
+    SheetName, SheetFile : String;
+    RespJson : String;
+Begin
+    SchDoc := SchServer.GetCurrentSchDocument;
+    If SchDoc = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_SCHDOC',
+            'No schematic document is active');
+        Exit;
+    End;
+
+    CompsJson := '[';      NumComps := 0;
+    PinsJson := '[';       NumPins := 0;
+    WiresJson := '[';      NumWires := 0;
+    LabelsJson := '[';     NumLabels := 0;
+    PortsJson := '[';      NumPorts := 0;
+    PowerJson := '[';      NumPower := 0;
+    JunctsJson := '[';     NumJuncts := 0;
+    SheetSymsJson := '['; NumSheetSyms := 0;
+    BusesJson := '[';     NumBuses := 0;
+
+    Iter := SchDoc.SchIterator_Create;
+    Iter.AddFilter_ObjectSet(MkSet(eSchComponent, eWire, eNetLabel,
+        ePort, ePowerObject, eJunction, eSheetSymbol, eBus));
+    Try
+        Obj := Iter.FirstSchObject;
+        While Obj <> Nil Do
+        Begin
+            If Obj.ObjectId = eSchComponent Then
+            Begin
+                Comp := Obj;
+                Loc := Comp.Location;
+                DesigText := '';
+                Try DesigText := Comp.Designator.Text; Except End;
+                LibRef := '';
+                Try LibRef := Comp.LibReference; Except End;
+                HasBBox := False;
+                Try
+                    BBox := Comp.BoundingRectangle;
+                    HasBBox := True;
+                Except
+                End;
+                If Not HasBBox Then
+                Begin
+                    { Fallback: a small box at the component origin so the    }
+                    { renderer still has something to draw if the API throws. }
+                    BBox.X1 := Loc.X - MilsToCoord(100);
+                    BBox.Y1 := Loc.Y - MilsToCoord(100);
+                    BBox.X2 := Loc.X + MilsToCoord(100);
+                    BBox.Y2 := Loc.Y + MilsToCoord(100);
+                End;
+                { Component header without primitives. The full record gets   }
+                { written after the primitives are collected, since v2 nests  }
+                { the symbol art inside the component object.                  }
+                CompHeader :=
+                    '{"des":"' + EscapeJsonString(DesigText) + '"' +
+                    ',"lib_ref":"' + EscapeJsonString(LibRef) + '"' +
+                    ',"x":' + IntToStr(CoordToMils(Loc.X)) +
+                    ',"y":' + IntToStr(CoordToMils(Loc.Y)) +
+                    ',"rot":' + IntToStr(Comp.Orientation * 90) +
+                    ',"mirror":' + BoolToJsonStr(Comp.IsMirrored) +
+                    ',"bbox":{"x1":' + IntToStr(CoordToMils(BBox.X1)) +
+                    ',"y1":' + IntToStr(CoordToMils(BBox.Y1)) +
+                    ',"x2":' + IntToStr(CoordToMils(BBox.X2)) +
+                    ',"y2":' + IntToStr(CoordToMils(BBox.Y2)) + '}';
+
+                { Symbol-internal primitives -- iterate the component's own   }
+                { children for rect / line / arc / polyline / polygon /       }
+                { ellipse so the renderer draws actual symbol art rather than }
+                { a labelled bounding box. Colors come back as Altium's       }
+                { BGR-packed integers; the Python side maps them to SVG.      }
+                PrimJson := '[';
+                NumPrim := 0;
+                PrimIter := Comp.SchIterator_Create;
+                PrimIter.AddFilter_ObjectSet(MkSet(eRectangle, eRoundRectangle,
+                    eLine, eArc, eEllipticalArc, ePolyline, ePolygon, eEllipse,
+                    eBezier));
+                Try
+                    Prim := PrimIter.FirstSchObject;
+                    While Prim <> Nil Do
+                    Begin
+                        PrimPart := '';
+                        If Prim.ObjectId = eRectangle Then
+                        Begin
+                            Rect := Prim;
+                            PrimPart := '{"kind":"rect"'
+                                + ',"x1":' + IntToStr(CoordToMils(Rect.Location.X))
+                                + ',"y1":' + IntToStr(CoordToMils(Rect.Location.Y))
+                                + ',"x2":' + IntToStr(CoordToMils(Rect.Corner.X))
+                                + ',"y2":' + IntToStr(CoordToMils(Rect.Corner.Y))
+                                + ',"color":' + IntToStr(Rect.Color)
+                                + ',"line_width":' + IntToStr(Rect.LineWidth)
+                                + ',"area_color":' + IntToStr(Rect.AreaColor)
+                                + ',"is_solid":' + BoolToJsonStr(Rect.IsSolid)
+                                + '}';
+                        End
+                        Else If Prim.ObjectId = eRoundRectangle Then
+                        Begin
+                            RoundRect := Prim;
+                            PrimPart := '{"kind":"roundrect"'
+                                + ',"x1":' + IntToStr(CoordToMils(RoundRect.Location.X))
+                                + ',"y1":' + IntToStr(CoordToMils(RoundRect.Location.Y))
+                                + ',"x2":' + IntToStr(CoordToMils(RoundRect.Corner.X))
+                                + ',"y2":' + IntToStr(CoordToMils(RoundRect.Corner.Y))
+                                + ',"rx":' + IntToStr(CoordToMils(RoundRect.CornerXRadius))
+                                + ',"ry":' + IntToStr(CoordToMils(RoundRect.CornerYRadius))
+                                + ',"color":' + IntToStr(RoundRect.Color)
+                                + ',"line_width":' + IntToStr(RoundRect.LineWidth)
+                                + ',"area_color":' + IntToStr(RoundRect.AreaColor)
+                                + ',"is_solid":' + BoolToJsonStr(RoundRect.IsSolid)
+                                + '}';
+                        End
+                        Else If Prim.ObjectId = eLine Then
+                        Begin
+                            Line := Prim;
+                            PrimPart := '{"kind":"line"'
+                                + ',"x1":' + IntToStr(CoordToMils(Line.Location.X))
+                                + ',"y1":' + IntToStr(CoordToMils(Line.Location.Y))
+                                + ',"x2":' + IntToStr(CoordToMils(Line.Corner.X))
+                                + ',"y2":' + IntToStr(CoordToMils(Line.Corner.Y))
+                                + ',"color":' + IntToStr(Line.Color)
+                                + ',"line_width":' + IntToStr(Line.LineWidth)
+                                + '}';
+                        End
+                        Else If Prim.ObjectId = eArc Then
+                        Begin
+                            Arc := Prim;
+                            PrimPart := '{"kind":"arc"'
+                                + ',"cx":' + IntToStr(CoordToMils(Arc.Location.X))
+                                + ',"cy":' + IntToStr(CoordToMils(Arc.Location.Y))
+                                + ',"r":' + IntToStr(CoordToMils(Arc.Radius))
+                                + ',"start":' + FloatToJsonStr(Arc.StartAngle)
+                                + ',"end":' + FloatToJsonStr(Arc.EndAngle)
+                                + ',"color":' + IntToStr(Arc.Color)
+                                + ',"line_width":' + IntToStr(Arc.LineWidth)
+                                + '}';
+                        End
+                        Else If Prim.ObjectId = eEllipticalArc Then
+                        Begin
+                            EllipArc := Prim;
+                            PrimPart := '{"kind":"arc"'
+                                + ',"cx":' + IntToStr(CoordToMils(EllipArc.Location.X))
+                                + ',"cy":' + IntToStr(CoordToMils(EllipArc.Location.Y))
+                                + ',"r":' + IntToStr(CoordToMils(EllipArc.Radius))
+                                + ',"r2":' + IntToStr(CoordToMils(EllipArc.SecondaryRadius))
+                                + ',"start":' + FloatToJsonStr(EllipArc.StartAngle)
+                                + ',"end":' + FloatToJsonStr(EllipArc.EndAngle)
+                                + ',"color":' + IntToStr(EllipArc.Color)
+                                + ',"line_width":' + IntToStr(EllipArc.LineWidth)
+                                + '}';
+                        End
+                        Else If (Prim.ObjectId = ePolyline) Or (Prim.ObjectId = ePolygon) Then
+                        Begin
+                            Poly := Prim;
+                            VtxN := 0;
+                            Try VtxN := Poly.GetState_VerticesCount; Except End;
+                            If VtxN >= 2 Then
+                            Begin
+                                If Prim.ObjectId = ePolyline Then
+                                    PrimPart := '{"kind":"polyline","pts":['
+                                Else
+                                    PrimPart := '{"kind":"polygon","pts":[';
+                                For V := 1 To VtxN Do
+                                Begin
+                                    Vert := Poly.GetState_Vertex(V);
+                                    If V > 1 Then PrimPart := PrimPart + ',';
+                                    PrimPart := PrimPart + '['
+                                        + IntToStr(CoordToMils(Vert.X)) + ','
+                                        + IntToStr(CoordToMils(Vert.Y)) + ']';
+                                End;
+                                PrimPart := PrimPart + ']'
+                                    + ',"color":' + IntToStr(Poly.Color)
+                                    + ',"line_width":' + IntToStr(Poly.LineWidth)
+                                    + ',"area_color":' + IntToStr(Poly.AreaColor)
+                                    + ',"is_solid":' + BoolToJsonStr(Poly.IsSolid)
+                                    + '}';
+                            End;
+                        End
+                        Else If Prim.ObjectId = eEllipse Then
+                        Begin
+                            Ellipse := Prim;
+                            PrimPart := '{"kind":"ellipse"'
+                                + ',"cx":' + IntToStr(CoordToMils(Ellipse.Location.X))
+                                + ',"cy":' + IntToStr(CoordToMils(Ellipse.Location.Y))
+                                + ',"rx":' + IntToStr(CoordToMils(Ellipse.Radius))
+                                + ',"ry":' + IntToStr(CoordToMils(Ellipse.SecondaryRadius))
+                                + ',"color":' + IntToStr(Ellipse.Color)
+                                + ',"line_width":' + IntToStr(Ellipse.LineWidth)
+                                + ',"area_color":' + IntToStr(Ellipse.AreaColor)
+                                + ',"is_solid":' + BoolToJsonStr(Ellipse.IsSolid)
+                                + '}';
+                        End
+                        Else If Prim.ObjectId = eBezier Then
+                        Begin
+                            Bezier := Prim;
+                            VtxN := 0;
+                            Try VtxN := Bezier.GetState_VerticesCount; Except End;
+                            If VtxN >= 4 Then
+                            Begin
+                                PrimPart := '{"kind":"bezier","pts":[';
+                                For V := 1 To VtxN Do
+                                Begin
+                                    Vert := Bezier.GetState_Vertex(V);
+                                    If V > 1 Then PrimPart := PrimPart + ',';
+                                    PrimPart := PrimPart + '['
+                                        + IntToStr(CoordToMils(Vert.X)) + ','
+                                        + IntToStr(CoordToMils(Vert.Y)) + ']';
+                                End;
+                                PrimPart := PrimPart + ']'
+                                    + ',"color":' + IntToStr(Bezier.Color)
+                                    + ',"line_width":' + IntToStr(Bezier.LineWidth)
+                                    + '}';
+                            End;
+                        End;
+                        If PrimPart <> '' Then
+                        Begin
+                            If NumPrim > 0 Then PrimJson := PrimJson + ',';
+                            PrimJson := PrimJson + PrimPart;
+                            Inc(NumPrim);
+                        End;
+                        Prim := PrimIter.NextSchObject;
+                    End;
+                Finally
+                    Comp.SchIterator_Destroy(PrimIter);
+                End;
+                PrimJson := PrimJson + ']';
+
+                { Symbol-internal parameter text -- the visible labels   }
+                { living inside the symbol (other than the special       }
+                { Designator / Comment, which the top-level handles).    }
+                { Hidden parameters and the two specials are skipped.    }
+                ParamsJson := '[';
+                NumParams := 0;
+                ParamIter := Comp.SchIterator_Create;
+                ParamIter.AddFilter_ObjectSet(MkSet(eParameter));
+                Try
+                    ParamObj := ParamIter.FirstSchObject;
+                    While ParamObj <> Nil Do
+                    Begin
+                        ParamName := '';
+                        Try ParamName := ParamObj.Name; Except End;
+                        If (Not ParamObj.IsHidden)
+                                And (ParamName <> 'Designator')
+                                And (ParamName <> 'Comment') Then
+                        Begin
+                            If NumParams > 0 Then ParamsJson := ParamsJson + ',';
+                            ParamsJson := ParamsJson +
+                                '{"name":"' + EscapeJsonString(ParamName) + '"' +
+                                ',"text":"' + EscapeJsonString(ParamObj.Text) + '"' +
+                                ',"x":' + IntToStr(CoordToMils(ParamObj.Location.X)) +
+                                ',"y":' + IntToStr(CoordToMils(ParamObj.Location.Y)) +
+                                ',"rot":' + IntToStr(ParamObj.Orientation * 90) +
+                                ',"color":' + IntToStr(ParamObj.Color) +
+                                ',"font_id":' + IntToStr(ParamObj.FontId) + '}';
+                            Inc(NumParams);
+                        End;
+                        ParamObj := ParamIter.NextSchObject;
+                    End;
+                Finally
+                    Comp.SchIterator_Destroy(ParamIter);
+                End;
+                ParamsJson := ParamsJson + ']';
+
+                If NumComps > 0 Then CompsJson := CompsJson + ',';
+                CompsJson := CompsJson + CompHeader
+                    + ',"primitives":' + PrimJson
+                    + ',"params":' + ParamsJson + '}';
+                Inc(NumComps);
+
+                PinIter := Comp.SchIterator_Create;
+                PinIter.AddFilter_ObjectSet(MkSet(ePin));
+                Try
+                    Pin := PinIter.FirstSchObject;
+                    While Pin <> Nil Do
+                    Begin
+                        Loc := Pin.Location;
+                        { Electrical type as a string so the renderer can map }
+                        { straight to a glyph (input arrow / OC bubble / ...). }
+                        ElecStr := 'passive';
+                        Try
+                            If Pin.Electrical = eElectricInput Then ElecStr := 'input'
+                            Else If Pin.Electrical = eElectricOutput Then ElecStr := 'output'
+                            Else If Pin.Electrical = eElectricIO Then ElecStr := 'io'
+                            Else If Pin.Electrical = eElectricPower Then ElecStr := 'power'
+                            Else If Pin.Electrical = eElectricOpenCollector Then ElecStr := 'open_collector'
+                            Else If Pin.Electrical = eElectricOpenEmitter Then ElecStr := 'open_emitter'
+                            Else If Pin.Electrical = eElectricHiZ Then ElecStr := 'hiz';
+                        Except End;
+                        If NumPins > 0 Then PinsJson := PinsJson + ',';
+                        PinsJson := PinsJson +
+                            '{"comp":"' + EscapeJsonString(DesigText) + '"' +
+                            ',"des":"' + EscapeJsonString(Pin.Designator) + '"' +
+                            ',"name":"' + EscapeJsonString(Pin.Name) + '"' +
+                            ',"x":' + IntToStr(CoordToMils(Loc.X)) +
+                            ',"y":' + IntToStr(CoordToMils(Loc.Y)) +
+                            ',"rot":' + IntToStr(Pin.Orientation * 90) +
+                            ',"len":' + IntToStr(CoordToMils(Pin.PinLength)) +
+                            ',"electrical":"' + EscapeJsonString(ElecStr) + '"}';
+                        Inc(NumPins);
+                        Pin := PinIter.NextSchObject;
+                    End;
+                Finally
+                    Comp.SchIterator_Destroy(PinIter);
+                End;
+            End
+            Else If Obj.ObjectId = eWire Then
+            Begin
+                Wire := Obj;
+                VtxN := 0;
+                Try VtxN := Wire.GetState_VerticesCount; Except End;
+                If VtxN >= 2 Then
+                Begin
+                    If NumWires > 0 Then WiresJson := WiresJson + ',';
+                    WiresJson := WiresJson + '{"verts":[';
+                    For V := 1 To VtxN Do
+                    Begin
+                        Vert := Wire.GetState_Vertex(V);
+                        If V > 1 Then WiresJson := WiresJson + ',';
+                        WiresJson := WiresJson + '['
+                            + IntToStr(CoordToMils(Vert.X)) + ','
+                            + IntToStr(CoordToMils(Vert.Y)) + ']';
+                    End;
+                    WiresJson := WiresJson + ']}';
+                    Inc(NumWires);
+                End;
+            End
+            Else If Obj.ObjectId = eNetLabel Then
+            Begin
+                NetLbl := Obj;
+                Loc := NetLbl.Location;
+                If NumLabels > 0 Then LabelsJson := LabelsJson + ',';
+                LabelsJson := LabelsJson +
+                    '{"text":"' + EscapeJsonString(NetLbl.Text) + '"' +
+                    ',"x":' + IntToStr(CoordToMils(Loc.X)) +
+                    ',"y":' + IntToStr(CoordToMils(Loc.Y)) +
+                    ',"rot":' + IntToStr(NetLbl.Orientation * 90) + '}';
+                Inc(NumLabels);
+            End
+            Else If Obj.ObjectId = ePort Then
+            Begin
+                Port := Obj;
+                Loc := Port.Location;
+                If NumPorts > 0 Then PortsJson := PortsJson + ',';
+                PortsJson := PortsJson +
+                    '{"text":"' + EscapeJsonString(Port.Name) + '"' +
+                    ',"x":' + IntToStr(CoordToMils(Loc.X)) +
+                    ',"y":' + IntToStr(CoordToMils(Loc.Y)) +
+                    ',"w":' + IntToStr(CoordToMils(Port.Width)) +
+                    ',"iotype":' + IntToStr(Port.IOType) + '}';
+                Inc(NumPorts);
+            End
+            Else If Obj.ObjectId = ePowerObject Then
+            Begin
+                Power := Obj;
+                Loc := Power.Location;
+                If NumPower > 0 Then PowerJson := PowerJson + ',';
+                PowerJson := PowerJson +
+                    '{"text":"' + EscapeJsonString(Power.Text) + '"' +
+                    ',"x":' + IntToStr(CoordToMils(Loc.X)) +
+                    ',"y":' + IntToStr(CoordToMils(Loc.Y)) +
+                    ',"style":' + IntToStr(Power.Style) +
+                    ',"rot":' + IntToStr(Power.Orientation * 90) + '}';
+                Inc(NumPower);
+            End
+            Else If Obj.ObjectId = eJunction Then
+            Begin
+                Junct := Obj;
+                Loc := Junct.Location;
+                If NumJuncts > 0 Then JunctsJson := JunctsJson + ',';
+                JunctsJson := JunctsJson +
+                    '{"x":' + IntToStr(CoordToMils(Loc.X)) +
+                    ',"y":' + IntToStr(CoordToMils(Loc.Y)) + '}';
+                Inc(NumJuncts);
+            End
+            Else If Obj.ObjectId = eSheetSymbol Then
+            Begin
+                { Hierarchical sheet symbols are the labelled boxes on the   }
+                { top sheet that represent sub-sheets. Their interior is     }
+                { otherwise empty so without rendering them a top-of-design  }
+                { sheet renders as blank space. We also walk their child     }
+                { eSheetEntry terminals so the renderer can draw the IO     }
+                { stubs at the right edges.                                   }
+                SheetSym := Obj;
+                Loc := SheetSym.Location;
+                SheetName := '';
+                Try If SheetSym.SheetName <> Nil Then SheetName := SheetSym.SheetName.Text; Except End;
+                SheetFile := '';
+                Try If SheetSym.SheetFileName <> Nil Then SheetFile := SheetSym.SheetFileName.Text; Except End;
+
+                EntriesJson := '[';
+                NumEntries := 0;
+                EntryIter := SheetSym.SchIterator_Create;
+                EntryIter.AddFilter_ObjectSet(MkSet(eSheetEntry));
+                Try
+                    SheetEntry := EntryIter.FirstSchObject;
+                    While SheetEntry <> Nil Do
+                    Begin
+                        If NumEntries > 0 Then EntriesJson := EntriesJson + ',';
+                        EntriesJson := EntriesJson +
+                            '{"name":"' + EscapeJsonString(SheetEntry.Name) + '"' +
+                            ',"x":' + IntToStr(CoordToMils(SheetEntry.Location.X)) +
+                            ',"y":' + IntToStr(CoordToMils(SheetEntry.Location.Y)) +
+                            ',"iotype":' + IntToStr(SheetEntry.IOType) +
+                            ',"side":' + IntToStr(SheetEntry.Side) + '}';
+                        Inc(NumEntries);
+                        SheetEntry := EntryIter.NextSchObject;
+                    End;
+                Finally
+                    SheetSym.SchIterator_Destroy(EntryIter);
+                End;
+                EntriesJson := EntriesJson + ']';
+
+                If NumSheetSyms > 0 Then SheetSymsJson := SheetSymsJson + ',';
+                SheetSymsJson := SheetSymsJson +
+                    '{"name":"' + EscapeJsonString(SheetName) + '"' +
+                    ',"filename":"' + EscapeJsonString(SheetFile) + '"' +
+                    ',"x":' + IntToStr(CoordToMils(Loc.X)) +
+                    ',"y":' + IntToStr(CoordToMils(Loc.Y)) +
+                    ',"w":' + IntToStr(CoordToMils(SheetSym.XSize)) +
+                    ',"h":' + IntToStr(CoordToMils(SheetSym.YSize)) +
+                    ',"color":' + IntToStr(SheetSym.Color) +
+                    ',"area_color":' + IntToStr(SheetSym.AreaColor) +
+                    ',"entries":' + EntriesJson + '}';
+                Inc(NumSheetSyms);
+            End
+            Else If Obj.ObjectId = eBus Then
+            Begin
+                { Buses share their vertex API with wires (ISch_Polyline      }
+                { children). Emitted separately so the renderer can draw     }
+                { them thicker / in a distinct colour.                        }
+                Bus := Obj;
+                VtxN := 0;
+                Try VtxN := Bus.GetState_VerticesCount; Except End;
+                If VtxN >= 2 Then
+                Begin
+                    If NumBuses > 0 Then BusesJson := BusesJson + ',';
+                    BusesJson := BusesJson + '{"verts":[';
+                    For V := 1 To VtxN Do
+                    Begin
+                        Vert := Bus.GetState_Vertex(V);
+                        If V > 1 Then BusesJson := BusesJson + ',';
+                        BusesJson := BusesJson + '['
+                            + IntToStr(CoordToMils(Vert.X)) + ','
+                            + IntToStr(CoordToMils(Vert.Y)) + ']';
+                    End;
+                    BusesJson := BusesJson + ']}';
+                    Inc(NumBuses);
+                End;
+            End;
+            Obj := Iter.NextSchObject;
+        End;
+    Finally
+        SchDoc.SchIterator_Destroy(Iter);
+    End;
+
+    CompsJson    := CompsJson    + ']';
+    PinsJson     := PinsJson     + ']';
+    WiresJson    := WiresJson    + ']';
+    LabelsJson   := LabelsJson   + ']';
+    PortsJson    := PortsJson    + ']';
+    PowerJson    := PowerJson    + ']';
+    JunctsJson   := JunctsJson   + ']';
+    SheetSymsJson := SheetSymsJson + ']';
+    BusesJson    := BusesJson    + ']';
+
+    RespJson :=
+        '{"doc":"' + EscapeJsonString(SchDoc.DocumentName) + '"' +
+        ',"counts":{"components":' + IntToStr(NumComps) +
+        ',"pins":' + IntToStr(NumPins) +
+        ',"wires":' + IntToStr(NumWires) +
+        ',"net_labels":' + IntToStr(NumLabels) +
+        ',"ports":' + IntToStr(NumPorts) +
+        ',"power_ports":' + IntToStr(NumPower) +
+        ',"junctions":' + IntToStr(NumJuncts) +
+        ',"sheet_symbols":' + IntToStr(NumSheetSyms) +
+        ',"buses":' + IntToStr(NumBuses) + '}' +
+        ',"components":' + CompsJson +
+        ',"pins":' + PinsJson +
+        ',"wires":' + WiresJson +
+        ',"net_labels":' + LabelsJson +
+        ',"ports":' + PortsJson +
+        ',"power_ports":' + PowerJson +
+        ',"junctions":' + JunctsJson +
+        ',"sheet_symbols":' + SheetSymsJson +
+        ',"buses":' + BusesJson + '}';
+    Result := BuildSuccessResponse(RequestId, RespJson);
+End;
+
+{ Gen_GetPcbGeometry - Walk the active PcbDoc and emit every primitive's    }
+{ geometry as JSON so a Python-side renderer can produce per-layer SVG     }
+{ independently of any third-party Altium parser.                          }
+{                                                                              }
+{ v1 surface:                                                                  }
+{   - board outline (segments as a line/arc polyline)                         }
+{   - tracks (X1/Y1/X2/Y2, width, layer, net)                                 }
+{   - arcs (center, radius, start/end angle, width, layer, net)               }
+{   - pads (location, shape, x_size, y_size, rotation, hole_size, layer, net) }
+{   - vias (location, size, hole, high/low layer, net)                        }
+{   - texts (location, text, size, width, rotation, layer)                    }
+{                                                                              }
+{ Coordinates in mils. Layer names come back as Altium's GetLayerString      }
+{ form so the renderer can z-order, colour, and toggle by name.              }
+{ Deferred to v2: regions / polygon fills, component bodies, drill drawing. }
+Function Gen_GetPcbGeometry(Params : String; RequestId : String) : String;
+Var
+    Board : IPCB_Board;
+    Iter : IPCB_BoardIterator;
+    Obj : IPCB_Primitive;
+    Track : IPCB_Track;
+    Arc : IPCB_Arc;
+    Pad : IPCB_Pad;
+    Via : IPCB_Via;
+    Text : IPCB_Text;
+    Region : IPCB_Region;
+    Contour : IPCB_Contour;
+    CompObj : IPCB_Component;
+    Outline : IPCB_BoardOutline;
+    OutlineJson, TracksJson, ArcsJson, PadsJson, ViasJson, TextsJson : String;
+    RegionsJson, CompsJson : String;
+    NumTracks, NumArcs, NumPads, NumVias, NumTexts, NumOutline : Integer;
+    NumRegions, NumComps : Integer;
+    LayerName, ShapeStr, NetName, TextStr, PadName, HoleStr : String;
+    BR : TCoordRect;
+    I, K, PtCount : Integer;
+    Seg : TPolySegment;
+    RespJson : String;
+Begin
+    Board := GetPCBBoardAnywhere;
+    If Board = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCB',
+            'No PCB document is active');
+        Exit;
+    End;
+
+    { Board outline: walk Segments. Each carries a vertex (vx, vy) and -- }
+    { for arc segments -- a center (cx, cy) + radius + angles. v1 keeps   }
+    { both kinds; the renderer can draw arc segments as proper arcs or    }
+    { fall back to chord lines.                                             }
+    OutlineJson := '['; NumOutline := 0;
+    Outline := Board.BoardOutline;
+    If Outline <> Nil Then
+    Begin
+        Try Outline.Invalidate; Outline.Rebuild; Outline.Validate; Except End;
+        For I := 0 To Outline.PointCount - 1 Do
+        Begin
+            Seg := Outline.Segments[I];
+            If NumOutline > 0 Then OutlineJson := OutlineJson + ',';
+            If Seg.Kind = ePolySegmentLine Then
+            Begin
+                OutlineJson := OutlineJson +
+                    '{"kind":"line"' +
+                    ',"x":' + IntToStr(CoordToMils(Seg.vx)) +
+                    ',"y":' + IntToStr(CoordToMils(Seg.vy)) + '}';
+            End
+            Else
+            Begin
+                OutlineJson := OutlineJson +
+                    '{"kind":"arc"' +
+                    ',"x":' + IntToStr(CoordToMils(Seg.vx)) +
+                    ',"y":' + IntToStr(CoordToMils(Seg.vy)) +
+                    ',"cx":' + IntToStr(CoordToMils(Seg.cx)) +
+                    ',"cy":' + IntToStr(CoordToMils(Seg.cy)) +
+                    ',"angle1":' + FloatToJsonStr(Seg.Angle1) +
+                    ',"angle2":' + FloatToJsonStr(Seg.Angle2) +
+                    ',"radius":' + IntToStr(CoordToMils(Seg.Radius)) + '}';
+            End;
+            Inc(NumOutline);
+        End;
+    End;
+    OutlineJson := OutlineJson + ']';
+
+    BR := Board.BoardOutline.BoundingRectangle;
+
+    TracksJson := '['; NumTracks := 0;
+    ArcsJson := '[';   NumArcs := 0;
+    PadsJson := '[';   NumPads := 0;
+    ViasJson := '[';   NumVias := 0;
+    TextsJson := '[';  NumTexts := 0;
+    RegionsJson := '['; NumRegions := 0;
+    CompsJson := '[';   NumComps := 0;
+
+    Iter := Board.BoardIterator_Create;
+    Iter.AddFilter_ObjectSet(MkSet(eTrackObject, eArcObject, ePadObject,
+        eViaObject, eTextObject, eRegionObject, eComponentObject));
+    Iter.AddFilter_LayerSet(AllLayers);
+    Iter.AddFilter_Method(eProcessAll);
+    Try
+        Obj := Iter.FirstPCBObject;
+        While Obj <> Nil Do
+        Begin
+            LayerName := '';
+            Try LayerName := GetLayerString(Obj.Layer); Except End;
+
+            If Obj.ObjectId = eTrackObject Then
+            Begin
+                Track := Obj;
+                NetName := '';
+                Try If Track.Net <> Nil Then NetName := Track.Net.Name; Except End;
+                If NumTracks > 0 Then TracksJson := TracksJson + ',';
+                TracksJson := TracksJson +
+                    '{"x1":' + IntToStr(CoordToMils(Track.X1)) +
+                    ',"y1":' + IntToStr(CoordToMils(Track.Y1)) +
+                    ',"x2":' + IntToStr(CoordToMils(Track.X2)) +
+                    ',"y2":' + IntToStr(CoordToMils(Track.Y2)) +
+                    ',"width":' + IntToStr(CoordToMils(Track.Width)) +
+                    ',"layer":"' + EscapeJsonString(LayerName) + '"' +
+                    ',"net":"' + EscapeJsonString(NetName) + '"}';
+                Inc(NumTracks);
+            End
+            Else If Obj.ObjectId = eArcObject Then
+            Begin
+                Arc := Obj;
+                NetName := '';
+                Try If Arc.Net <> Nil Then NetName := Arc.Net.Name; Except End;
+                If NumArcs > 0 Then ArcsJson := ArcsJson + ',';
+                ArcsJson := ArcsJson +
+                    '{"cx":' + IntToStr(CoordToMils(Arc.XCenter)) +
+                    ',"cy":' + IntToStr(CoordToMils(Arc.YCenter)) +
+                    ',"r":' + IntToStr(CoordToMils(Arc.Radius)) +
+                    ',"start":' + FloatToJsonStr(Arc.StartAngle) +
+                    ',"end":' + FloatToJsonStr(Arc.EndAngle) +
+                    ',"width":' + IntToStr(CoordToMils(Arc.LineWidth)) +
+                    ',"layer":"' + EscapeJsonString(LayerName) + '"' +
+                    ',"net":"' + EscapeJsonString(NetName) + '"}';
+                Inc(NumArcs);
+            End
+            Else If Obj.ObjectId = ePadObject Then
+            Begin
+                Pad := Obj;
+                ShapeStr := 'Round';
+                Try
+                    If Pad.TopShape = eRounded Then ShapeStr := 'Round'
+                    Else If Pad.TopShape = eRectangular Then ShapeStr := 'Rectangular'
+                    Else If Pad.TopShape = eOctagonal Then ShapeStr := 'Octagonal'
+                    Else If Pad.TopShape = eRoundedRectangular Then ShapeStr := 'RoundedRect';
+                Except End;
+                { Drill shape: round / square / slot. Slot pads expose a   }
+                { separate hole_width and a hole_rotation; round + square }
+                { reuse hole_size for the width/diameter.                  }
+                HoleStr := 'Round';
+                Try
+                    If Pad.HoleType = eSquareHole Then HoleStr := 'Square'
+                    Else If Pad.HoleType = eSlotHole Then HoleStr := 'Slot';
+                Except End;
+                NetName := '';
+                Try If Pad.Net <> Nil Then NetName := Pad.Net.Name; Except End;
+                PadName := '';
+                Try PadName := Pad.Name; Except End;
+                { Owning component's designator -- empty for free pads     }
+                { (fiducials, mounting holes, board-level pads). Lets the  }
+                { renderer attach data-designator so a pad click on the    }
+                { PCB SVG can open the parent component's drawer.          }
+                TextStr := '';
+                Try
+                    If Pad.Component <> Nil Then TextStr := Pad.Component.Name.Text;
+                Except End;
+                If NumPads > 0 Then PadsJson := PadsJson + ',';
+                PadsJson := PadsJson +
+                    '{"x":' + IntToStr(CoordToMils(Pad.X)) +
+                    ',"y":' + IntToStr(CoordToMils(Pad.Y)) +
+                    ',"x_size":' + IntToStr(CoordToMils(Pad.TopXSize)) +
+                    ',"y_size":' + IntToStr(CoordToMils(Pad.TopYSize)) +
+                    ',"shape":"' + EscapeJsonString(ShapeStr) + '"' +
+                    ',"hole_size":' + IntToStr(CoordToMils(Pad.HoleSize)) +
+                    ',"hole_type":"' + EscapeJsonString(HoleStr) + '"' +
+                    ',"hole_width":' + IntToStr(CoordToMils(Pad.HoleWidth)) +
+                    ',"hole_rotation":' + FloatToJsonStr(Pad.HoleRotation) +
+                    ',"rotation":' + FloatToJsonStr(Pad.Rotation) +
+                    ',"layer":"' + EscapeJsonString(LayerName) + '"' +
+                    ',"name":"' + EscapeJsonString(PadName) + '"' +
+                    ',"comp":"' + EscapeJsonString(TextStr) + '"' +
+                    ',"net":"' + EscapeJsonString(NetName) + '"}';
+                Inc(NumPads);
+            End
+            Else If Obj.ObjectId = eViaObject Then
+            Begin
+                Via := Obj;
+                NetName := '';
+                Try If Via.Net <> Nil Then NetName := Via.Net.Name; Except End;
+                If NumVias > 0 Then ViasJson := ViasJson + ',';
+                ViasJson := ViasJson +
+                    '{"x":' + IntToStr(CoordToMils(Via.X)) +
+                    ',"y":' + IntToStr(CoordToMils(Via.Y)) +
+                    ',"size":' + IntToStr(CoordToMils(Via.Size)) +
+                    ',"hole_size":' + IntToStr(CoordToMils(Via.HoleSize)) +
+                    ',"high_layer":"' + EscapeJsonString(GetLayerString(Via.HighLayer)) + '"' +
+                    ',"low_layer":"' + EscapeJsonString(GetLayerString(Via.LowLayer)) + '"' +
+                    ',"net":"' + EscapeJsonString(NetName) + '"}';
+                Inc(NumVias);
+            End
+            Else If Obj.ObjectId = eTextObject Then
+            Begin
+                Text := Obj;
+                TextStr := '';
+                Try TextStr := Text.Text; Except End;
+                If TextStr = '' Then Try TextStr := Text.UnderlyingString; Except End;
+                If NumTexts > 0 Then TextsJson := TextsJson + ',';
+                TextsJson := TextsJson +
+                    '{"x":' + IntToStr(CoordToMils(Text.XLocation)) +
+                    ',"y":' + IntToStr(CoordToMils(Text.YLocation)) +
+                    ',"text":"' + EscapeJsonString(TextStr) + '"' +
+                    ',"size":' + IntToStr(CoordToMils(Text.Size)) +
+                    ',"width":' + IntToStr(CoordToMils(Text.Width)) +
+                    ',"rotation":' + FloatToJsonStr(Text.Rotation) +
+                    ',"layer":"' + EscapeJsonString(LayerName) + '"}';
+                Inc(NumTexts);
+            End
+            Else If Obj.ObjectId = eRegionObject Then
+            Begin
+                { Regions are the actual poured copper on a board -- the   }
+                { biggest visual gap a tracks-only render leaves behind.   }
+                { MainContour is 1-based and indexes X[i] / Y[i] arrays.   }
+                Region := Obj;
+                NetName := '';
+                Try If Region.Net <> Nil Then NetName := Region.Net.Name; Except End;
+                Contour := Nil;
+                PtCount := 0;
+                Try
+                    Contour := Region.MainContour;
+                    If Contour <> Nil Then PtCount := Contour.Count;
+                Except
+                End;
+                If (Contour <> Nil) And (PtCount >= 3) Then
+                Begin
+                    If NumRegions > 0 Then RegionsJson := RegionsJson + ',';
+                    RegionsJson := RegionsJson +
+                        '{"layer":"' + EscapeJsonString(LayerName) + '"' +
+                        ',"net":"' + EscapeJsonString(NetName) + '"' +
+                        ',"pts":[';
+                    For K := 1 To PtCount Do
+                    Begin
+                        If K > 1 Then RegionsJson := RegionsJson + ',';
+                        RegionsJson := RegionsJson + '['
+                            + IntToStr(CoordToMils(Contour.X[K])) + ','
+                            + IntToStr(CoordToMils(Contour.Y[K])) + ']';
+                    End;
+                    RegionsJson := RegionsJson + ']}';
+                    Inc(NumRegions);
+                End;
+            End
+            Else If Obj.ObjectId = eComponentObject Then
+            Begin
+                { Component identity -- mostly so the renderer can place a }
+                { designator label next to each footprint on a virtual    }
+                { "Designators" pseudo-layer. The actual silkscreen art    }
+                { for each footprint is already emitted via its child     }
+                { tracks / arcs / texts on the *Overlay layers.            }
+                CompObj := Obj;
+                TextStr := '';
+                Try TextStr := CompObj.Name.Text; Except End;
+                If TextStr = '' Then Try TextStr := CompObj.SourceDesignator; Except End;
+                If NumComps > 0 Then CompsJson := CompsJson + ',';
+                CompsJson := CompsJson +
+                    '{"des":"' + EscapeJsonString(TextStr) + '"' +
+                    ',"x":' + IntToStr(CoordToMils(CompObj.X)) +
+                    ',"y":' + IntToStr(CoordToMils(CompObj.Y)) +
+                    ',"rotation":' + FloatToJsonStr(CompObj.Rotation) +
+                    ',"layer":"' + EscapeJsonString(LayerName) + '"}';
+                Inc(NumComps);
+            End;
+            Obj := Iter.NextPCBObject;
+        End;
+    Finally
+        Board.BoardIterator_Destroy(Iter);
+    End;
+
+    TracksJson  := TracksJson  + ']';
+    ArcsJson    := ArcsJson    + ']';
+    PadsJson    := PadsJson    + ']';
+    ViasJson    := ViasJson    + ']';
+    TextsJson   := TextsJson   + ']';
+    RegionsJson := RegionsJson + ']';
+    CompsJson   := CompsJson   + ']';
+
+    RespJson :=
+        '{"counts":{"outline":' + IntToStr(NumOutline) +
+        ',"tracks":' + IntToStr(NumTracks) +
+        ',"arcs":' + IntToStr(NumArcs) +
+        ',"pads":' + IntToStr(NumPads) +
+        ',"vias":' + IntToStr(NumVias) +
+        ',"texts":' + IntToStr(NumTexts) +
+        ',"regions":' + IntToStr(NumRegions) +
+        ',"components":' + IntToStr(NumComps) + '}' +
+        ',"bbox":{"x1":' + IntToStr(CoordToMils(BR.X1)) +
+        ',"y1":' + IntToStr(CoordToMils(BR.Y1)) +
+        ',"x2":' + IntToStr(CoordToMils(BR.X2)) +
+        ',"y2":' + IntToStr(CoordToMils(BR.Y2)) + '}' +
+        ',"outline":' + OutlineJson +
+        ',"tracks":' + TracksJson +
+        ',"arcs":' + ArcsJson +
+        ',"pads":' + PadsJson +
+        ',"vias":' + ViasJson +
+        ',"texts":' + TextsJson +
+        ',"regions":' + RegionsJson +
+        ',"components":' + CompsJson + '}';
+    Result := BuildSuccessResponse(RequestId, RespJson);
+End;
+
 {..............................................................................}
 { Command Handler - must be at end                                            }
 {..............................................................................}
@@ -6533,6 +7380,8 @@ Begin
         'deselect_all':     Result := Gen_DeselectAll(RequestId);
         'zoom':             Result := Gen_Zoom(Params, RequestId);
         'run_erc':          Result := Gen_RunERC(Params, RequestId);
+        'get_sch_geometry': Result := Gen_GetSchGeometry(Params, RequestId);
+        'get_pcb_geometry': Result := Gen_GetPcbGeometry(Params, RequestId);
         'highlight_net':    Result := Gen_HighlightNet(Params, RequestId);
         'clear_highlights': Result := Gen_ClearHighlights(RequestId);
         'crossref_net':     Result := Gen_CrossRefNet(Params, RequestId);

@@ -3511,6 +3511,97 @@ Begin
     End;
 End;
 
+{ Lib_ExtractIntLib - Extract .SchLib and .PcbLib sources from an .IntLib.   }
+{                                                                              }
+{ An Altium .IntLib (integrated library) packages compiled symbol and        }
+{ footprint libraries together; the editor's "Extract Sources" command       }
+{ writes the underlying .SchLib + .PcbLib back to disk so they can be        }
+{ inspected or modified. This handler opens the .IntLib, runs the extract   }
+{ process, and then probes the conventional output locations (Altium drops  }
+{ them into a sibling folder named after the IntLib base name) to report    }
+{ which files were produced.                                                  }
+{                                                                              }
+{ Params:                                                                      }
+{   intlib_path (required) - path to the .IntLib file                       }
+{                                                                              }
+{ Returns: process_run, sch_lib_path/sch_lib_found, pcb_lib_path/found.     }
+Function Lib_ExtractIntLib(Params : String; RequestId : String) : String;
+Var
+    IntLibPath, BaseName, ParentDir, ExtractDir : String;
+    SchLibPath, PcbLibPath : String;
+    FoundSch, FoundPcb : Boolean;
+    Workspace : IWorkspace;
+    RespJson : String;
+Begin
+    IntLibPath := ExtractJsonValue(Params, 'intlib_path');
+    IntLibPath := StringReplace(IntLibPath, '\\', '\', -1);
+    If IntLibPath = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAMS',
+            'intlib_path is required');
+        Exit;
+    End;
+    If Not FileExists(IntLibPath) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'FILE_NOT_FOUND',
+            'IntLib not found: ' + IntLibPath);
+        Exit;
+    End;
+
+    Workspace := GetWorkspace;
+    If Workspace = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_WORKSPACE', 'No workspace');
+        Exit;
+    End;
+
+    { Open the IntLib in Altium's integrated-library editor so the      }
+    { extract command has a current document to act on.                  }
+    ResetParameters;
+    AddStringParameter('ObjectKind', 'Document');
+    AddStringParameter('FileName', IntLibPath);
+    RunProcess('WorkspaceManager:OpenObject');
+
+    { Run Altium's source-extraction. Try/Except won't catch a bad       }
+    { process name (DelphiScript can't), so we detect outcome by         }
+    { probing for the resulting files instead.                            }
+    ResetParameters;
+    AddStringParameter('FileName', IntLibPath);
+    RunProcess('IntegratedLibrary:ExtractSources');
+
+    { Where Altium writes the extracted files: a sibling folder named    }
+    { after the IntLib base name, containing <Base>.SchLib + .PcbLib.    }
+    BaseName := ChangeFileExt(ExtractFileName(IntLibPath), '');
+    ParentDir := ExtractFilePath(IntLibPath);
+    ExtractDir := ParentDir + BaseName + '\';
+    SchLibPath := ExtractDir + BaseName + '.SchLib';
+    PcbLibPath := ExtractDir + BaseName + '.PcbLib';
+    FoundSch := FileExists(SchLibPath);
+    FoundPcb := FileExists(PcbLibPath);
+
+    { Fallback locations: same directory as the IntLib (some Altium       }
+    { versions drop sources beside the IntLib instead of in a sub-dir).  }
+    If Not FoundSch Then
+    Begin
+        SchLibPath := ParentDir + BaseName + '.SchLib';
+        FoundSch := FileExists(SchLibPath);
+    End;
+    If Not FoundPcb Then
+    Begin
+        PcbLibPath := ParentDir + BaseName + '.PcbLib';
+        FoundPcb := FileExists(PcbLibPath);
+    End;
+
+    RespJson :=
+        '{"intlib_path":"' + EscapeJsonString(IntLibPath) + '"' +
+        ',"extract_dir":"' + EscapeJsonString(ExtractDir) + '"' +
+        ',"sch_lib_path":"' + EscapeJsonString(SchLibPath) + '"' +
+        ',"sch_lib_found":' + BoolToJsonStr(FoundSch) +
+        ',"pcb_lib_path":"' + EscapeJsonString(PcbLibPath) + '"' +
+        ',"pcb_lib_found":' + BoolToJsonStr(FoundPcb) + '}';
+    Result := BuildSuccessResponse(RequestId, RespJson);
+End;
+
 {..............................................................................}
 { Command Handler - must be at end                                             }
 {..............................................................................}
@@ -3530,6 +3621,7 @@ Begin
         'add_footprint_arc':    Result := Lib_AddFootprintArc(Params, RequestId);
         'add_footprint_text':   Result := Lib_AddFootprintText(Params, RequestId);
         'get_footprints':       Result := Lib_GetFootprints(Params, RequestId);
+        'extract_intlib':       Result := Lib_ExtractIntLib(Params, RequestId);
         'link_footprint':       Result := Lib_LinkFootprint(Params, RequestId);
         'link_3d_model':        Result := Lib_Link3DModel(Params, RequestId);
         'get_components':       Result := Lib_GetComponents(Params, RequestId);

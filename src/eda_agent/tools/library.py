@@ -529,6 +529,46 @@ def register_library_tools(mcp):
         return result
 
     @mcp.tool()
+    async def lib_extract_intlib(
+        intlib_path: str,
+    ) -> dict[str, Any]:
+        """Extract .SchLib + .PcbLib sources from an .IntLib.
+
+        Opens the integrated library in Altium, runs the editor's
+        ``Extract Sources`` command, then probes Altium's conventional
+        output locations (a sibling folder named after the IntLib base
+        name, falling back to the IntLib's own directory) to report
+        which source files actually appeared on disk.
+
+        After this returns with ``sch_lib_found`` and / or
+        ``pcb_lib_found`` true, the produced files can be opened with
+        the rest of the library toolset -- ``lib_get_components``,
+        ``lib_get_footprints``, ``lib_copy_component``, etc. -- by
+        passing the reported ``sch_lib_path`` / ``pcb_lib_path`` as
+        the ``library_path`` argument.
+
+        Args:
+            intlib_path: Absolute path to the .IntLib file.
+
+        Returns:
+            Dict with ``intlib_path``, ``extract_dir``, ``sch_lib_path``,
+            ``sch_lib_found``, ``pcb_lib_path``, ``pcb_lib_found``. A
+            ``_found`` flag of False means Altium did not produce that
+            source -- either the extract command name needs adjusting
+            for the local Altium build, the IntLib does not contain that
+            kind of source, or write permissions prevented the dump.
+        """
+        if not intlib_path:
+            raise InvalidParameterError("intlib_path is required")
+        bridge = get_bridge()
+        result = await bridge.send_command_async(
+            "library.extract_intlib",
+            {"intlib_path": intlib_path},
+            timeout=60.0,
+        )
+        return result or {}
+
+    @mcp.tool()
     async def lib_get_footprints(
         library_path: Optional[str] = None,
     ) -> dict[str, Any]:

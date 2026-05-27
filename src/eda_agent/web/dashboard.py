@@ -118,6 +118,22 @@ def _cached(key: str, ttl_seconds: float, fn) -> Any:
         return val
 
 
+def _empty_drawing_svg(message: str) -> str:
+    """Produce a tiny placeholder SVG used when the Drawing tab has
+    nothing to show (Altium offline, no doc, geometry call failed)."""
+    safe = (message or "").replace("&", "&amp;").replace("<", "&lt;")
+    return (
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 200" '
+        'preserveAspectRatio="xMidYMid meet">'
+        '<rect width="100%" height="100%" fill="#1f2937"/>'
+        '<text x="400" y="100" text-anchor="middle" '
+        'dominant-baseline="middle" '
+        'fill="#9ca3af" font-family="JetBrains Mono, monospace" '
+        f'font-size="16">{safe}</text>'
+        '</svg>'
+    )
+
+
 def _bridge_call(command: str, params: Optional[dict] = None,
                  timeout: float = 12.0) -> Optional[dict]:
     """Send one MCP command via the shared bridge.
@@ -563,6 +579,51 @@ def _watch_open_dashboard_sentinel(workspace_dir: Path, stop: threading.Event) -
             logger.info("opened dashboard URL via sentinel: %s", url)
         except Exception as e:
             logger.debug("webbrowser.open failed: %s", e)
+
+
+def _hot_reload_render_modules() -> None:
+    """Reload eda_agent.render submodules if their .py files changed on disk.
+
+    Eliminates the "/mcp reconnect to see a renderer change" friction --
+    the dashboard's drawing endpoints call this once per request, and if
+    sch_svg.py or pcb_svg.py have been touched since the last import,
+    the in-process module cache gets refreshed. Cheap stat() per request,
+    and a full import only when the file actually changed.
+    """
+    import importlib
+    import os
+    try:
+        from .. import render as render_pkg
+    except ImportError:
+        return
+    # Track per-module last-seen mtime on the package itself so we don't
+    # need a global -- the dict survives as long as the module is imported.
+    if not hasattr(render_pkg, "_hot_mtimes"):
+        render_pkg._hot_mtimes = {}
+    for sub in ("sch_svg", "pcb_svg"):
+        full = f"eda_agent.render.{sub}"
+        mod = sys.modules.get(full)
+        if mod is None or not getattr(mod, "__file__", None):
+            continue
+        try:
+            mt = os.path.getmtime(mod.__file__)
+        except OSError:
+            continue
+        prev = render_pkg._hot_mtimes.get(full)
+        if prev is None:
+            render_pkg._hot_mtimes[full] = mt
+            continue
+        if mt > prev:
+            try:
+                importlib.reload(mod)
+                # Re-export the public names through the package so callers
+                # using `from ..render import render_sch_svg` get the new
+                # bindings on the next import.
+                importlib.reload(render_pkg)
+                render_pkg._hot_mtimes[full] = mt
+                logger.info("hot-reloaded %s (mtime change)", full)
+            except Exception as e:
+                logger.warning("hot-reload of %s failed: %s", full, e)
 
 
 def create_app(workspace_dir: Optional[Path] = None) -> Flask:
@@ -1032,6 +1093,130 @@ def create_app(workspace_dir: Optional[Path] = None) -> Flask:
                     if k.startswith("project."):
                         _cache.pop(k, None)
         return jsonify({"ok": True, "data": data, "elapsed_ms": elapsed})
+
+    # -----------------------------------------------------------------
+    # Drawing tab: inline schematic + PCB SVG views, sheet picker.
+    # -----------------------------------------------------------------
+
+    @app.route("/api/drawing/sheets")
+    def drawing_sheets() -> Response:
+        """List schematic sheets in the focused project so the Drawing
+        tab can build a picker. Filters get_documents to the .SchDoc
+        documents.
+        """
+        docs = _bridge_call("project.get_documents", {}, timeout=12.0)
+        if docs is None:
+            return jsonify({"ok": False, "reason": "altium-not-running"})
+        # The bridge returns the document list in one of two shapes:
+        #   list                           -- newer handler returns array directly
+        #   {"documents": [list]}          -- older wrapped form
+        # Accept either so the picker works regardless of which shape
+        # the Pascal layer happens to emit.
+        if isinstance(docs, list):
+            doc_list = docs
+        elif isinstance(docs, dict):
+            doc_list = docs.get("documents") or docs.get("docs") or []
+        else:
+            doc_list = []
+        sheets = []
+        for d in doc_list:
+            if not isinstance(d, dict):
+                continue
+            kind = (d.get("document_kind") or "").upper()
+            if kind != "SCH":
+                continue
+            sheets.append({
+                "file_name": d.get("file_name") or d.get("FileName"),
+                "file_path": d.get("file_path") or d.get("FullPath"),
+            })
+        return jsonify({"ok": True, "sheets": sheets})
+
+    @app.route("/api/drawing/sch")
+    def drawing_sch() -> Response:
+        """Return the active SchDoc as an inline SVG.
+
+        Pulls geometry via the bridge then runs the in-house renderer.
+        Optional ?doc=<path> focuses a specific .SchDoc before reading
+        (so the picker can switch sheets without the user having to
+        click the tab in Altium).
+        """
+        from flask import request as _req
+        doc = (_req.args.get("doc") or "").strip()
+        if doc:
+            _bridge_call("application.set_active_document",
+                         {"file_path": doc}, timeout=10.0)
+        geom = _bridge_call("generic.get_sch_geometry", {}, timeout=60.0)
+        if geom is None:
+            return Response(_empty_drawing_svg("Altium is not running"),
+                            mimetype="image/svg+xml", status=200)
+        if not isinstance(geom, dict):
+            return Response(_empty_drawing_svg("no geometry returned"),
+                            mimetype="image/svg+xml", status=200)
+        _hot_reload_render_modules()
+        from ..render import render_sch_svg, SchRenderOptions
+        svg = render_sch_svg(geom, SchRenderOptions())
+        resp = Response(svg, mimetype="image/svg+xml")
+        resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+        return resp
+
+    @app.route("/api/drawing/pcb")
+    def drawing_pcb() -> Response:
+        """Return the active PcbDoc as an inline SVG.
+
+        ``?nolegend=1`` suppresses the inline foreignObject layer-toggle
+        legend -- the dashboard's Drawing tab uses a proper sidebar
+        (outside the SVG) so the floating panel would just duplicate
+        controls. The open-in-tab path keeps the legend so the standalone
+        SVG file remains self-contained and usable on its own.
+        """
+        from flask import request as _req
+        geom = _bridge_call("generic.get_pcb_geometry", {}, timeout=120.0)
+        if geom is None:
+            return Response(_empty_drawing_svg("Altium is not running"),
+                            mimetype="image/svg+xml", status=200)
+        if not isinstance(geom, dict):
+            return Response(_empty_drawing_svg("no PCB geometry returned"),
+                            mimetype="image/svg+xml", status=200)
+        _hot_reload_render_modules()
+        from ..render import render_pcb_svg, PcbRenderOptions
+        no_legend = _req.args.get("nolegend", "").strip() in ("1", "true", "yes")
+        opts = PcbRenderOptions(interactive_legend=not no_legend)
+        svg = render_pcb_svg(geom, opts)
+        resp = Response(svg, mimetype="image/svg+xml")
+        resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+        return resp
+
+    @app.route("/api/drawing/pcb/layers")
+    def drawing_pcb_layers() -> Response:
+        """Return just the layer list for the PCB sidebar.
+
+        Cheap proxy around the same geometry call -- pulls the distinct
+        ``layer`` values from objects + the board outline + the
+        designators pseudo-layer. The dashboard sidebar uses this to
+        build its checkbox list without re-rendering an entire PCB SVG.
+        """
+        geom = _bridge_call("generic.get_pcb_geometry", {}, timeout=120.0)
+        if not isinstance(geom, dict):
+            return jsonify({"ok": False, "reason": "no PCB geometry"})
+        layers: set[str] = set()
+        for kind in ("tracks", "arcs", "pads", "vias", "texts",
+                     "regions", "components"):
+            for it in (geom.get(kind) or []):
+                if isinstance(it, dict) and it.get("layer"):
+                    layers.add(str(it["layer"]))
+        # Synthetic pseudo-layers the renderer attaches.
+        layers.add("Outline")
+        layers.add("Designators")
+        # Stable display order: copper first, then silk/solder, others.
+        order = ["TopLayer", "BottomLayer",
+                 "TopOverlay", "BottomOverlay",
+                 "TopSolder", "BottomSolder",
+                 "TopPaste", "BottomPaste",
+                 "MultiLayer", "KeepOutLayer",
+                 "Outline", "Designators"]
+        ordered: list[str] = [l for l in order if l in layers]
+        ordered += sorted(l for l in layers if l not in ordered)
+        return jsonify({"ok": True, "layers": ordered})
 
     @app.route("/api/refresh/<topic>", methods=["POST"])
     def force_refresh(topic: str) -> Response:

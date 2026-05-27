@@ -863,6 +863,103 @@ def register_project_tools(mcp):
         )
         return result
 
+    @mcp.tool()
+    async def run_outjob_all(
+        outjob_path: str = "",
+        include_files: bool = True,
+        fresh_window_seconds: float = 5.0,
+    ) -> dict[str, Any]:
+        """Run every container in an OutJob and report what each produced.
+
+        Lists containers via ``get_outjob_containers``, then runs each
+        through ``run_outjob`` in order. For each run, scans the
+        OutJob's resolved ``output_dir`` afterwards and flags files
+        whose mtime is later than the run started (``newly_produced``)
+        so the caller can tell which files this particular container
+        wrote.
+
+        Args:
+            outjob_path: Path to the .OutJob. Omit to use the first one
+                in the focused project.
+            include_files: When True (default) the response includes a
+                per-container file listing with sizes / mtimes / a
+                ``newly_produced`` flag.
+            fresh_window_seconds: Files modified within this many
+                seconds before the container started are still
+                considered "newly produced" (some output processes
+                touch existing files instead of rewriting). Default 5s.
+
+        Returns:
+            Dict with ``ok``, ``outjob_path``, ``containers_run``
+            (list of container names), ``results`` (per-container
+            dicts each with ``container``, ``container_type``,
+            ``output_dir``, ``ok``, ``files``).
+        """
+        from pathlib import Path
+        import time as _time
+
+        bridge = get_bridge()
+        list_params: dict[str, Any] = {}
+        if outjob_path:
+            list_params["outjob_path"] = outjob_path
+        listing = await bridge.send_command_async(
+            "project.get_outjob_containers", list_params, timeout=30.0,
+        )
+        if not isinstance(listing, dict):
+            return {"ok": False, "reason": "container listing failed"}
+        containers = listing.get("containers") or []
+        if not containers:
+            return {"ok": True, "containers_run": [], "results": [],
+                    "reason": "no containers in OutJob"}
+
+        per_container: list[dict[str, Any]] = []
+        for c in containers:
+            name = c.get("name") if isinstance(c, dict) else str(c)
+            if not name:
+                continue
+            started_at = _time.time()
+            params: dict[str, Any] = {"container_name": name}
+            if outjob_path:
+                params["outjob_path"] = outjob_path
+            run = await bridge.send_command_async(
+                "project.run_outjob", params, timeout=300.0,
+            )
+            entry: dict[str, Any] = {
+                "container": name,
+                "ok": bool(isinstance(run, dict) and run.get("success")),
+                "container_type": (run or {}).get("container_type"),
+                "output_dir": (run or {}).get("output_dir"),
+                "files": [],
+            }
+            if include_files and entry["output_dir"]:
+                p = Path(entry["output_dir"])
+                if p.exists() and p.is_dir():
+                    cutoff = started_at - float(fresh_window_seconds)
+                    for f in p.rglob("*"):
+                        if not f.is_file():
+                            continue
+                        try:
+                            st = f.stat()
+                        except OSError:
+                            continue
+                        entry["files"].append({
+                            "path": str(f),
+                            "size": st.st_size,
+                            "modified_at": st.st_mtime,
+                            "newly_produced": st.st_mtime >= cutoff,
+                        })
+            per_container.append(entry)
+
+        return {
+            "ok": True,
+            "outjob_path": (
+                (per_container[0].get("output_dir") if per_container else "")
+                if not outjob_path else outjob_path
+            ),
+            "containers_run": [r["container"] for r in per_container],
+            "results": per_container,
+        }
+
     # ------------------------------------------------------------------
     # Variant management tools
     # ------------------------------------------------------------------

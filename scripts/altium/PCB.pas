@@ -642,9 +642,13 @@ Begin
         Exit;
     End;
 
-    // Run DRC via RunProcess
+    // Run DRC via the documented process. Per TR0124 Server Process
+    // Reference v1.5, the correct identifier is "PCB:DesignRuleCheck"
+    // (not "PCB:RunDRC" which doesn't exist). Called with no params,
+    // it runs the rule check; with InspectViolation=True it would open
+    // the violation viewer instead.
     ResetParameters;
-    RunProcess('PCB:RunDRC');
+    RunProcess('PCB:DesignRuleCheck');
 
     // Count violations by iterating
     ViolationCount := 0;
@@ -2880,9 +2884,10 @@ Begin
 
     FilterNet := ExtractJsonValue(Params, 'net');
 
-    // First run DRC to refresh violations
+    // First run DRC to refresh violations -- correct documented process
+    // is PCB:DesignRuleCheck per TR0124, not PCB:RunDRC.
     ResetParameters;
-    RunProcess('PCB:RunDRC');
+    RunProcess('PCB:DesignRuleCheck');
 
     JsonItems := '';
     First := True;
