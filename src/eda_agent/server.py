@@ -149,21 +149,17 @@ def _dashboard_disabled_via_env() -> bool:
 def _spawn_dashboard_background(host: str, port: int) -> "Optional[object]":
     """Start the local web dashboard on a background thread.
 
-    Run in-process with the MCP server so the user never has to launch a
-    separate ``eda-agent dashboard`` command. The Flask app shares the
-    same workspace dir as the MCP server (read from get_config()), so
-    its log tailer + sentinel watcher pick up activity immediately.
+    Two ways the dashboard runs:
+      1. Auto-spawned in-process when MCP starts (this function) -- the
+         common case when the user opens Claude with the MCP server.
+         Dies when MCP exits.
+      2. Manually via `eda-agent dashboard --port 8766` in a terminal --
+         a standalone process the user controls.
 
     Returns the Werkzeug server handle so the caller can ``.shutdown()``
-    it cleanly when the MCP stdio session ends. The handle's connection
-    threads aren't daemonic by default, which is the bug that left
-    orphan processes holding the port across ``/mcp`` reconnects --
-    on the way out we both shutdown() the server and os._exit() to be
-    certain.
-
-    Failures are swallowed: a port conflict, a missing Flask install, or
-    any other startup error must NOT block the MCP server -- stdio is
-    the critical path. A note in the log lets the user know we tried.
+    it on stdio EOF. Werkzeug's request-handler threads aren't daemonic,
+    so without the explicit shutdown the process can't exit and the
+    next /mcp reconnect ends up with port 8766 still held by the orphan.
     """
     import os
     import threading
@@ -172,19 +168,16 @@ def _spawn_dashboard_background(host: str, port: int) -> "Optional[object]":
         logger.info("dashboard disabled via env var (no/disable/headless)")
         return None
 
-    # Early port-conflict diagnostic. If 8766 is already taken, the most
-    # likely cause is a previous eda-agent that didn't exit cleanly; print
-    # the surgical fix instead of letting the user wonder why dashboard
-    # edits look invisible.
+    # If port is already bound -- probably a manually-launched standalone
+    # `eda-agent dashboard` -- skip with an info log. The MCP server
+    # works fine without an in-process dashboard.
     owner_pid = _probe_port_owner(host, port)
     if owner_pid is not None and owner_pid != os.getpid():
-        logger.warning(
-            "dashboard port %s already bound by pid %s -- previous eda-agent "
-            "did not exit. Run: taskkill /PID %s /F  (Windows) / kill -9 %s "
-            "(POSIX), then /mcp reconnect.",
-            port, owner_pid, owner_pid, owner_pid,
+        logger.info(
+            "dashboard already running on port %s (pid %s) -- not "
+            "spawning another. http://%s:%s/", port, owner_pid, host, port,
         )
-        return None
+        return {"already_running": True, "owner_pid": owner_pid}
 
     server_holder: dict[str, object] = {}
 
@@ -195,16 +188,11 @@ def _spawn_dashboard_background(host: str, port: int) -> "Optional[object]":
             app = create_app()
             import logging as _log
             _log.getLogger("werkzeug").setLevel(_log.WARNING)
-            # make_server gives us a handle with .shutdown(); app.run does
-            # not. We need the handle so serve_mcp can stop the dashboard
-            # before exiting -- otherwise Werkzeug's non-daemonic request
-            # threads keep the process alive even after stdio EOF.
             srv = make_server(host, port, app, threaded=True)
             server_holder["srv"] = srv
             srv.serve_forever()
         except OSError as e:
-            logger.warning("dashboard could not bind %s:%s (%s); "
-                           "Open Dashboard button will be a no-op",
+            logger.warning("dashboard could not bind %s:%s (%s)",
                            host, port, e)
         except Exception as e:
             logger.warning("dashboard background thread crashed: %s", e)
@@ -254,11 +242,11 @@ def serve_mcp(no_dashboard: bool = False) -> int:
     try:
         mcp.run(transport="stdio")
     finally:
-        # CRITICAL: shut down the dashboard server so the process can
-        # actually exit. Werkzeug's request-handler threads are NOT
+        # Shut down the in-process Werkzeug server so the process can
+        # actually exit. Werkzeug's request-handler threads aren't
         # daemonic, so without this they keep the process alive past
         # stdio-EOF and the next /mcp reconnect ends up with port 8766
-        # still held by the orphan. Belt-and-the-os._exit-suspenders.
+        # still held by the orphan.
         if dash and isinstance(dash, dict):
             srv = dash.get("srv")
             try:
@@ -267,10 +255,6 @@ def serve_mcp(no_dashboard: bool = False) -> int:
             except Exception as e:
                 logger.debug("dashboard shutdown raised: %s", e)
         import os as _os
-        # mcp.run() may have returned cleanly (stdio EOF) or via an
-        # exception. Either way, force-exit so non-daemon threads can't
-        # outlive us. Without this, every /mcp reconnect leaks a process
-        # that keeps port 8766 bound and serves a stale dashboard.
         _os._exit(0)
     return 0
 
@@ -386,6 +370,14 @@ def main() -> int:
     dash_p.add_argument("--port", type=int, default=8766)
     dash_p.add_argument("--debug", action="store_true")
 
+    # stop-dashboard -- terminate the dashboard process by PID file
+    stop_dash_p = subparsers.add_parser(
+        "stop-dashboard",
+        help=("Stop the dashboard process (reads workspace/dashboard.pid). "
+              "Use this when the dashboard was launched detached by the "
+              "Altium script and you want to kill it without rebooting."),
+    )
+
     # vote -- pairwise-preference vote UI in the browser
     vote_p = subparsers.add_parser(
         "vote",
@@ -430,6 +422,36 @@ def main() -> int:
             "--port", str(args.port),
             *(["--debug"] if args.debug else []),
         ])
+    if args.command == "stop-dashboard":
+        # Read the PID written by the dashboard process and SIGTERM it.
+        # No PID file = no dashboard running -> success (idempotent stop).
+        import os as _os, signal as _sig
+        pid_path = get_config().workspace_dir / "dashboard.pid"
+        if not pid_path.exists():
+            print("dashboard.pid not found -- dashboard not running "
+                  "(or workspace mismatch).")
+            return 0
+        try:
+            pid = int(pid_path.read_text(encoding="utf-8").strip())
+        except (OSError, ValueError) as e:
+            print(f"could not read dashboard.pid: {e}")
+            return 1
+        try:
+            if sys.platform == "win32":
+                # On Windows, SIGTERM isn't honoured for native procs;
+                # use TerminateProcess via taskkill for reliability.
+                import subprocess as _sp
+                _sp.run(["taskkill", "/PID", str(pid), "/F"],
+                        capture_output=True, check=False)
+            else:
+                _os.kill(pid, _sig.SIGTERM)
+            print(f"stopped dashboard pid {pid}")
+            try: pid_path.unlink()
+            except OSError: pass
+            return 0
+        except Exception as e:
+            print(f"could not stop dashboard pid {pid}: {e}")
+            return 1
     if args.command == "vote":
         from .web.server import main as vote_main
         return vote_main([

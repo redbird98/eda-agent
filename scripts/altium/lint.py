@@ -242,6 +242,22 @@ KNOWN_WRONG_METHOD_NAMES = {
     # form is what trips people up because the per-vertex getter IS
     # singular: GetState_Vertex(i).
     "GetState_VertexCount": "GetState_VerticesCount (plural)",
+    # IClient does not expose a document-count accessor in DelphiScript.
+    # To enumerate loaded documents, walk the project DM:
+    # `For I := 0 To Project.DM_LogicalDocumentCount - 1`, then resolve
+    # each `Project.DM_LogicalDocuments(I).DM_FullPath` via
+    # `Client.GetDocumentByPath`.
+    "GetDocumentCount":     "walk Project.DM_LogicalDocumentCount + Client.GetDocumentByPath",
+    "GetDocument":          "walk Project.DM_LogicalDocuments(I) + Client.GetDocumentByPath",
+    # ISch_Document.ClearAllSelection and .ClearSelection both raise
+    # "Undeclared identifier" at runtime in this Altium version
+    # (uncatchable by Try/Except). The PCB sibling IPCB_Board.ClearSelection
+    # IS real -- the false-cognate from there is what tripped this.
+    # Sch-side: use RunProcess('Sch:DeSelect') with Scope=All instead.
+    # NOTE: existing call sites in Generic.pas:1323/3622/3649 will also
+    # fail if those code paths ever fire; left in place because they're
+    # not currently exercised and removing them is out of scope here.
+    "ClearAllSelection":    "RunProcess('Sch:DeSelect') with Scope=All",
 }
 RULE_KNOWN_WRONG_METHOD = LineRule(
     name="known-wrong-altium-method",

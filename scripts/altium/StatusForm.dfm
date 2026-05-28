@@ -4,7 +4,7 @@ object StatusForm: TStatusForm
   BorderIcons = [biSystemMenu, biMinimize]
   BorderStyle = bsSizeable
   Caption = 'EDA Agent MCP'
-  ClientHeight = 620
+  ClientHeight = 650
   ClientWidth = 380
   Color = $001A1B1E
   Constraints.MinHeight = 500
@@ -220,7 +220,7 @@ object StatusForm: TStatusForm
         Height = 12
         Alignment = taCenter
         AutoSize = False
-        Caption = 'IDLE'
+        Caption = 'AUTO-OFF IN'
         Font.Charset = DEFAULT_CHARSET
         Font.Color = $008B8E96
         Font.Height = -9
@@ -582,6 +582,61 @@ object StatusForm: TStatusForm
     ScrollBars = ssVertical
     TabOrder = 1
     Visible = False
+  end
+  object pnl_Footer: TPanel
+    Left = 0
+    Top = 620
+    Width = 380
+    Height = 30
+    Align = alBottom
+    BevelOuter = bvNone
+    Color = $0017181B
+    object lbl_FooterHint: TLabel
+      Left = 12
+      Top = 3
+      Width = 356
+      Height = 11
+      AutoSize = False
+      Caption = 'Run standalone (no AI needed):'
+      Font.Charset = DEFAULT_CHARSET
+      Font.Color = $00696C73
+      Font.Height = -9
+      Font.Name = 'Segoe UI'
+      Font.Style = []
+      ParentFont = False
+    end
+    object lbl_LaunchCmd: TLabel
+      Left = 12
+      Top = 14
+      Width = 280
+      Height = 13
+      AutoSize = False
+      Caption = 'python -m eda_agent.server dashboard --port 8766'
+      Font.Charset = DEFAULT_CHARSET
+      Font.Color = $00D4D4D4
+      Font.Height = -11
+      Font.Name = 'Consolas'
+      Font.Style = []
+      ParentFont = False
+    end
+    object btn_CopyCmd: TPanel
+      Left = 300
+      Top = 6
+      Width = 68
+      Height = 20
+      BevelOuter = bvNone
+      Caption = 'Copy'
+      Color = $002A2C32
+      Cursor = crHandPoint
+      Font.Charset = DEFAULT_CHARSET
+      Font.Color = $00E1E2E6
+      Font.Height = -10
+      Font.Name = 'Segoe UI'
+      Font.Style = []
+      ParentFont = False
+      TabOrder = 0
+      OnClick = btn_CopyCmdClick
+    end
   end
   object tmr_Spinner: TTimer
     Enabled = False

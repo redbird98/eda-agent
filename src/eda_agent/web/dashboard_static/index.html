@@ -115,7 +115,13 @@ html, body {
   background:var(--bg); color:var(--text);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   font-size:13px; line-height:1.45;
-  height:100%;
+  /* DO NOT set height:100% here. A definite body height with content
+   * overflowing visually breaks position:sticky on body's direct
+   * children (the page header + tab nav stopped sticking, only the
+   * sticky thead pinned and it sat below where the header should be).
+   * Letting body grow to its content height puts the scrollable
+   * ancestor on the viewport, which sticky needs. */
+  min-height:100vh;
   transition: background-color 140ms ease, color 140ms ease;
 }
 a { color:var(--accent); text-decoration:none; }
@@ -168,6 +174,19 @@ input[type="text"], input[type="search"] {
 }
 input[type="text"]::placeholder, input[type="search"]::placeholder {
   color:var(--text-dim);
+}
+/* The native search-clear cross is OS-dependent and often hideous;
+ * style our own via the search-clear-x class wrapping the input. */
+input[type="search"]::-webkit-search-cancel-button {
+  -webkit-appearance: none; appearance: none;
+  height: 14px; width: 14px;
+  background: var(--text-dim);
+  -webkit-mask: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path d='M4 4l8 8M12 4l-8 8' stroke='black' stroke-width='1.8' stroke-linecap='round' fill='none'/></svg>") center/contain no-repeat;
+          mask: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path d='M4 4l8 8M12 4l-8 8' stroke='black' stroke-width='1.8' stroke-linecap='round' fill='none'/></svg>") center/contain no-repeat;
+  cursor: pointer;
+}
+input[type="search"]::-webkit-search-cancel-button:hover {
+  background: var(--text);
 }
 select {
   background:var(--bg); color:var(--text);
@@ -231,8 +250,12 @@ header.shell {
   overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
 }
 
+
 nav.tabs {
-  position:sticky; top:52px; z-index:40;
+  /* --header-h is set on :root by JS on load + resize so this stays
+   * pinned tight under the actual shell-header height (instead of the
+   * hardcoded 52px which left a gap on some font / DPI combos). */
+  position:sticky; top:var(--header-h, 52px); z-index:40;
   background:var(--bg-elev);
   border-bottom:1px solid var(--border);
   display:flex; gap:var(--s-1); padding:0 var(--s-4);
@@ -349,12 +372,21 @@ table.data {
   width:100%; border-collapse:collapse; font-size:12px;
 }
 table.data thead th {
-  text-align:left; padding:8px 10px;
-  color:var(--text-mute); font-weight:500; font-size:11px;
+  text-align:left; padding:var(--s-2) var(--s-3);
+  color:var(--text-mute); font-weight:var(--fw-medium); font-size:11px;
   text-transform:uppercase; letter-spacing:1.2px;
   border-bottom:1px solid var(--border);
   background:var(--bg-elev);
-  position:sticky; top:0;
+  /* Sticky under the page header + tab nav. --header-h and --nav-h
+   * are set by JS from the actual rendered heights so this stays
+   * pinned tight (the hardcoded 96px used to leave a visible gap of
+   * background showing between the tab nav and the frozen header on
+   * some font / zoom / DPI combos). z-index 30 keeps the page
+   * header (50) + tabs (40) ABOVE us as the user scrolls. */
+  position:sticky;
+  top:calc(var(--header-h, 52px) + var(--nav-h, 44px));
+  z-index:30;
+  box-shadow: 0 1px 0 var(--border);
 }
 table.data tbody td {
   padding:var(--s-2) var(--s-3); border-bottom:1px solid var(--row-border);
@@ -362,6 +394,8 @@ table.data tbody td {
 }
 table.data tbody tr:last-child td { border-bottom:none; }
 table.data tbody tr:hover td { background:var(--bg-elev); }
+table.data tbody tr.row-reviewed td { opacity:0.6; }
+table.data tbody tr.row-reviewed:hover td { opacity:1; }
 table.data .num { text-align:right; font-feature-settings:"tnum"; }
 table.data .mono { font-size:var(--fs-xs); }
 
@@ -387,6 +421,35 @@ table.data .mono { font-size:var(--fs-xs); }
   color:var(--text-dim); font-size:var(--fs-sm);
 }
 .empty code { color:var(--accent); font-size:var(--fs-xs); }
+
+/* Skeleton loaders -- shimmering placeholders that mimic the eventual
+ * content shape. The animation is a slow horizontal sheen that makes
+ * the UI feel responsive even when the bridge is doing real work. */
+.skeleton {
+  background: linear-gradient(90deg,
+    var(--bg-elev) 0%,
+    var(--bg-card-hi) 50%,
+    var(--bg-elev) 100%);
+  background-size: 200% 100%;
+  animation: skeleton-shimmer 1.4s ease-in-out infinite;
+  border-radius: var(--r-sm);
+  display: inline-block;
+}
+.skeleton.line { height: 10px; width: 100%; margin: 4px 0; }
+.skeleton.line.sm { width: 40%; }
+.skeleton.line.md { width: 70%; }
+.skeleton.row {
+  display: flex; gap: var(--s-3); padding: var(--s-2) var(--s-3);
+  border-bottom: 1px solid var(--row-border);
+}
+.skeleton.row > * { height: 10px; border-radius: var(--r-sm); }
+.skeleton-stack {
+  padding: var(--s-4) var(--s-3);
+}
+@keyframes skeleton-shimmer {
+  0%   { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
 
 .row-actions {
   display:flex; gap:var(--s-2); flex-wrap:wrap; align-items:center;
@@ -469,15 +532,84 @@ table.data .mono { font-size:var(--fs-xs); }
 }
 .sparkline svg { display:block; margin-top:var(--s-1); }
 
+/* ---------- Help overlay (? key) ---------- */
+.help-overlay {
+  position: fixed; inset: 0; z-index: 100;
+  background: rgba(0,0,0,0.55);
+  backdrop-filter: blur(2px);
+  display: flex; align-items: center; justify-content: center;
+  animation: help-fade 140ms ease-out;
+}
+@keyframes help-fade { from { opacity: 0; } }
+.help-card {
+  background: var(--bg-card); color: var(--text);
+  border: 1px solid var(--border-hi);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-lg);
+  padding: var(--s-5) var(--s-6);
+  max-width: 720px; width: calc(100% - var(--s-7));
+  max-height: 80vh; overflow-y: auto;
+}
+.help-head {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: var(--s-4);
+}
+.help-head strong {
+  font-size: var(--fs-lg); font-weight: var(--fw-semibold);
+}
+.help-body {
+  display: grid; grid-template-columns: 1fr 1fr; gap: var(--s-5);
+}
+@media (max-width: 600px) {
+  .help-body { grid-template-columns: 1fr; }
+}
+.help-body section h4 {
+  margin: 0 0 var(--s-2); font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold); letter-spacing: 1.2px;
+  text-transform: uppercase; color: var(--text-mute);
+}
+.help-body dl {
+  margin: 0; display: grid;
+  grid-template-columns: max-content 1fr; gap: var(--s-2) var(--s-3);
+  font-size: var(--fs-sm);
+}
+.help-body dt {
+  color: var(--text-mute); text-align: right;
+  white-space: nowrap;
+}
+.help-body dd { margin: 0; color: var(--text); }
+.help-body kbd {
+  display: inline-block; min-width: 18px; text-align: center;
+  background: var(--bg-elev); border: 1px solid var(--border);
+  border-bottom-width: 2px;
+  border-radius: var(--r-sm); padding: 1px var(--s-1);
+  font-family: ui-monospace, monospace; font-size: 11px;
+  color: var(--text);
+}
+
+.toast-stack {
+  position: fixed; bottom: var(--s-4); right: var(--s-4); z-index: 80;
+  display: flex; flex-direction: column-reverse;
+  gap: var(--s-2); max-width: 380px;
+  pointer-events: none;
+}
 .toast {
-  position:fixed; bottom:var(--s-4); right:var(--s-4); z-index:80;
   background:var(--bg-card); border:1px solid var(--border-hi);
   border-radius:var(--r-md); padding:var(--s-3) var(--s-4);
-  font-size:var(--fs-sm); max-width:380px;
+  font-size:var(--fs-sm);
   box-shadow:var(--shadow-lg);
+  pointer-events: auto;
   animation: toast-in 180ms ease-out;
 }
-@keyframes toast-in { from { opacity:0; transform:translateY(8px); } }
+.toast-out {
+  animation: toast-out 220ms ease-in forwards;
+}
+@keyframes toast-in {
+  from { opacity:0; transform:translateY(8px); }
+}
+@keyframes toast-out {
+  to   { opacity:0; transform:translateY(-4px); }
+}
 
 .gauge-grid {
   display:grid; gap:12px;
@@ -792,6 +924,57 @@ table.data .mono { font-size:var(--fs-xs); }
   flex: 1; padding: 2px var(--s-2);
   font-size: var(--fs-xs); font-weight: var(--fw-medium);
 }
+
+/* Native checkboxes on Windows Chrome render as rounded iOS-style
+ * pills, which looks out of place against the rest of the rectangular
+ * UI. Force a consistent flat square checkbox app-wide. */
+input[type="checkbox"] {
+  -webkit-appearance: none; appearance: none;
+  width: 14px; height: 14px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: var(--bg);
+  cursor: pointer;
+  position: relative;
+  flex: none;
+  vertical-align: middle;
+  margin: 0;
+  transition: background 80ms, border-color 80ms;
+}
+input[type="checkbox"]:hover { border-color: var(--border-hi); }
+input[type="checkbox"]:checked {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+input[type="checkbox"]:checked::after {
+  content: ""; position: absolute;
+  left: 3px; top: 0px;
+  width: 5px; height: 9px;
+  border: solid #fff;
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+input[type="checkbox"]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* Drawing tab full-bleed: escape the <main> max-width + padding so the
+ * SVG canvas occupies the entire viewport below the tabs nav. */
+main > section.full-bleed {
+  position: relative;
+  width: 100vw;
+  margin-left: calc(50% - 50vw);
+  margin-right: calc(50% - 50vw);
+  padding: 0;
+}
+.drawing-toolbar {
+  display: flex; align-items: center; gap: var(--s-3);
+  padding: var(--s-2) var(--s-4);
+  background: var(--bg-elev);
+  border-bottom: 1px solid var(--border);
+}
+.drawing-toolbar .toolbar-right { margin-left: auto; }
 </style>
 </head>
 <body>
@@ -803,10 +986,15 @@ table.data .mono { font-size:var(--fs-xs); }
   </div>
   <div class="gsearch">
     <input type="search" id="global-search"
-           placeholder="jump to designator or net  ( / )" autocomplete="off">
+           placeholder="search: designator, net, MPN, footprint, lib_ref, pin name  ( / )"
+           title="Multi-field search. Matches against designators, net names, MPN, footprint, lib_ref, manufacturer, description, and pin names. Press / to focus."
+           autocomplete="off">
     <div class="gsearch-results" id="global-results" hidden></div>
   </div>
   <div class="intent" id="intent-banner"></div>
+  <button class="iconbtn" id="help-toggle"
+          title="Help and keyboard shortcuts (?)" aria-label="Help"
+          style="font-weight:700;">?</button>
   <button class="iconbtn" id="theme-toggle"
           title="Toggle light / dark theme (T)" aria-label="Toggle theme"></button>
 </header>
@@ -862,27 +1050,29 @@ table.data .mono { font-size:var(--fs-xs); }
 
   <!-- ========================= PROJECT TAB ========================= -->
   <!-- ========================= DRAWING TAB ========================= -->
-  <section data-pane="drawing">
-    <div class="panel" style="margin-bottom:10px;">
-      <div class="search-bar" style="margin-bottom:0;">
-        <div class="row-actions" id="drawing-mode-row">
-          <button class="drawing-mode active" data-mode="sch">Schematic</button>
-          <button class="drawing-mode" data-mode="pcb">PCB</button>
-        </div>
-        <select id="drawing-sheet" style="min-width:240px;">
-          <option value="">(active sheet)</option>
-        </select>
-        <span class="count" id="drawing-status"></span>
-        <div class="toolbar-right row-actions">
-          <button id="drawing-refresh">refresh</button>
-          <button id="drawing-open" title="Open the SVG in a new browser tab">open ↗</button>
-        </div>
+  <!-- Drawing tab is full-bleed: it escapes the <main> max-width/padding
+       so the SVG canvas occupies the entire viewport below the tabs.
+       The toolbar lives as a thin inline strip (no outer panel border)
+       so vertical real estate goes to the drawing instead of chrome. -->
+  <section data-pane="drawing" class="full-bleed">
+    <div class="drawing-toolbar">
+      <div class="row-actions" id="drawing-mode-row">
+        <button class="drawing-mode active" data-mode="sch">Schematic</button>
+        <button class="drawing-mode" data-mode="pcb">PCB</button>
+      </div>
+      <select id="drawing-sheet" style="min-width:240px;">
+        <option value="">(active sheet)</option>
+      </select>
+      <span class="count" id="drawing-status"></span>
+      <div class="toolbar-right row-actions">
+        <button id="drawing-refresh">refresh</button>
+        <button id="drawing-open" title="Open the SVG in a new browser tab">open ↗</button>
       </div>
     </div>
     <div id="drawing-selbar" class="row-actions"
-         style="display:none; margin:-4px 0 6px 0; padding:4px 10px;
-                background:var(--bg-elev); border:1px solid var(--border);
-                border-radius:5px; font-size:12px; align-items:center;">
+         style="display:none; margin:0; padding:4px 12px;
+                background:var(--bg-elev); border-bottom:1px solid var(--border);
+                font-size:12px; align-items:center;">
       <span class="hint">selected:</span>
       <span id="drawing-selbar-text" class="mono"></span>
       <span class="spacer" style="flex:1;"></span>
@@ -891,8 +1081,8 @@ table.data .mono { font-size:var(--fs-xs); }
       <button id="drawing-selbar-clear" class="iconbtn"
               title="clear selection (Esc)">clear</button>
     </div>
-    <div class="panel" style="padding:0; overflow:hidden;">
-      <div id="drawing-stage" style="position:relative; height:78vh; min-height:520px; background:var(--bg); display:flex;">
+    <div style="padding:0; overflow:hidden; border:none; background:transparent;">
+      <div id="drawing-stage" style="position:relative; height:calc(100vh - 150px); min-height:480px; background:var(--bg); display:flex;">
         <div id="drawing-host" style="flex:1; height:100%; overflow:auto;"></div>
         <div id="drawing-layers" hidden
              style="width:180px; border-left:1px solid var(--border);
@@ -1122,6 +1312,26 @@ table.data .mono { font-size:var(--fs-xs); }
       <strong id="drawer-cmd" class="mono"
               style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">-</strong>
     </div>
+    <div style="display:flex; gap:2px; flex:none;">
+      <button class="iconbtn" id="drawer-prev"
+              title="Previous component (K or up arrow)"
+              aria-label="Previous component" hidden>
+        <svg viewBox="0 0 16 16" width="14" height="14" fill="none"
+             stroke="currentColor" stroke-width="1.7" stroke-linecap="round"
+             stroke-linejoin="round">
+          <path d="M3 10l5-5 5 5"/>
+        </svg>
+      </button>
+      <button class="iconbtn" id="drawer-next"
+              title="Next component (J or down arrow)"
+              aria-label="Next component" hidden>
+        <svg viewBox="0 0 16 16" width="14" height="14" fill="none"
+             stroke="currentColor" stroke-width="1.7" stroke-linecap="round"
+             stroke-linejoin="round">
+          <path d="M3 6l5 5 5-5"/>
+        </svg>
+      </button>
+    </div>
     <button class="iconbtn" id="drawer-close" title="Close (Esc)"
             aria-label="Close" style="flex:none;">
       <svg viewBox="0 0 16 16" width="14" height="14" fill="none"
@@ -1134,7 +1344,65 @@ table.data .mono { font-size:var(--fs-xs); }
   <div class="body" id="drawer-body"></div>
 </aside>
 
-<div class="toast" id="toast" hidden></div>
+<!-- Toast stack is created on first showToast call; no static container needed. -->
+
+<div id="help-overlay" class="help-overlay" hidden>
+  <div class="help-card" role="dialog" aria-label="Keyboard shortcuts">
+    <div class="help-head">
+      <strong>Keyboard shortcuts</strong>
+      <button id="help-close" class="iconbtn" title="Close (Esc)" aria-label="Close">
+        <svg viewBox="0 0 16 16" width="14" height="14" fill="none"
+             stroke="currentColor" stroke-width="1.7" stroke-linecap="round">
+          <path d="M4 4l8 8M12 4l-8 8"/>
+        </svg>
+      </button>
+    </div>
+    <div class="help-body">
+      <section>
+        <h4>Navigate</h4>
+        <dl>
+          <dt><kbd>/</kbd></dt><dd>focus search</dd>
+          <dt><kbd>1</kbd>-<kbd>7</kbd>, <kbd>0</kbd></dt><dd>switch tabs (Drawing - Actions, Status)</dd>
+          <dt><kbd>R</kbd></dt><dd>refresh current tab</dd>
+          <dt><kbd>T</kbd></dt><dd>toggle theme</dd>
+          <dt><kbd>?</kbd></dt><dd>this help</dd>
+        </dl>
+      </section>
+      <section>
+        <h4>Drawing tab</h4>
+        <dl>
+          <dt>scroll</dt><dd>zoom on cursor</dd>
+          <dt>middle / right drag</dt><dd>pan</dd>
+          <dt>click</dt><dd>open drawer + select</dd>
+          <dt><kbd>S</kbd></dt><dd>schematic view</dd>
+          <dt><kbd>P</kbd></dt><dd>PCB view (selection carries across)</dd>
+          <dt><kbd>+</kbd> / <kbd>-</kbd></dt><dd>zoom in / out (from centre)</dd>
+          <dt><kbd>0</kbd></dt><dd>reset view (with SVG focused)</dd>
+          <dt><kbd>Esc</kbd></dt><dd>clear selection</dd>
+        </dl>
+      </section>
+      <section>
+        <h4>Search bar</h4>
+        <dl>
+          <dt><kbd>↑</kbd> / <kbd>↓</kbd></dt><dd>navigate results</dd>
+          <dt><kbd>Enter</kbd></dt><dd>open selected (drawer + locate)</dd>
+          <dt><kbd>Esc</kbd></dt><dd>close dropdown</dd>
+        </dl>
+      </section>
+      <section>
+        <h4>Drawer</h4>
+        <dl>
+          <dt><kbd>J</kbd> / <kbd>↓</kbd></dt><dd>next component (BOM order)</dd>
+          <dt><kbd>K</kbd> / <kbd>↑</kbd></dt><dd>previous component</dd>
+          <dt><kbd>N</kbd></dt><dd>next un-reviewed component</dd>
+          <dt><kbd>Shift</kbd> + <kbd>N</kbd></dt><dd>previous un-reviewed</dd>
+          <dt><kbd>Alt</kbd> + <kbd>←</kbd></dt><dd>back through drill-in history</dd>
+          <dt><kbd>Esc</kbd></dt><dd>close drawer</dd>
+        </dl>
+      </section>
+    </div>
+  </div>
+</div>
 
 <script>
 "use strict";
@@ -1179,15 +1447,31 @@ function fmtAgo(epochSec) {
   if (sec < 86400) return Math.floor(sec/3600) + "h ago";
   return Math.floor(sec/86400) + "d ago";
 }
+// Toasts stack vertically and auto-remove. Each call appends a fresh
+// element so rapid-fire toasts don't overwrite each other; the older
+// ones slide up to make room for newer below them.
 function showToast(msg, kind) {
-  const t = $("#toast");
+  let stack = $("#toast-stack");
+  if (!stack) {
+    stack = document.createElement("div");
+    stack.id = "toast-stack";
+    stack.className = "toast-stack";
+    document.body.appendChild(stack);
+  }
+  const t = document.createElement("div");
+  t.className = "toast toast-item";
   t.textContent = msg;
   t.style.borderColor = kind === "err" ? "var(--err)"
                        : kind === "ok"  ? "var(--ok)"
                        : "var(--border-hi)";
-  t.hidden = false;
-  clearTimeout(showToast._t);
-  showToast._t = setTimeout(function(){ t.hidden = true; }, 3500);
+  stack.appendChild(t);
+  setTimeout(function(){
+    t.classList.add("toast-out");
+    setTimeout(function(){ t.remove(); }, 220);
+  }, 3500);
+  // Cap at 5 stacked toasts so a runaway code path doesn't wallpaper
+  // the corner.
+  while (stack.children.length > 5) stack.firstChild.remove();
 }
 
 async function fetchJSON(url, opts) {
@@ -1218,15 +1502,130 @@ const state = {
   onlySlow: false,
 };
 
+// Persist a small set of UI bits across reloads so Ctrl+Shift+R doesn't
+// wipe the active tab + the user's filter strings + their sort prefs.
+// Theme lives in its own localStorage key (set very early to avoid the
+// flash); this covers the rest.
+var PERSIST_KEY = "eda-dashboard-ui-v1";
+function savePersistedUI() {
+  try {
+    const compFilter = $("#comp-filter");
+    const netFilter = $("#net-filter");
+    const compClass = $("#comp-class-filter");
+    const netClsFilter = $("#net-class-filter");
+    const payload = {
+      tab: state.activeTab,
+      compFilter: compFilter ? compFilter.value : "",
+      netFilter: netFilter ? netFilter.value : "",
+      compClass: compClass ? compClass.value : "",
+      netClass: netClsFilter ? netClsFilter.value : "",
+      compSort: typeof compSortState !== "undefined" ? compSortState : null,
+      netSort:  typeof netSortState  !== "undefined" ? netSortState  : null,
+      msgFilter: typeof msgFilter !== "undefined" ? msgFilter : null,
+    };
+    localStorage.setItem(PERSIST_KEY, JSON.stringify(payload));
+  } catch (e) {}
+}
+function restorePersistedUI() {
+  let p;
+  try { p = JSON.parse(localStorage.getItem(PERSIST_KEY) || "{}"); }
+  catch (e) { return null; }
+  if (!p) return null;
+  // Filters set up BEFORE the first renderXxx call so they take effect
+  // on initial paint.
+  try {
+    if (p.compFilter != null && $("#comp-filter"))
+      $("#comp-filter").value = p.compFilter;
+    if (p.netFilter != null && $("#net-filter"))
+      $("#net-filter").value = p.netFilter;
+    if (p.compClass != null && $("#comp-class-filter"))
+      $("#comp-class-filter").value = p.compClass;
+    if (p.netClass != null && $("#net-class-filter"))
+      $("#net-class-filter").value = p.netClass;
+    if (p.compSort && typeof compSortState !== "undefined") {
+      compSortState.col = p.compSort.col;
+      compSortState.dir = p.compSort.dir;
+    }
+    if (p.netSort && typeof netSortState !== "undefined") {
+      netSortState.col = p.netSort.col;
+      netSortState.dir = p.netSort.dir;
+    }
+    if (p.msgFilter && typeof msgFilter !== "undefined") {
+      Object.assign(msgFilter, p.msgFilter);
+    }
+  } catch (e) {}
+  return p;
+}
+
 function showTab(name) {
   state.activeTab = name;
+  savePersistedUI();
   $$("nav.tabs button").forEach(function(b){
     if (b.dataset.tab) b.classList.toggle("active", b.dataset.tab === name);
   });
   $$("main > section").forEach(function(s){
     s.hidden = s.dataset.pane !== name;
   });
+  // Show skeleton loaders in every empty body until the real data
+  // arrives. Done only on FIRST visit to a tab (data not yet cached) so
+  // re-visits feel instant.
+  if (!state.data[tabDataKey(name)] && !state.loaded[name]) {
+    fillSkeletons(name);
+  }
   loadTab(name);
+  state.loaded[name] = true;
+}
+
+// Map tab name -> the state.data key that holds its cached data, so
+// skeletons can disappear as soon as a re-visit lands on warm data.
+function tabDataKey(name) {
+  const map = { project:"project", components:"components",
+                nets:"nets", libraries:"libraries", plan:"plan" };
+  return map[name] || name;
+}
+
+// Drop skeleton placeholders into the relevant containers for the
+// current tab. Each container has a single inner "loading..." or
+// "loading" empty div that gets replaced; subsequent renders write
+// their own content.
+function fillSkeletons(tab) {
+  const targets = {
+    project: ["project-stats", "project-docs",
+              "project-health-body", "project-messages"],
+    components: ["comp-summary", "comp-body"],
+    nets: ["net-summary", "net-body"],
+    libraries: ["lib-body"],
+    plan: ["plan-body"],
+  }[tab] || [];
+  targets.forEach(function(id){
+    const el = document.getElementById(id);
+    if (!el) return;
+    // Only replace if it's a fresh "loading..." -- don't trample real
+    // content if the user is re-visiting.
+    if (el.children.length === 1 && /loading/i.test(el.textContent)) {
+      el.innerHTML = buildSkeleton(id);
+    }
+  });
+}
+
+function buildSkeleton(id) {
+  if (id.endsWith("-body") || id.endsWith("-stats")
+      || id.endsWith("-docs") || id.endsWith("-messages")) {
+    let out = '<div class="skeleton-stack">';
+    for (let i = 0; i < 6; i++) {
+      const cls = i === 0 ? "line md" : (i % 3 === 0 ? "line sm" : "line");
+      out += '<div class="skeleton ' + cls + '"></div>';
+    }
+    out += '</div>';
+    return out;
+  }
+  if (id.endsWith("-summary")) {
+    return '<div class="skeleton-stack">'
+         + '<div class="skeleton line sm"></div>'
+         + '<div class="skeleton line md"></div>'
+         + '</div>';
+  }
+  return '<div class="empty">loading...</div>';
 }
 function showSub(name) {
   state.activeSub = name;
@@ -1247,6 +1646,40 @@ async function loadTab(name) {
   if (name === "libraries")  return loadLibraries();
   if (name === "plan")       return loadPlan();
   if (name === "actions")    return loadActions();
+}
+
+// Silent counterpart to loadTab. Warms the cache (or fetches the data
+// for the tab) WITHOUT rendering or switching panes. Called on tab
+// hover so the click that follows finds data already in state.data
+// and renders instantly. Best-effort: each call is fire-and-forget;
+// failures are swallowed since this is purely a perceived-latency win.
+async function prefetchTab(name) {
+  try {
+    if (name === "project") {
+      // Project info has its own snapshot endpoint -- fetch once.
+      if (!state.data.project) {
+        state.data.project = await fetchJSON("/api/project/info");
+      }
+    } else if (name === "components") {
+      if (!state.data.components) {
+        state.data.components = await fetchJSON("/api/project/components");
+      }
+    } else if (name === "nets") {
+      if (!state.data.nets) {
+        state.data.nets = await fetchJSON("/api/project/nets");
+      }
+    } else if (name === "libraries") {
+      if (!state.data.libraries) {
+        state.data.libraries = await fetchJSON("/api/libraries");
+      }
+    } else if (name === "plan") {
+      if (!state.data.plan) {
+        state.data.plan = await fetchJSON("/api/plan");
+      }
+    }
+    // Drawing + Actions stay out -- drawing's render is heavy and
+    // visual, Actions just lists local tool metadata.
+  } catch (e) { /* prefetch is best-effort */ }
 }
 
 async function refreshActive() {
@@ -1305,6 +1738,41 @@ async function clearHighlights() {
 }
 
 /* ============================ DATASHEET LINKS ============================ */
+// Mark-as-reviewed store. Keyed by designator -> ISO timestamp when
+// the user marked it. Persists in localStorage so a review session
+// survives Ctrl+Shift+R. Cleared per project via a "reset reviewed"
+// affordance (see renderComponents summary).
+var REVIEWED_KEY = "eda-dashboard-reviewed-v1";
+function loadReviewed() {
+  try { return JSON.parse(localStorage.getItem(REVIEWED_KEY) || "{}"); }
+  catch (e) { return {}; }
+}
+function saveReviewed(map) {
+  try { localStorage.setItem(REVIEWED_KEY, JSON.stringify(map)); }
+  catch (e) {}
+}
+function isReviewed(designator) {
+  if (!designator) return false;
+  return !!loadReviewed()[designator];
+}
+function toggleReviewed(designator) {
+  if (!designator) return false;
+  const m = loadReviewed();
+  if (m[designator]) delete m[designator];
+  else m[designator] = new Date().toISOString();
+  saveReviewed(m);
+  return !!m[designator];
+}
+function clearAllReviewed() {
+  saveReviewed({});
+}
+function countReviewed(designators) {
+  const m = loadReviewed();
+  let n = 0;
+  designators.forEach(function(d){ if (d && m[d]) n++; });
+  return n;
+}
+
 // Walk a component's various spots where a datasheet URL can live. Altium
 // doesn't have a single canonical field -- libraries set it differently:
 //   c.datasheet               (rare; only when the Library tab explicitly fills it)
@@ -1394,11 +1862,20 @@ function passiveRole(c) {
 
 async function openComponentDrawer(designator) {
   pushDrawerHistory("comp", designator);
+  updateDrawerStepButtons("comp");
+  // Keep drawingSelection in sync so J/K stepping always has the
+  // canonical "current" reference even when the drawer was opened
+  // via a link rather than an SVG click.
+  drawingSelection = { kind: "comp", name: designator };
   $("#drawer-cmd").textContent = designator;
   $("#drawer-tag").textContent = "component";
   $("#drawer-tag").className = "tag info";
   const body = $("#drawer-body");
   body.innerHTML = "<div class='empty'>loading...</div>";
+  // Reset scroll to top -- when stepping with J/K, the user expects to
+  // see the header info of the new component first, not be deep in the
+  // previous one's pin table.
+  body.scrollTop = 0;
   $("#drawer").classList.add("open");
   const r = await fetchJSON("/api/component/" + encodeURIComponent(designator));
   if (!r || !r.ok) {
@@ -1426,6 +1903,29 @@ async function openComponentDrawer(designator) {
   const dsRow = el("div", {class:"row-actions", style:"margin-bottom:12px;"},
     el("button", { onclick: function(){ crossProbe(designator, "schematic"); } }, "sch jump"),
     el("button", { onclick: function(){ crossProbe(designator, "pcb"); } }, "pcb jump"));
+  // Mark-as-reviewed button. Persists per-designator in localStorage
+  // so an EE running through every IC can check them off and the state
+  // survives a refresh. Re-clicking unmarks.
+  const reviewBtn = el("button", {});
+  function paintReviewBtn() {
+    const marked = isReviewed(designator);
+    reviewBtn.textContent = marked ? "✓ reviewed" : "mark reviewed";
+    reviewBtn.title = marked
+      ? "Mark this component as not yet reviewed"
+      : "Mark this component as reviewed for this session";
+    reviewBtn.className = marked ? "btn-primary" : "";
+  }
+  reviewBtn.addEventListener("click", function(){
+    toggleReviewed(designator);
+    paintReviewBtn();
+    // If the Components tab is mounted, re-render so the row check
+    // updates immediately.
+    if (state.data.components) {
+      try { renderComponents(); } catch (e) {}
+    }
+  });
+  paintReviewBtn();
+  dsRow.appendChild(reviewBtn);
   const dsLinks = pickDatasheetLinks(c);
   if (dsLinks.length) {
     dsLinks.forEach(function(link){
@@ -1753,8 +2253,10 @@ function diffPartner(netName, upperSet) {
 
 async function openNetDrawer(netName) {
   pushDrawerHistory("net", netName);
+  updateDrawerStepButtons("net");
   $("#drawer-cmd").textContent = netName;
   const body = $("#drawer-body");
+  body.scrollTop = 0;
   body.innerHTML = "<div class='empty'>collecting pins...</div>";
   $("#drawer").classList.add("open");
   // Reuse the cached /api/project/nets response if we have one.
@@ -2140,20 +2642,23 @@ function attachZoomPan(svg) {
   // Keyboard: 0 = reset view, +/- = zoom in/out.
   svg.tabIndex = 0;  // make focusable so keys work without an outer listener
   svg.addEventListener("keydown", function(ev) {
+    // stopPropagation matters here: the document-level keydown also
+    // binds 0 (jump to Status tab). Without stopPropagation, pressing
+    // 0 on the focused SVG would reset the view AND switch tabs.
     if (ev.key === "0") {
       state.x = state.x0; state.y = state.y0;
       state.w = state.w0; state.h = state.h0;
-      apply(); ev.preventDefault();
+      apply(); ev.preventDefault(); ev.stopPropagation();
     } else if (ev.key === "+" || ev.key === "=") {
       const cx = state.x + state.w/2, cy = state.y + state.h/2;
       state.w /= Math.SQRT2; state.h /= Math.SQRT2;
       state.x = cx - state.w/2; state.y = cy - state.h/2;
-      apply(); ev.preventDefault();
+      apply(); ev.preventDefault(); ev.stopPropagation();
     } else if (ev.key === "-" || ev.key === "_") {
       const cx = state.x + state.w/2, cy = state.y + state.h/2;
       state.w *= Math.SQRT2; state.h *= Math.SQRT2;
       state.x = cx - state.w/2; state.y = cy - state.h/2;
-      apply(); ev.preventDefault();
+      apply(); ev.preventDefault(); ev.stopPropagation();
     }
   });
 }
@@ -2227,6 +2732,84 @@ function attachSvgInteractivity(svg) {
     svgMarkHover(svg, null, null);
     svgHideTooltip();
   });
+}
+
+// Component-drawer step navigation. When the drawer holds a component,
+// J / down-arrow opens the NEXT designator in BOM order; K / up-arrow
+// the previous. The visible next/prev buttons in the drawer header
+// trigger the same code path. Order is the BOM list as returned by
+// /api/project/components, naturally-sorted so R1, R2, R10 don't end
+// up as R1, R10, R2.
+async function drawerStepComponent(direction, opts) {
+  if (!drawingSelection || drawingSelection.kind !== "comp") {
+    // Fall back: try drawer-cmd text content if drawingSelection isn't set.
+    // (Drawer history may have drifted; abort cleanly.)
+    return;
+  }
+  opts = opts || {};
+  const cur = drawingSelection.name;
+  let bom;
+  try { bom = await getBomComponents(); }
+  catch (e) { return; }
+  if (!bom || !bom.length) return;
+  // Natural-sort by designator so the order matches what the user sees
+  // in the Components table.
+  const ordered = bom
+    .map(function(c){ return c.designator; })
+    .filter(Boolean)
+    .sort(function(a, b){
+      return String(a).localeCompare(String(b),
+        undefined, {numeric: true, sensitivity: "base"});
+    });
+  const idx = ordered.indexOf(cur);
+  if (idx < 0) return;
+  let target = idx + direction;
+  // When skipUnreviewed is true, advance past any designator that's
+  // already marked reviewed -- the user's intent is "show me the
+  // next thing that still needs attention".
+  if (opts.skipUnreviewed) {
+    while (target >= 0 && target < ordered.length
+           && isReviewed(ordered[target])) {
+      target += direction;
+    }
+  }
+  if (target < 0 || target >= ordered.length) {
+    const msg = opts.skipUnreviewed
+      ? "no more unreviewed components" + (direction > 0 ? " ahead" : " behind")
+      : (direction > 0 ? "end of BOM" : "start of BOM");
+    showToast(msg, "muted");
+    return;
+  }
+  // gotoComp re-opens the drawer + relocates on canvas. Pushes into
+  // drawer history naturally so Alt+Left walks back through the
+  // stepping trail.
+  gotoComp(ordered[target]);
+}
+
+// Show/hide the prev/next buttons in the drawer header based on
+// what kind of drawer is showing. Component drawers get the buttons;
+// net drawers and log-entry drawers don't (no useful order).
+function updateDrawerStepButtons(kind) {
+  const prev = $("#drawer-prev");
+  const next = $("#drawer-next");
+  if (!prev || !next) return;
+  const showSteppers = kind === "comp";
+  prev.hidden = !showSteppers;
+  next.hidden = !showSteppers;
+}
+
+// Help overlay: discoverable shortcut list (? key). Lives off in DOM
+// when hidden so the layout doesn't shift.
+function showHelpOverlay() {
+  const ov = $("#help-overlay");
+  if (!ov) return;
+  ov.hidden = false;
+  // Focus the close button so Esc / Enter close it cleanly.
+  setTimeout(function(){ $("#help-close").focus(); }, 0);
+}
+function hideHelpOverlay() {
+  const ov = $("#help-overlay");
+  if (ov) ov.hidden = true;
 }
 
 // Lazy-initialised single tooltip element reused across hovers. Lives
@@ -3659,156 +4242,137 @@ function renderComponents() {
   });
   summary.appendChild(strip);
 
-  // BOM analytics: value spread + footprint mix + single-use parts.
+  // Issue counts collapsed into ONE row of clickable chips. Previously
+  // each analysis (BOM, datasheets, naming, IC pins, decoupling) owned
+  // its own row with a "label: " preamble and "X/Y ok" success chip --
+  // visually overwhelming and the success chips just added noise. Now
+  // we only surface PROBLEMS, each linking to a filtered table view.
   const bomA = analyzeBom(all);
-  const aStrip = el("div", {class:"row-actions", style:"margin-top:6px;"});
-  aStrip.appendChild(el("span", {class:"hint"}, "BOM: "));
-  aStrip.appendChild(el("span", {class:"tag"},
-    bomA.distinctValues + " distinct values"));
-  aStrip.appendChild(el("span", {class:"tag"},
-    bomA.distinctFootprints + " footprints"));
-  if (bomA.singleUse)
-    aStrip.appendChild(el("span", {class:"tag warn", style:"cursor:pointer;",
-      title:"Values used by exactly one component -- consolidation candidates"},
-      bomA.singleUse + " single-use values"));
-  summary.appendChild(aStrip);
-
-  // Datasheet coverage: how many ICs actually have a datasheet link the
-  // dashboard can resolve. Without a datasheet the agent can't review
-  // pinout / ratings / behaviour and the user has to do it manually,
-  // which makes "datasheet missing" a real-world blocker on every IC.
   const dsCov = analyzeDatasheetCoverage(all);
-  if (dsCov.icCount) {
-    const sStrip = el("div", {class:"row-actions", style:"margin-top:6px;"});
-    sStrip.appendChild(el("span", {class:"hint"}, "datasheets: "));
-    sStrip.appendChild(el("span",
-      {class:"tag " + (dsCov.withDs.length === dsCov.icCount ? "ok"
-                       : dsCov.withDs.length ? "warn" : "err")},
-      dsCov.withDs.length + "/" + dsCov.icCount + " ICs linked"));
-    if (dsCov.withoutDs.length) {
-      const tag = el("span",
-        {class:"tag warn", style:"cursor:pointer;",
-         title:"ICs with NO HelpURL / ComponentLink1URL / Datasheet "
-             + "parameter. The agent needs these to ground review work; "
-             + "without them every check is guesswork."},
-        dsCov.withoutDs.length + " missing");
-      tag.addEventListener("click", function(){
-        renderComponentsFiltered(all,
-          function(c){ return dsCov.missingSet[c.designator]; },
-          "ICs without a datasheet link");
-      });
-      sStrip.appendChild(tag);
-    }
-    summary.appendChild(sStrip);
-  }
-
-  // Pin-name vs net naming consistency. Find ICs where a pin named
-  // VCC/VDD/VBAT/etc. is on a NON-power net, or a pin named GND/VSS
-  // is on a NON-ground net. This is a class of bug ERC won't flag --
-  // the wire is connected, the rule just expects "VCC pin should be
-  // on a power net" which is a design-intent check, not an electrical
-  // one. Catching it here saves a real-world brown-out incident.
   const mismatch = analyzePinNetMismatch(all);
-  if (mismatch.icCount && mismatch.mismatched.length) {
-    const mStrip = el("div", {class:"row-actions", style:"margin-top:6px;"});
-    mStrip.appendChild(el("span", {class:"hint"}, "naming: "));
-    const tag = el("span",
-      {class:"tag err", style:"cursor:pointer;",
-       title:"ICs where a pin named VCC/VDD/GND/VSS is wired to a net "
-           + "whose name doesn't match. Often a wire-up error or a swapped "
-           + "rail. ERC won't catch this."},
-      mismatch.mismatched.length + " IC(s) with pin/net name mismatch");
-    tag.addEventListener("click", function(){
-      renderComponentsFiltered(all,
-        function(c){ return mismatch.mismatchedSet[c.designator]; },
-        "ICs with pin/net naming mismatch");
-    });
-    mStrip.appendChild(tag);
-    summary.appendChild(mStrip);
-  }
-
-  // Unconnected IC pins. A passive with one floating pad can be
-  // intentional (test point, mounting hole, RF shield tab); an IC pin
-  // left blank is almost always either an oversight or a missing
-  // explicit-NC directive. The latter still passes ERC silently if
-  // the rule is set to "report no-connect", so surfacing these is
-  // genuine added value beyond what compile messages show.
   const ncIc = analyzeUnconnectedIcPins(all);
-  if (ncIc.icCount) {
-    const uStrip = el("div", {class:"row-actions", style:"margin-top:6px;"});
-    uStrip.appendChild(el("span", {class:"hint"}, "IC pins: "));
-    if (ncIc.unconnectedCount) {
-      const tag = el("span",
-        {class:"tag err", style:"cursor:pointer;",
-         title:"IC pins with no net assigned (or named '?' / empty). "
-             + "Each is either a missing wire or a missing No-ERC mark."},
-        ncIc.unconnectedCount + " unconnected across "
-        + ncIc.icsWithUnconnected.length + " IC(s)");
-      tag.addEventListener("click", function(){
-        renderComponentsFiltered(all,
-          function(c){ return ncIc.unconnectedSet[c.designator]; },
-          "ICs with unconnected pins");
-      });
-      uStrip.appendChild(tag);
-      summary.appendChild(uStrip);
-    }
-  }
-
-  // Decoupling coverage. For every IC, find its power-pin nets and
-  // count how many of those nets host a local bypass capacitor. This
-  // is the single most-skipped check in design review: a missed local
-  // cap doesn't fail ERC, doesn't fail DRC, but bites at first power-on.
-  // We compute it from the snapshot's per-component pin list (already
-  // includes nets) so the cost is zero extra IPC.
   const dec = analyzeDecoupling(all);
-  if (dec.icCount) {
-    const dStrip = el("div", {class:"row-actions", style:"margin-top:6px;"});
-    dStrip.appendChild(el("span", {class:"hint"}, "decoupling: "));
-    if (dec.fullyCovered.length) {
-      dStrip.appendChild(el("span", {class:"tag ok"},
-        dec.fullyCovered.length + "/" + dec.icCount + " ICs covered"));
-    }
-    if (dec.partial.length) {
-      const tag = el("span",
-        {class:"tag warn", style:"cursor:pointer;",
-         title:"ICs where at least one power pin has NO bypass cap on its net."},
-        dec.partial.length + " ICs partial");
+
+  const issues = el("div", {class:"row-actions", style:"margin-top:6px;"});
+  function addIssue(severity, label, title, predicate, filterTitle) {
+    const tag = el("span",
+      {class:"tag " + severity,
+       style: predicate ? "cursor:pointer;" : "",
+       title: title || ""},
+      label);
+    if (predicate) {
       tag.addEventListener("click", function(){
-        renderComponentsFiltered(all,
-          function(c){ return dec.partialSet[c.designator]; },
-          "ICs with partially-decoupled power pins");
+        renderComponentsFiltered(all, predicate, filterTitle || label);
       });
-      dStrip.appendChild(tag);
     }
-    if (dec.missing.length) {
-      const tag = el("span",
-        {class:"tag err", style:"cursor:pointer;",
-         title:"ICs with power pins that share NO net with any capacitor. "
-             + "Likely missing local bypass."},
-        dec.missing.length + " ICs missing");
-      tag.addEventListener("click", function(){
-        renderComponentsFiltered(all,
-          function(c){ return dec.missingSet[c.designator]; },
-          "ICs with no local decoupling caps");
-      });
-      dStrip.appendChild(tag);
-    }
-    summary.appendChild(dStrip);
+    issues.appendChild(tag);
+  }
+  if (bomA.singleUse) {
+    addIssue("warn", bomA.singleUse + " single-use values",
+             "Values used by exactly one component — consolidation candidates",
+             null);
+  }
+  if (dsCov.withoutDs.length) {
+    addIssue("warn", dsCov.withoutDs.length + " ICs missing datasheet",
+             "ICs with no HelpURL / ComponentLink1URL / Datasheet param. "
+             + "The agent needs these to ground review work.",
+             function(c){ return dsCov.missingSet[c.designator]; },
+             "ICs without a datasheet link");
+  }
+  if (mismatch.mismatched.length) {
+    addIssue("err", mismatch.mismatched.length + " pin/net name mismatch",
+             "ICs where a VCC/VDD/GND/VSS pin is wired to a net whose name "
+             + "doesn't match. ERC won't catch this.",
+             function(c){ return mismatch.mismatchedSet[c.designator]; },
+             "ICs with pin/net naming mismatch");
+  }
+  if (ncIc.unconnectedCount) {
+    addIssue("err",
+             ncIc.unconnectedCount + " unconnected IC pins",
+             "IC pins with no net or named '?' / empty. Each is either a "
+             + "missing wire or a missing No-ERC mark.",
+             function(c){ return ncIc.unconnectedSet[c.designator]; },
+             "ICs with unconnected pins");
+  }
+  if (dec.partial.length) {
+    addIssue("warn", dec.partial.length + " ICs partial decoupling",
+             "ICs where at least one power pin has NO bypass cap on its net.",
+             function(c){ return dec.partialSet[c.designator]; },
+             "ICs with partially-decoupled power pins");
+  }
+  if (dec.missing.length) {
+    addIssue("err", dec.missing.length + " ICs missing decoupling",
+             "ICs with power pins on no shared net with any cap. Likely "
+             + "missing local bypass.",
+             function(c){ return dec.missingSet[c.designator]; },
+             "ICs with no local decoupling caps");
+  }
+  if (issues.children.length) {
+    summary.appendChild(issues);
+  } else {
+    // No problems found — show a one-liner so the section doesn't look
+    // broken (e.g. snapshot loaded but every check passed).
+    const ok = el("div", {class:"row-actions", style:"margin-top:6px;"});
+    ok.appendChild(el("span", {class:"tag ok"}, "no issues"));
+    ok.appendChild(el("span", {class:"hint"},
+      bomA.distinctValues + " values · " + bomA.distinctFootprints + " footprints"));
+    summary.appendChild(ok);
   }
 
-  if (bomA.valueList.length) {
-    const topStrip = el("div", {class:"row-actions", style:"margin-top:6px;"});
-    topStrip.appendChild(el("span", {class:"hint"}, "top values: "));
-    bomA.valueList.slice(0, 10).forEach(function(v){
-      const tag = el("span", {class:"tag muted", style:"cursor:pointer;"},
-        v.value + " x" + v.count);
-      tag.addEventListener("click", function(){
-        $("#comp-filter").value = v.value;
+  // "top values" strip removed: it was 10 muted chips of MPN/value
+  // strings that doubled as filter shortcuts. Useful in theory, but in
+  // practice it took a full row of vertical space showing the most
+  // common parts (which are already obvious from skimming the table)
+  // and pushed the actually-interesting issue counts further down. The
+  // filter input does the same job on demand.
+
+  // Review-progress chip + filter. Counts how many components have been
+  // marked reviewed (drawer "✓ reviewed" toggle). Click "unreviewed
+  // only" to filter the table to remaining work. "Reset reviewed"
+  // clears the localStorage map for this session.
+  const designators = all.map(function(c){ return c.designator; }).filter(Boolean);
+  const reviewedCount = countReviewed(designators);
+  if (designators.length) {
+    const rStrip = el("div", {class:"row-actions", style:"margin-top:6px; align-items:center;"});
+    const pct = designators.length
+      ? Math.round(100 * reviewedCount / designators.length) : 0;
+    rStrip.appendChild(el("span",
+      {class:"tag " + (reviewedCount === designators.length ? "ok"
+                       : reviewedCount > 0 ? "info" : "muted")},
+      "reviewed " + reviewedCount + " / " + designators.length
+      + " (" + pct + "%)"));
+    if (reviewedCount < designators.length) {
+      // Replaces the rounded "unreviewed only" tag with a real checkbox
+      // — same affordance, no fake-pill ambiguity.
+      const lbl = el("label",
+        {style:"display:inline-flex; align-items:center; gap:4px; "
+              + "cursor:pointer; font-size:var(--fs-xs); color:var(--text-mute);",
+         title:"Show only components not yet marked reviewed"});
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.checked = compReviewedFilter === "unreviewed";
+      cb.style.margin = "0";
+      cb.addEventListener("change", function(){
+        compReviewedFilter = cb.checked ? "unreviewed" : "all";
         renderComponents();
       });
-      topStrip.appendChild(tag);
-    });
-    summary.appendChild(topStrip);
+      lbl.appendChild(cb);
+      lbl.appendChild(document.createTextNode("unreviewed only"));
+      rStrip.appendChild(lbl);
+    }
+    if (reviewedCount > 0) {
+      const tag = el("span",
+        {class:"tag muted", style:"cursor:pointer;",
+         title:"Drop all reviewed marks for this session"},
+        "reset");
+      tag.addEventListener("click", function(){
+        clearAllReviewed();
+        compReviewedFilter = "all";
+        renderComponents();
+      });
+      rStrip.appendChild(tag);
+    }
+    summary.appendChild(rStrip);
   }
 
   const filt = ($("#comp-filter").value || "").toLowerCase().trim();
@@ -3823,6 +4387,11 @@ function renderComponents() {
   }
   if (classFilter) {
     rows = rows.filter(function(c){ return c._class === classFilter; });
+  }
+  if (compReviewedFilter === "unreviewed") {
+    rows = rows.filter(function(c){ return !isReviewed(c.designator); });
+  } else if (compReviewedFilter === "reviewed") {
+    rows = rows.filter(function(c){ return isReviewed(c.designator); });
   }
   $("#comp-count").textContent = rows.length + " of " + all.length + " components";
   if (!rows.length) {
@@ -3844,6 +4413,10 @@ function renderComponents() {
   }
   const t = el("table", {class:"data"});
   const head = el("tr", {});
+  // Leading "reviewed" column -- shows ✓ on marked rows. Width-clamped
+  // so it doesn't push the data columns around.
+  head.appendChild(el("th",
+    {style:"width:28px; text-align:center;", title:"Reviewed"}, "✓"));
   head.appendChild(makeSortableTh("class", "_class", compSortState,
     function(){ renderComponents(); }));
   cols.forEach(function(c){
@@ -3855,10 +4428,45 @@ function renderComponents() {
   rows.slice(0, 600).forEach(function(row){
     const tr = el("tr", {style:"cursor:pointer;"});
     tr.addEventListener("click", function(ev){
-      // Don't trigger drawer if user clicked an inline link.
+      // Don't trigger drawer if user clicked an inline link OR the
+      // reviewed-toggle cell (which has its own click handler).
       if (ev.target.tagName === "A") return;
+      if (ev.target.closest && ev.target.closest("td.col-reviewed")) return;
       if (row.designator) gotoComp(row.designator);
     });
+    // Reviewed toggle as the very first cell -- clickable check that
+    // marks/unmarks directly from the table without opening the drawer.
+    // Batch reviewers can mash this column to tick through rows fast.
+    const reviewed = isReviewed(row.designator);
+    if (reviewed) tr.classList.add("row-reviewed");
+    const revCell = el("td", {
+      class: "col-reviewed",
+      style: "text-align:center; cursor:pointer; user-select:none;",
+      title: reviewed
+        ? "Marked reviewed -- click to unmark"
+        : "Click to mark reviewed"
+    });
+    // Use a real checkbox so the global square-checkbox styling applies
+    // (was a Unicode "○" / "✓" which read as a rounded pill to the user).
+    const revCb = document.createElement("input");
+    revCb.type = "checkbox";
+    revCb.checked = reviewed;
+    revCb.tabIndex = -1; // tabbing should hit the row, not the checkbox
+    revCell.appendChild(revCb);
+    revCell.addEventListener("click", function(ev){
+      ev.stopPropagation();   // don't open drawer
+      if (!row.designator) return;
+      toggleReviewed(row.designator);
+      renderComponents();
+      // Update drawer button if this component's drawer is currently
+      // open so the two views stay in sync.
+      if (drawingSelection && drawingSelection.kind === "comp"
+          && drawingSelection.name === row.designator) {
+        // Cheapest path: re-paint the open drawer.
+        openComponentDrawer(row.designator);
+      }
+    });
+    tr.appendChild(revCell);
     tr.appendChild(el("td", {},
       el("span", {class:"tag " + (COMP_CLASS_TAG[row._class] || "muted")},
         row._class)));
@@ -3877,6 +4485,11 @@ function renderComponents() {
 // {col:null} for the natural input order.
 var compSortState = { col: null, dir: "asc" };
 var netSortState  = { col: null, dir: "asc" };
+
+// Components-tab review filter. "all" / "reviewed" / "unreviewed".
+// Toggled by the review-progress chip; reset by the table re-render
+// when the user changes another filter.
+var compReviewedFilter = "all";
 
 // Build a <th> that responds to clicks by toggling sort on the given
 // data-key. ``state`` is the per-table sort state object (mutated in
@@ -3902,6 +4515,7 @@ function makeSortableTh(label, key, state, onChange) {
       state.col = key; state.dir = "asc";
     }
     onChange();
+    try { savePersistedUI(); } catch (e) {}
   });
   return th;
 }
@@ -4712,9 +5326,11 @@ function renderFeed() {
   const root = $("#feed");
   root.innerHTML = "";
   let shown = 0;
-  for (let i = 0; i < state.entries.length && shown < 250; i++) {
+  let hidden = 0;
+  for (let i = 0; i < state.entries.length; i++) {
     const e = state.entries[i];
-    if (!feedMatches(e)) continue;
+    if (!feedMatches(e)) { hidden++; continue; }
+    if (shown >= 250) continue;
     shown++;
     const sev = e.severity || "ok";
     const ts = (e.ts || "").slice(11, 19);
@@ -4729,7 +5345,38 @@ function renderFeed() {
       el("div", {class:"cmd"}, e.cmd),
     ));
   }
-  $("#feed-count").textContent = shown + " entries";
+  // Surface the hidden count: when "hide pings" is on (default) the feed
+  // looks frozen during idle activity because pings are the only thing
+  // flowing. Showing "(N hidden, click to show)" tells the user the
+  // bridge IS live AND lets them flip the filter in one click instead
+  // of hunting for the checkbox in the toolbar.
+  const counter = $("#feed-count");
+  counter.innerHTML = "";
+  counter.appendChild(document.createTextNode(shown + " entries"));
+  if (hidden) {
+    const link = document.createElement("a");
+    link.href = "#";
+    link.style.marginLeft = "6px";
+    link.style.color = "var(--text-mute)";
+    link.style.textDecoration = "underline";
+    link.style.cursor = "pointer";
+    link.title = state.hidePings
+      ? "Show pings (and any other filtered entries)"
+      : "Hide slow / errored entries that don't match the only-slow filter";
+    link.textContent = "(" + hidden + " hidden, click to show)";
+    link.addEventListener("click", function(ev){
+      ev.preventDefault();
+      // Toggle the hide-pings checkbox (the common cause of a hidden
+      // feed). Triggering its change handler is what state.hidePings
+      // reads next time renderFeed runs.
+      const cb = $("#feed-hide-pings");
+      if (cb) {
+        cb.checked = !cb.checked;
+        cb.dispatchEvent(new Event("change"));
+      }
+    });
+    counter.appendChild(link);
+  }
 }
 function sevTag(s) {
   if (s === "error") return "err";
@@ -4903,7 +5550,32 @@ function paintKpis() {
     if (t >= cutoff) cpm++;
   });
   $("#kpi-req-sub").textContent = cpm + " in last 60s";
-  $("#kpi-version").textContent = state.scriptVersion || "-";
+  // Script version with stale-vs-deployed banner. The activity-log
+  // session entry only updates on Pascal restart; the live ping
+  // (state.runningScriptVersion) reflects what is ACTUALLY executing
+  // right now. We prefer the live value when we have one.
+  const runningVer = state.runningScriptVersion || state.scriptVersion || "-";
+  const versionEl = $("#kpi-version");
+  versionEl.textContent = runningVer;
+  const subEl = $("#kpi-version-sub");
+  if (state.deployedScriptVersion
+      && runningVer && runningVer !== "-"
+      && runningVer !== state.deployedScriptVersion) {
+    // Running differs from disk -- the script needs a restart for the
+    // deployed code to actually take effect.
+    versionEl.style.color = "var(--err)";
+    subEl.innerHTML = "<span class='tag err'>stale</span> deployed: "
+      + state.deployedScriptVersion
+      + " <span class='hint' style='display:block; margin-top:2px;'>"
+      + "Ctrl+F3 in Altium &rarr; reopen Altium_API.PrjScr &rarr; StartMCPServer"
+      + "</span>";
+  } else if (state.deployedScriptVersion && runningVer === state.deployedScriptVersion) {
+    versionEl.style.color = "";
+    subEl.innerHTML = "<span class='tag ok'>up to date</span>";
+  } else {
+    versionEl.style.color = "";
+    subEl.textContent = "";
+  }
   $("#kpi-inflight").textContent = state.inFlight ? state.inFlight : "-";
 }
 
@@ -4914,6 +5586,23 @@ async function pollHealth() {
     if (r.ok) lastPing = Date.now();
   } catch (e) {}
   updateStatusPill();
+}
+
+// Live script-version probe. Hits /api/altium/version which pings the
+// running Pascal script (returning its in-memory SCRIPT_VERSION) AND
+// reads the on-disk Main.pas. paintKpis renders the result with a
+// stale banner if the two diverge. Runs on its own slower interval --
+// 5s is plenty for surfacing "you redeployed but didn't restart".
+async function pollScriptVersion() {
+  try {
+    const r = await fetch("/api/altium/version", { cache: "no-store" });
+    if (!r.ok) return;
+    const j = await r.json();
+    if (!j || !j.ok) return;
+    if (j.running)  state.runningScriptVersion  = j.running;
+    if (j.deployed) state.deployedScriptVersion = j.deployed;
+    paintKpis();
+  } catch (e) { /* polling is best-effort */ }
 }
 
 function updateStatusPill(forced) {
@@ -5689,16 +6378,94 @@ function toggleTheme() {
 }
 
 /* ============================ Helpers ============================ */
+// Classify a failure reason into one of a small set of categories so
+// the empty state can offer a relevant action (retry, run doctor,
+// compile project, etc) instead of just a dead error string.
+function classifyFailure(reason) {
+  if (!reason) return "none";
+  const r = String(reason).toLowerCase();
+  if (r.indexOf("altium-not-running") >= 0
+      || r.indexOf("altium is not running") >= 0
+      || r.indexOf("no client") >= 0) return "altium-off";
+  if (r.indexOf("timeout") >= 0 || r.indexOf("timed out") >= 0)
+    return "timeout";
+  if (r.indexOf("no-bom") >= 0 || r.indexOf("no bom") >= 0
+      || r.indexOf("not compiled") >= 0
+      || r.indexOf("recompile") >= 0) return "needs-compile";
+  if (r.indexOf("failed to fetch") >= 0
+      || r.indexOf("networkerror") >= 0) return "network";
+  if (r.indexOf("not found") >= 0 || r.indexOf("404") >= 0)
+    return "missing-endpoint";
+  return "other";
+}
+
 function emptyBox(reason, hint) {
   const wrap = el("div", {class:"empty"});
-  if (reason === "altium-not-running") {
-    wrap.appendChild(el("div", {}, "Altium is not running."));
-  } else if (reason) {
-    wrap.appendChild(el("div", {}, String(reason)));
-  } else {
-    wrap.appendChild(el("div", {}, "no data"));
+  const kind = classifyFailure(reason);
+  // Human-readable headline by category. The raw reason is shown
+  // beneath in muted text so the EE can still see the original
+  // detail for debugging if needed.
+  let headline;
+  if (kind === "altium-off")       headline = "Altium is not running";
+  else if (kind === "timeout")     headline = "Altium took too long to respond";
+  else if (kind === "needs-compile") headline = "Project needs to be compiled";
+  else if (kind === "network")     headline = "Could not reach the dashboard server";
+  else if (kind === "missing-endpoint") headline = "Endpoint not loaded on the running MCP server";
+  else if (kind === "none")        headline = "no data";
+  else                              headline = String(reason);
+  wrap.appendChild(el("div", {style:"font-size:13px; color:var(--text); margin-bottom:4px;"}, headline));
+  // Secondary line: an actionable hint based on the category, with
+  // the user-supplied hint preferred when given.
+  let secondary;
+  if (hint) secondary = hint;
+  else if (kind === "altium-off") secondary = "Start Altium Designer and re-run the Pascal script.";
+  else if (kind === "timeout")    secondary = "The active document may be large; try again or compile the project.";
+  else if (kind === "needs-compile") secondary = "Run \"Project | Compile\" in Altium, then refresh.";
+  else if (kind === "network")    secondary = "Reload the dashboard page (Ctrl+Shift+R).";
+  else if (kind === "missing-endpoint") secondary = "Reconnect /mcp in Claude Code, then hard-reload this page.";
+  if (secondary) {
+    wrap.appendChild(el("div",
+      {style:"font-size:11px; color:var(--text-dim); margin-bottom:8px;"},
+      secondary));
   }
-  if (hint) wrap.appendChild(el("div", {style:"margin-top:6px;"}, hint));
+  // Action row.
+  const actions = el("div", {class:"row-actions",
+    style:"justify-content:center; margin-top:8px;"});
+  // Retry button -- works for any failure category by refreshing the
+  // active tab through the existing refresh path.
+  if (kind !== "none") {
+    const retry = el("button", {class:"btn-primary btn-sm",
+      title:"Re-fetch this tab"}, "retry");
+    retry.addEventListener("click", function(){
+      try { refreshActive(); } catch (e) {}
+    });
+    actions.appendChild(retry);
+  }
+  if (kind === "altium-off" || kind === "timeout"
+      || kind === "missing-endpoint") {
+    const doc = el("button", {class:"btn-sm",
+      title:"Open the Status tab to run health diagnostics"},
+      "open diagnostics >");
+    doc.addEventListener("click", function(){
+      showTab("status");
+      // Pre-click the Health subtab if present.
+      setTimeout(function(){
+        const hb = document.querySelector(".subtabs button[data-sub=\"health\"]");
+        if (hb) hb.click();
+      }, 60);
+    });
+    actions.appendChild(doc);
+  }
+  if (actions.children.length) wrap.appendChild(actions);
+  // Raw reason in monospace -- collapsed under a hint colour so it
+  // doesn't shout but is still inspectable for debugging.
+  if (reason && reason !== headline) {
+    wrap.appendChild(el("div",
+      {class:"mono",
+       style:"font-size:10px; color:var(--text-dim); margin-top:10px; "
+        + "opacity:0.7; word-break:break-all;"},
+      String(reason)));
+  }
   return wrap;
 }
 
@@ -5706,16 +6473,40 @@ function emptyBox(reason, hint) {
 window.addEventListener("DOMContentLoaded", function(){
   $$("nav.tabs button[data-tab]").forEach(function(b){
     b.addEventListener("click", function(){ showTab(b.dataset.tab); });
+    // Prefetch on hover so the click is instant. The bridge round-trip
+    // is the slowest part of any tab switch -- starting it on
+    // mouseenter overlaps the user's mouse-travel time with the fetch.
+    // Debounced so a sweep across the tab bar doesn't fire 7 fetches.
+    let prefetchTimer = null;
+    b.addEventListener("mouseenter", function(){
+      const name = b.dataset.tab;
+      if (state.activeTab === name) return;       // already loaded / showing
+      if (state.loaded["prefetch_" + name]) return;  // already prefetched
+      clearTimeout(prefetchTimer);
+      prefetchTimer = setTimeout(function(){
+        state.loaded["prefetch_" + name] = true;
+        try { prefetchTab(name); } catch (e) {}
+      }, 60);   // ~60ms threshold to avoid triggering on glance-by
+    });
+    b.addEventListener("mouseleave", function(){ clearTimeout(prefetchTimer); });
   });
   $$(".subtabs button").forEach(function(b){
     b.addEventListener("click", function(){ showSub(b.dataset.sub); });
   });
   $("#refresh-tab").addEventListener("click", refreshActive);
 
-  $("#comp-filter").addEventListener("input", renderComponents);
-  $("#comp-class-filter").addEventListener("change", renderComponents);
-  $("#net-filter").addEventListener("input", renderNets);
-  $("#net-class-filter").addEventListener("change", renderNets);
+  $("#comp-filter").addEventListener("input", function(){
+    renderComponents(); savePersistedUI();
+  });
+  $("#comp-class-filter").addEventListener("change", function(){
+    renderComponents(); savePersistedUI();
+  });
+  $("#net-filter").addEventListener("input", function(){
+    renderNets(); savePersistedUI();
+  });
+  $("#net-class-filter").addEventListener("change", function(){
+    renderNets(); savePersistedUI();
+  });
   $("#tool-filter").addEventListener("input", function() {
     toolState.filter = this.value;
     renderTools();
@@ -5756,6 +6547,19 @@ window.addEventListener("DOMContentLoaded", function(){
     state.entries = []; renderFeed(); paintKpis();
   });
 
+  // Help overlay wiring.
+  const helpOv = $("#help-overlay");
+  if (helpOv) {
+    helpOv.addEventListener("click", function(ev){
+      // Click outside the card closes (backdrop click).
+      if (ev.target === helpOv) hideHelpOverlay();
+    });
+  }
+  const helpClose = $("#help-close");
+  if (helpClose) helpClose.addEventListener("click", hideHelpOverlay);
+  const helpToggle = $("#help-toggle");
+  if (helpToggle) helpToggle.addEventListener("click", showHelpOverlay);
+
   $("#drawer-close").addEventListener("click", function(){
     $("#drawer").classList.remove("open");
     // Reset history when the drawer is fully closed -- the next
@@ -5764,6 +6568,12 @@ window.addEventListener("DOMContentLoaded", function(){
     renderDrawerBreadcrumb();
   });
   $("#drawer-back").addEventListener("click", drawerBack);
+  $("#drawer-prev").addEventListener("click", function(){
+    drawerStepComponent(-1);
+  });
+  $("#drawer-next").addEventListener("click", function(){
+    drawerStepComponent(+1);
+  });
   // Alt+Left also walks back through the drawer history. Skip when
   // a text input owns focus so it doesn't fight with browser undo.
   document.addEventListener("keydown", function(ev) {
@@ -5821,13 +6631,56 @@ window.addEventListener("DOMContentLoaded", function(){
   });
 
   document.addEventListener("keydown", function(ev){
-    if (ev.key === "/" && ev.target.tagName !== "INPUT") {
+    // Skip ALL shortcuts when typing in any text-entry field. The
+    // previous tagName-only check missed TEXTAREA + contenteditable +
+    // SELECT (which natively jumps to options on letter keys but the
+    // 1-9 tab nav was stomping the user's typing). Also skip when a
+    // modifier is held so we don't fight Ctrl+R / Ctrl+T browser
+    // shortcuts.
+    const t = ev.target;
+    const isTextField = t && (
+      t.tagName === "INPUT" || t.tagName === "TEXTAREA"
+      || t.tagName === "SELECT" || t.isContentEditable);
+    if (ev.key === "/" && !isTextField) {
       ev.preventDefault();
       $("#global-search").focus();
       return;
     }
-    if (ev.target.tagName === "INPUT") return;
-    if (ev.key === "Escape") $("#drawer").classList.remove("open");
+    if (isTextField) return;
+    if (ev.ctrlKey || ev.altKey || ev.metaKey) return;
+    if (ev.key === "?") { ev.preventDefault(); showHelpOverlay(); return; }
+    if (ev.key === "Escape") {
+      // Close overlay first if up; else close drawer.
+      const ov = $("#help-overlay");
+      if (ov && !ov.hidden) { hideHelpOverlay(); return; }
+      $("#drawer").classList.remove("open");
+    }
+    // Component-drawer step nav. Only fires when the drawer is open
+    // AND the current entry is a component (next/prev buttons visible).
+    const drawerOpen = $("#drawer").classList.contains("open");
+    const stepperVisible = !$("#drawer-next").hidden;
+    if (drawerOpen && stepperVisible) {
+      // n / Shift+N: jump to the next / previous UNREVIEWED component.
+      // Lets the user batch-skip already-checked work during a review
+      // pass. Lowercase n + Shift+N is intentional -- Shift+J also
+      // works for "next anything" with PageDown-feeling semantics.
+      if (ev.key === "n" && !ev.shiftKey) {
+        ev.preventDefault();
+        drawerStepComponent(+1, { skipUnreviewed: true });
+        return;
+      }
+      if (ev.key === "N" && ev.shiftKey) {
+        ev.preventDefault();
+        drawerStepComponent(-1, { skipUnreviewed: true });
+        return;
+      }
+      if (ev.key === "j" || ev.key === "J" || ev.key === "ArrowDown") {
+        ev.preventDefault(); drawerStepComponent(+1); return;
+      }
+      if (ev.key === "k" || ev.key === "K" || ev.key === "ArrowUp") {
+        ev.preventDefault(); drawerStepComponent(-1); return;
+      }
+    }
     if (ev.key === "r" || ev.key === "R") refreshActive();
     if (ev.key === "t" || ev.key === "T") toggleTheme();
     if (ev.key === "1") showTab("drawing");
@@ -5888,14 +6741,60 @@ window.addEventListener("DOMContentLoaded", function(){
     }
   });
 
+  // Restore persisted UI bits (filters, sort, message-filter chips,
+  // active tab) BEFORE the first render so they take effect on initial
+  // paint instead of triggering a re-render flicker.
+  const persisted = restorePersistedUI();
   connectSSE();
+  // If the user was on a different tab last time, jump there instead
+  // of forcing them back to Drawing. The Drawing pane still gets
+  // initialised below so its first click is instant.
+  if (persisted && persisted.tab && persisted.tab !== "drawing") {
+    showTab(persisted.tab);
+  }
   loadDrawing();
   pollIntent();
   pollHealth();
   setInterval(pollHealth, 3000);
+  pollScriptVersion();             // initial fetch on dashboard load
+  setInterval(pollScriptVersion, 5000);
   setInterval(pollIntent, 5000);
   setInterval(tickSparklines, 2000);
   setInterval(paintKpis, 1000);
+
+  // Keep --header-h and --nav-h CSS variables in sync with the actual
+  // rendered heights of the page header and tab nav. Sticky table
+  // headers and the tab nav use these to pin tight; the previous
+  // hardcoded 52/96 left a visible gap below the nav on some font /
+  // zoom / DPI combos. offsetHeight returns integer px which matches
+  // what the layout engine actually rounds to (getBoundingClientRect
+  // can return fractionals that don't sum cleanly).
+  function syncStickyOffsets() {
+    const h = document.querySelector("header.shell");
+    const n = document.querySelector("nav.tabs");
+    if (h) document.documentElement.style.setProperty(
+      "--header-h", h.offsetHeight + "px");
+    if (n) document.documentElement.style.setProperty(
+      "--nav-h", n.offsetHeight + "px");
+  }
+  syncStickyOffsets();
+  window.addEventListener("resize", syncStickyOffsets);
+  if (document.fonts && document.fonts.ready)
+    document.fonts.ready.then(syncStickyOffsets);
+  // Heights can shift when the active tab changes (different content
+  // can wrap differently into the header search bar etc) and when
+  // images/SVGs in the header lazy-load. ResizeObserver watches the
+  // two elements directly so any change re-syncs immediately.
+  if (typeof ResizeObserver !== "undefined") {
+    const ro = new ResizeObserver(syncStickyOffsets);
+    const h = document.querySelector("header.shell");
+    const n = document.querySelector("nav.tabs");
+    if (h) ro.observe(h);
+    if (n) ro.observe(n);
+  }
+  // Fallback: on a slow / dynamic page we keep the values fresh with
+  // a cheap interval. Reads only, no layout thrash.
+  setInterval(syncStickyOffsets, 2000);
 });
 </script>
 </body>

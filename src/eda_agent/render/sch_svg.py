@@ -112,7 +112,9 @@ def render_sch_svg(geometry: dict[str, Any],
     pieces.append(_render_components(
         geometry.get("components") or [],
         geometry.get("pins") or [], opt))
-    pieces.append(_render_junctions(geometry.get("junctions") or [], opt))
+    pieces.append(_render_junctions(
+        geometry.get("junctions") or [], opt,
+        wires=geometry.get("wires") or []))
     pieces.append(_render_net_labels(geometry.get("net_labels") or [], opt))
     pieces.append(_render_ports(geometry.get("ports") or [], opt))
     pieces.append(_render_power_ports(geometry.get("power_ports") or [], opt))
@@ -410,6 +412,25 @@ def _render_components(components: Iterable[dict[str, Any]],
             f'<g class="comp" data-designator="{_xml(des)}" '
             f'data-lib-ref="{_xml(lib)}">'
         )
+        # Invisible bounding-box hit target. Without it, mouse hover
+        # only fires on the actual painted geometry (lines, fills) -- so
+        # blank space inside a symbol body, gaps between pins, etc. all
+        # stay inert and the highlight feels twitchy. A transparent
+        # rect at the top of the group (drawn FIRST so primitives paint
+        # on top) gives the entire bbox a single hit region. The
+        # ``pointer-events`` value is critical: ``fill`` accepts events
+        # on the filled area even when fill is "transparent"; without
+        # it some browsers ignore the rect.
+        # Padded slightly so pin labels at the edges still trigger
+        # the comp hover (pins extend a bit past the body bbox).
+        pad = max(40.0, opt.pin_stroke_mils * 4)
+        out.append(
+            f'<rect class="comp-hit" '
+            f'x="{x1 - pad}" y="{y1 - pad}" '
+            f'width="{body_w + 2 * pad}" height="{body_h + 2 * pad}" '
+            f'fill="transparent" stroke="none" '
+            f'pointer-events="fill"/>'
+        )
         # v2: if the component carries symbol-internal primitives, draw
         # them as the body. The bounding-box rectangle is only a fallback
         # for symbols that didn't return any primitives (e.g. power
@@ -531,10 +552,105 @@ def _render_components(components: Iterable[dict[str, Any]],
     return "".join(out)
 
 
+def _collect_auto_junctions(wires: Iterable[dict[str, Any]],
+                             explicit: Iterable[dict[str, Any]]
+                             ) -> list[dict[str, float]]:
+    """Combine explicit eJunction objects with auto-detected T-junctions.
+
+    Altium doesn't always materialise an eJunction object where wires
+    meet — sometimes a T-junction is implicit (depends on the project's
+    "place junctions automatically" setting and whether the doc was
+    last hand-routed vs. auto-routed). To make the SVG match what the
+    user sees in Altium, we recompute junctions from the wire graph:
+
+      1) Wire endpoints with multiplicity >= 3 (multiway joins).
+      2) Wire endpoints that land in the interior of another wire's
+         segment (classic T-junction — A passes straight through, B
+         ends in the middle of A).
+
+    Axis-aligned only (schematics are orthogonal essentially always).
+    """
+    seen: set[tuple[float, float]] = set()
+    out: list[dict[str, float]] = []
+    TOL = 0.5
+
+    def push(x: float, y: float) -> None:
+        key = (round(float(x), 1), round(float(y), 1))
+        if key in seen:
+            return
+        seen.add(key)
+        out.append({"x": key[0], "y": key[1]})
+
+    for j in explicit:
+        push(j.get("x", 0), j.get("y", 0))
+
+    wires_list = list(wires)
+
+    endpoint_count: dict[tuple[float, float], int] = {}
+    for w in wires_list:
+        verts = w.get("verts") or []
+        if len(verts) < 2:
+            continue
+        for v in (verts[0], verts[-1]):
+            key = (round(float(v[0]), 1), round(float(v[1]), 1))
+            endpoint_count[key] = endpoint_count.get(key, 0) + 1
+    for (kx, ky), n in endpoint_count.items():
+        if n >= 3:
+            push(kx, ky)
+
+    segments: list[tuple[tuple[float, float], tuple[float, float]]] = []
+    for w in wires_list:
+        verts = w.get("verts") or []
+        for i in range(len(verts) - 1):
+            segments.append((
+                (float(verts[i][0]), float(verts[i][1])),
+                (float(verts[i+1][0]), float(verts[i+1][1])),
+            ))
+
+    def on_interior(px: float, py: float,
+                    ax: float, ay: float, bx: float, by: float) -> bool:
+        if abs(ax - bx) < TOL:                 # vertical segment
+            if abs(px - ax) > TOL:
+                return False
+            lo, hi = (ay, by) if ay < by else (by, ay)
+            return lo + TOL < py < hi - TOL
+        if abs(ay - by) < TOL:                 # horizontal segment
+            if abs(py - ay) > TOL:
+                return False
+            lo, hi = (ax, bx) if ax < bx else (bx, ax)
+            return lo + TOL < px < hi - TOL
+        return False
+
+    endpoints: list[tuple[float, float]] = []
+    for w in wires_list:
+        verts = w.get("verts") or []
+        if len(verts) < 2:
+            continue
+        endpoints.append((float(verts[0][0]), float(verts[0][1])))
+        endpoints.append((float(verts[-1][0]), float(verts[-1][1])))
+
+    for px, py in endpoints:
+        for (ax, ay), (bx, by) in segments:
+            if (abs(px - ax) < TOL and abs(py - ay) < TOL) \
+               or (abs(px - bx) < TOL and abs(py - by) < TOL):
+                continue
+            if on_interior(px, py, ax, ay, bx, by):
+                push(px, py)
+                break
+
+    return out
+
+
 def _render_junctions(junctions: Iterable[dict[str, Any]],
-                      opt: SchRenderOptions) -> str:
+                      opt: SchRenderOptions,
+                      wires: Iterable[dict[str, Any]] | None = None) -> str:
     out: list[str] = ['<g class="junctions">']
-    for j in junctions:
+    if wires is None:
+        # Backwards compat: render only the explicit ones.
+        merged = list(junctions)
+    else:
+        merged = _collect_auto_junctions(wires, junctions)
+    for j in merged:
         x = j.get("x", 0)
         y = j.get("y", 0)
         out.append(

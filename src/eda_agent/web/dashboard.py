@@ -643,6 +643,41 @@ def create_app(workspace_dir: Optional[Path] = None) -> Flask:
     )
     sentinel_thread.start()
 
+    # Heartbeat: write Unix epoch seconds to workspace/dashboard.heartbeat
+    # every 3s. The Pascal StatusForm reads this to decide whether the
+    # "Open Dashboard" button is meaningfully enabled (fresh heartbeat =
+    # dashboard process is alive and reachable, stale = nobody home).
+    # Cheap (one tiny file write per 3s); independent of MCP heartbeat
+    # so a standalone dashboard run also keeps the button live.
+    heartbeat_stop = threading.Event()
+    heartbeat_path = workspace_dir / "dashboard.heartbeat"
+    def _heartbeat_loop() -> None:
+        # IMPORTANT: write a local-naive epoch (seconds since 1970-01-01
+        # measured against the local clock), NOT time.time() which is
+        # UTC. Pascal reads with (Now - 25569) * 86400 where Now is local,
+        # so a UTC value here would skew the comparison by the user's
+        # timezone offset (e.g. UTC+2 = 7200s skew >> the 15s freshness
+        # window, button stays grey even when the dashboard is alive).
+        from datetime import datetime as _dt
+        _epoch = _dt(1970, 1, 1)
+        while not heartbeat_stop.is_set():
+            try:
+                ts = (_dt.now() - _epoch).total_seconds()
+                heartbeat_path.write_text(str(ts), encoding="utf-8")
+            except OSError:
+                pass
+            heartbeat_stop.wait(3.0)
+    heartbeat_thread = threading.Thread(
+        target=_heartbeat_loop, name="dashboard-heartbeat", daemon=True,
+    )
+    heartbeat_thread.start()
+    def _remove_heartbeat() -> None:
+        heartbeat_stop.set()
+        try: heartbeat_path.unlink()
+        except OSError: pass
+    import atexit as _atexit
+    _atexit.register(_remove_heartbeat)
+
     app = Flask("eda-agent-dashboard")
     app.config["WORKSPACE_DIR"] = str(workspace_dir)
     app.config["TAILER"] = tailer
@@ -680,6 +715,42 @@ def create_app(workspace_dir: Optional[Path] = None) -> Flask:
     @app.route("/api/snapshot")
     def snapshot() -> Response:
         return jsonify(tailer.snapshot())
+
+    @app.route("/api/altium/version")
+    def altium_version() -> Response:
+        """Live script-version probe.
+
+        The activity-log session entry only updates on a Pascal restart,
+        so the Status tab's "script version" KPI was lying about the
+        running build whenever the user redeployed without restarting
+        Altium's polling loop. This endpoint pings the live Pascal
+        script (via `application.ping` which returns SCRIPT_VERSION)
+        and ALSO reads the on-disk Main.pas to show the deployed
+        version. Mismatch = the user needs to Ctrl+F3 + restart.
+
+        Short TTL (3s) so the dashboard's periodic poll doesn't hammer
+        Altium but the readout still feels live.
+        """
+        from ..tools.application import _bundled_script_version
+        deployed = _bundled_script_version() or ""
+        # Live ping. Cached briefly (3s) so a 1-Hz dashboard poll
+        # doesn't round-trip Altium every second.
+        ping = _cached("altium.ping", 3.0,
+                       lambda: _bridge_call("application.ping", {},
+                                            timeout=4.0))
+        running = ""
+        altium_up = False
+        if isinstance(ping, dict):
+            altium_up = bool(ping.get("pong"))
+            running = ping.get("script_version") or ""
+        stale = bool(running and deployed and running != deployed)
+        return jsonify({
+            "ok": True,
+            "running": running,
+            "deployed": deployed,
+            "altium_up": altium_up,
+            "stale": stale,
+        })
 
     @app.route("/api/stats")
     def stats() -> Response:
@@ -1143,8 +1214,17 @@ def create_app(workspace_dir: Optional[Path] = None) -> Flask:
         from flask import request as _req
         doc = (_req.args.get("doc") or "").strip()
         if doc:
-            _bridge_call("application.set_active_document",
-                         {"file_path": doc}, timeout=10.0)
+            # Confirm the switch actually happened before reading
+            # geometry, otherwise a NOT_LOADED error gets swallowed and
+            # we render whatever was already active -- exactly the
+            # "change sheet doesn't render selected sheet" bug.
+            sw = _bridge_call("application.set_active_document",
+                              {"file_path": doc}, timeout=10.0)
+            if isinstance(sw, dict) and sw.get("error"):
+                msg = sw.get("error") or "could not switch document"
+                return Response(_empty_drawing_svg(
+                    "Could not switch to " + doc + ": " + str(msg)),
+                    mimetype="image/svg+xml", status=200)
         geom = _bridge_call("generic.get_sch_geometry", {}, timeout=60.0)
         if geom is None:
             return Response(_empty_drawing_svg("Altium is not running"),
@@ -1334,9 +1414,41 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
 
     app = create_app(workspace_dir=args.workspace)
-    logger.info("dashboard serving on http://%s:%s/", args.host, args.port)
-    # threaded=True so SSE doesn't lock out other requests.
-    app.run(host=args.host, port=args.port, debug=args.debug, threaded=True)
+
+    # PID file so `eda-agent stop-dashboard` can find and kill us.
+    # Cleared on graceful exit; stale PIDs after a crash get overwritten
+    # on the next start.
+    from ..config import get_config as _get_cfg
+    pid_path = (args.workspace or _get_cfg().workspace_dir) / "dashboard.pid"
+    import os as _os, atexit
+    try:
+        pid_path.parent.mkdir(parents=True, exist_ok=True)
+        pid_path.write_text(str(_os.getpid()), encoding="utf-8")
+        def _remove_pid():
+            try: pid_path.unlink()
+            except OSError: pass
+        atexit.register(_remove_pid)
+    except OSError as e:
+        logger.warning("could not write dashboard PID file (%s): %s",
+                       pid_path, e)
+
+    logger.info("dashboard serving on http://%s:%s/ pid=%s",
+                args.host, args.port, _os.getpid())
+    # Use werkzeug.serving.make_server directly instead of app.run() so
+    # we don't get the "development server -- do not use in production"
+    # warning. For a local single-user dashboard the warning is just
+    # noise. threaded=True so SSE doesn't lock out other requests.
+    from werkzeug.serving import make_server
+    import logging as _log
+    _log.getLogger("werkzeug").setLevel(_log.WARNING)
+    srv = make_server(args.host, args.port, app, threaded=True)
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        try: srv.shutdown()
+        except Exception: pass
     return 0
 
 

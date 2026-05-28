@@ -11,15 +11,73 @@ user tool calls.
 
 import json
 import logging
+import os
 import sys
 import time
 import uuid
 import asyncio
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Optional
 from dataclasses import dataclass, field
+
+# Platform-specific file-locking primitive. Used to serialize bridge IPC
+# across SEPARATE Python processes (the MCP server and a standalone
+# `eda-agent dashboard` running side-by-side both write to
+# `workspace/request_<id>.json`; the Altium polling loop only handles
+# one request file at a time and a race could orphan a response). The
+# in-process threading.Lock further down covers the single-process case;
+# this file lock is what makes two-process coexistence safe.
+if sys.platform == "win32":
+    import msvcrt
+else:
+    import fcntl
+
+@contextmanager
+def _cross_process_lock(lock_path: Path):
+    """Exclusive file lock that works across processes.
+
+    The lock file lives in the workspace dir so both processes (which
+    already agree on workspace_dir via EDA_AGENT_WORKSPACE) target the
+    same path. Released automatically on context exit or process death.
+    """
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    fp = open(str(lock_path), "a+b")
+    try:
+        if sys.platform == "win32":
+            # LK_LOCK blocks until acquired (with ~10s retry by default);
+            # we want unbounded wait, so loop on LK_NBLCK with a small
+            # sleep to behave like a blocking acquire that respects
+            # KeyboardInterrupt.
+            while True:
+                try:
+                    msvcrt.locking(fp.fileno(), msvcrt.LK_NBLCK, 1)
+                    break
+                except OSError:
+                    time.sleep(0.01)
+        else:
+            fcntl.flock(fp.fileno(), fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            if sys.platform == "win32":
+                # LK_UNLCK needs the file position back where the lock
+                # was acquired (offset 0).
+                try: fp.seek(0)
+                except OSError: pass
+                try: msvcrt.locking(fp.fileno(), msvcrt.LK_UNLCK, 1)
+                except OSError: pass
+            else:
+                fcntl.flock(fp.fileno(), fcntl.LOCK_UN)
+        except Exception:
+            pass
+        try: fp.close()
+        except OSError: pass
 
 from ..config import get_config
 from .process_manager import AltiumProcessManager

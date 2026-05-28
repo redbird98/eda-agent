@@ -209,10 +209,46 @@ Begin
     PerfMaxStrs   := TStringList.Create;
 End;
 
+Procedure EnsurePerfHeader;
+Begin
+    Try
+        If mmo_Perf.Lines.Count < 2 Then
+        Begin
+            mmo_Perf.Lines.BeginUpdate;
+            Try
+                mmo_Perf.Lines.Clear;
+                mmo_Perf.Lines.Add(PadRight('command', 30) + PadLeft('N', 6)
+                    + PadLeft('avg', 8) + PadLeft('max', 8));
+                mmo_Perf.Lines.Add(StringOfChar('-', 52));
+            Finally
+                mmo_Perf.Lines.EndUpdate;
+            End;
+        End;
+    Except End;
+End;
+
+Function FormatPerfLine(Idx : Integer) : String;
+Var
+    CountVal, TotalVal, MaxVal, AvgVal : Integer;
+Begin
+    CountVal := StrToIntDef(PerfCountStrs[Idx], 0);
+    TotalVal := StrToIntDef(PerfTotalStrs[Idx], 0);
+    MaxVal   := StrToIntDef(PerfMaxStrs[Idx], 0);
+    If CountVal = 0 Then AvgVal := 0
+    Else AvgVal := TotalVal Div CountVal;
+    Result := PadRight(PerfNames[Idx], 30)
+            + PadLeft(IntToStr(CountVal), 6)
+            + PadLeft(IntToStr(AvgVal), 8)
+            + PadLeft(IntToStr(MaxVal), 8);
+End;
+
 Procedure TrackPerf(Command : String; DurationMs : Cardinal);
 Var
-    Idx, CountVal, TotalVal, MaxVal, Dms : Integer;
+    Idx, CountVal, TotalVal, MaxVal, Dms, RowLineIdx : Integer;
+    Line : String;
+    IsNew : Boolean;
 Begin
+    IsNew := (PerfNames.IndexOf(Command) < 0);
     Idx := FindOrAddPerf(Command);
     If Idx < 0 Then Exit;
     { Promote DurationMs (Cardinal) to a plain Integer local. DelphiScript }
@@ -226,22 +262,34 @@ Begin
     PerfCountStrs[Idx] := IntToStr(CountVal);
     PerfTotalStrs[Idx] := IntToStr(TotalVal);
     PerfMaxStrs[Idx]   := IntToStr(MaxVal);
+
+    { Incremental write into mmo_Perf. The previous implementation did a    }
+    { full Clear+repopulate after every command, which DelphiScript's       }
+    { TMemo flickers visibly (BeginUpdate doesn't fully suppress the        }
+    { paint between the Clear and the re-add). Replacing the single       }
+    { changed row in place keeps the panel rock-stable and removes the     }
+    { "UI blanks out then reappears" the user reported.                    }
+    EnsurePerfHeader;
+    Line := FormatPerfLine(Idx);
+    RowLineIdx := 2 + Idx;   { 2 header lines come first }
+    Try
+        If IsNew Or (RowLineIdx >= mmo_Perf.Lines.Count) Then
+            mmo_Perf.Lines.Add(Line)
+        Else
+            mmo_Perf.Lines[RowLineIdx] := Line;
+    Except End;
 End;
 
 
+{ Full rebuild kept for the "Reset perf" button and the tab-switch case   }
+{ where the memo might have been blanked while hidden. Hot path now uses  }
+{ TrackPerf's incremental update.                                          }
 Procedure RefreshPerfPanel;
 Var
-    I, MaxVal, CountVal, TotalVal : Integer;
-    Line : String;
-    AvgVal : Cardinal;
+    I : Integer;
 Begin
     EnsureStatusBuffers;
     If PerfNames.Count = 0 Then Exit;
-
-    { Iterate in insertion order. The web dashboard re-sorts on the      }
-    { browser side. We could sort here too, but allocating an interim    }
-    { TStringList to do that hits the parser's flaky .Free exposure on   }
-    { this file.                                                           }
     Try
         mmo_Perf.Lines.BeginUpdate;
         Try
@@ -250,18 +298,7 @@ Begin
                 + PadLeft('avg', 8) + PadLeft('max', 8));
             mmo_Perf.Lines.Add(StringOfChar('-', 52));
             For I := 0 To PerfNames.Count - 1 Do
-            Begin
-                CountVal := StrToIntDef(PerfCountStrs[I], 0);
-                TotalVal := StrToIntDef(PerfTotalStrs[I], 0);
-                MaxVal   := StrToIntDef(PerfMaxStrs[I], 0);
-                If CountVal = 0 Then AvgVal := 0
-                Else AvgVal := TotalVal Div CountVal;
-                Line := PadRight(PerfNames[I], 30)
-                      + PadLeft(IntToStr(CountVal), 6)
-                      + PadLeft(IntToStr(AvgVal), 8)
-                      + PadLeft(IntToStr(MaxVal), 8);
-                mmo_Perf.Lines.Add(Line);
-            End;
+                mmo_Perf.Lines.Add(FormatPerfLine(I));
         Finally
             mmo_Perf.Lines.EndUpdate;
         End;
@@ -367,22 +404,35 @@ Begin
 End;
 
 
-{ Open-Dashboard button is only meaningful when the MCP server (Python side  }
-{ + Flask dashboard inside it) is alive. We use the most-recent command tick }
-{ as the liveness proxy: if it's within 60 s, the bridge is pinging and the  }
-{ dashboard is reachable; otherwise grey the button out.                       }
+{ Open-Dashboard button reflects actual dashboard availability via a         }
+{ heartbeat file the Python dashboard process writes every ~3s: a Unix      }
+{ epoch timestamp in workspace/dashboard.heartbeat. If the timestamp is     }
+{ within the last 15s the dashboard is up (could be the in-process one      }
+{ MCP spawned OR a standalone `python -m eda_agent.server dashboard` run    }
+{ -- both refresh the same file), button is active. Otherwise grey it out  }
+{ and tell the user via caption that no dashboard is reachable.            }
 Procedure UpdateOpenWebState;
 Var
-    AgeMs : Cardinal;
+    HeartbeatPath, Content : String;
+    FileEpoch, NowEpoch : Double;
     NewEnabled : Boolean;
 Begin
-    If LastPingMs = 0 Then
-        NewEnabled := False
-    Else
-    Begin
-        AgeMs := GetTickCount - LastPingMs;
-        NewEnabled := (AgeMs <= 60000);
-    End;
+    NewEnabled := False;
+    Try
+        HeartbeatPath := WorkspaceDir + 'dashboard.heartbeat';
+        Content := ReadFileContent(HeartbeatPath);
+        If Content <> '' Then
+        Begin
+            { Use the project's locale-safe StrToFloatDef from Utils.pas; }
+            { plain StrToFloat can throw on comma-decimal locales.        }
+            FileEpoch := StrToFloatDef(Trim(Content), 0.0);
+            { Pascal's Now returns days-since-1899-12-30; Unix epoch starts }
+            { at TDateTime 25569.0. Subtract and convert days to seconds.  }
+            NowEpoch := (Now - 25569.0) * 86400.0;
+            If (FileEpoch > 0.0) And (NowEpoch - FileEpoch < 15.0) Then
+                NewEnabled := True;
+        End;
+    Except End;
 
     { Avoid pointless repaints on every tick. }
     If NewEnabled = OpenWebEnabled Then Exit;
@@ -401,7 +451,7 @@ Begin
             btn_OpenWeb.Color := COLOR_BG_CARD;
             btn_OpenWeb.Font.Color := COLOR_TEXT_FAINT;
             btn_OpenWeb.Cursor := crDefault;
-            btn_OpenWeb.Caption := 'Open Dashboard  (waiting for MCP)';
+            btn_OpenWeb.Caption := 'Open Dashboard  (not running)';
         End;
     Except End;
 End;
@@ -564,9 +614,7 @@ Begin
         Try pnl_StatusDot.Color := COLOR_ACCENT_GREEN; Except End;
         Try lbl_Status.Caption := 'idle'; Except End;
         Try lbl_LastErr.Caption := ''; Except End;
-        { Force the Open Dashboard button to its disabled state immediately - }
-        { it'll re-enable as soon as the first command comes through.         }
-        OpenWebEnabled := True;   { force the state-change branch to fire }
+        { Button is always enabled — dashboard can run standalone. }
         UpdateOpenWebState;
     Except End;
 End;
@@ -641,22 +689,40 @@ Begin
 End;
 
 
-{ Open the web dashboard. Writes a sentinel file the Python bridge polls   }
-{ and calls webbrowser.open() on. Sync round-trip would freeze the UI,    }
-{ this hand-off is fire-and-forget.                                        }
+{ Open the web dashboard. Writes a sentinel file the Python dashboard polls }
+{ and calls webbrowser.open() on. Sync round-trip would freeze the UI,      }
+{ this hand-off is fire-and-forget. If the heartbeat says no dashboard is   }
+{ running we surface the hint instead of writing a sentinel nobody reads.   }
 Procedure btn_OpenWebClick(Sender : TObject);
 Var
     SentinelPath : String;
 Begin
     If Not OpenWebEnabled Then
     Begin
-        Try lbl_LastErr.Caption := 'dashboard unavailable - MCP not connected'; Except End;
+        Try lbl_LastErr.Caption := 'no dashboard running - copy the command below'; Except End;
         Exit;
     End;
     Try
         SentinelPath := WorkspaceDir + 'open_dashboard.url';
         WriteFileContent(SentinelPath, 'http://127.0.0.1:8766/');
         Try lbl_LastErr.Caption := ''; Except End;
+    Except End;
+End;
+
+
+{ Copy the dashboard standalone-launch command to the Windows clipboard. }
+{ The status form's footer shows `eda-agent dashboard --port 8766` and  }
+{ a Copy button so the user can paste it into a terminal to run the     }
+{ dashboard without needing Claude / any MCP client open.                }
+Procedure btn_CopyCmdClick(Sender : TObject);
+Begin
+    Try
+        { Use the `python -m` form so the command works regardless of  }
+        { whether the user has added Python's Scripts dir to PATH. The }
+        { `eda-agent` console script is installed there by pip but the }
+        { directory isn't on PATH by default on Windows.                }
+        Clipboard.AsText := 'python -m eda_agent.server dashboard --port 8766';
+        Try btn_CopyCmd.Caption := 'Copied'; Except End;
     Except End;
 End;
 

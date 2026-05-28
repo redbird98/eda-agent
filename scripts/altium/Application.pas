@@ -122,8 +122,12 @@ End;
 
 Function App_SetActiveDocument(Params : String; RequestId : String) : String;
 Var
-    FilePath : String;
+    FilePath, LowerInput, LowerDocPath, FullPath : String;
     ServerDoc : IServerDocument;
+    Workspace : IWorkspace;
+    Project : IProject;
+    Doc : IDocument;
+    I : Integer;
 Begin
     FilePath := ExtractJsonValue(Params, 'file_path');
     FilePath := StringReplace(FilePath, '\\', '\', -1);
@@ -137,6 +141,47 @@ Begin
     ServerDoc := Client.GetDocumentByPath(FilePath);
     If ServerDoc = Nil Then
     Begin
+        // Fallback: many callers (the dashboard sheet picker, the
+        // project.get_documents list) only have the bare filename
+        // (e.g. "ESP32.SchDoc"). GetDocumentByPath needs an exact full
+        // path, so the first call returns Nil. Walk the focused
+        // project's logical docs (Client.GetDocumentCount is undeclared
+        // in DelphiScript -- the project DM enumeration is the right
+        // way) and match by filename suffix to recover the full path.
+        LowerInput := LowerCase(FilePath);
+        Try
+            Workspace := GetWorkspace;
+            If Workspace <> Nil Then Project := Workspace.DM_FocusedProject;
+        Except End;
+        If Project <> Nil Then
+        Begin
+            For I := 0 To Project.DM_LogicalDocumentCount - 1 Do
+            Begin
+                Try
+                    Doc := Project.DM_LogicalDocuments(I);
+                    If Doc = Nil Then Continue;
+                    FullPath := '';
+                    Try FullPath := Doc.DM_FullPath; Except FullPath := Doc.DM_FileName; End;
+                    If FullPath = '' Then Continue;
+                    LowerDocPath := LowerCase(FullPath);
+                    // Exact match OR endswith match: "ESP32.SchDoc"
+                    // should match "C:\path\to\ESP32.SchDoc".
+                    If (LowerDocPath = LowerInput)
+                        Or ((Length(LowerDocPath) > Length(LowerInput))
+                            And (Copy(LowerDocPath,
+                                      Length(LowerDocPath) - Length(LowerInput) + 1,
+                                      Length(LowerInput)) = LowerInput)) Then
+                    Begin
+                        Try ServerDoc := Client.GetDocumentByPath(FullPath); Except End;
+                        If ServerDoc <> Nil Then Break;
+                    End;
+                Except End;
+            End;
+        End;
+    End;
+
+    If ServerDoc = Nil Then
+    Begin
         Result := BuildErrorResponse(RequestId, 'NOT_LOADED',
             'Document not loaded: ' + FilePath +
             '. Open it in Altium first (File > Open or via the project tree).');
@@ -146,7 +191,7 @@ Begin
     // Make it the active/focused document.
     Client.ShowDocument(ServerDoc);
 
-    Result := BuildSuccessResponse(RequestId, '{"success":true,"file_path":"' + EscapeJsonString(FilePath) + '"}');
+    Result := BuildSuccessResponse(RequestId, '{"success":true,"file_path":"' + EscapeJsonString(ServerDoc.FileName) + '"}');
 End;
 
 Function App_RunProcess(Params : String; RequestId : String) : String;

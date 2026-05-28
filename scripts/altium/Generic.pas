@@ -6561,9 +6561,16 @@ Var
     HasBBox : Boolean;
     VtxN, V : Integer;
     Vert : TLocation;
-    DesigText, LibRef, ElecStr, ParamName : String;
-    SheetName, SheetFile : String;
+    DesigText, LibRef, ElecStr, ParamName, LogicalDes : String;
+    SheetName, SheetFile, SchDocName : String;
     RespJson : String;
+    PhysMap : TStringList;
+    Workspace : IWorkspace;
+    Project : IProject;
+    DmDoc : IDocument;
+    DmComp : IComponent;
+    DmLogical, DmPhysical : String;
+    DI, DJ, MapIdx : Integer;
 Begin
     SchDoc := SchServer.GetCurrentSchDocument;
     If SchDoc = Nil Then
@@ -6572,6 +6579,55 @@ Begin
             'No schematic document is active');
         Exit;
     End;
+    SchDocName := '';
+    Try SchDocName := SchDoc.DocumentName; Except End;
+
+    { Build a logical -> physical designator map from the DM enumeration. }
+    { ISch_Component.Designator.Text returns the LOGICAL designator (the }
+    { sub-sheet template name like "R1"). For multi-channel designs the  }
+    { board-level annotated name (R101, R201, ...) lives on the DM-side  }
+    { IComponent.DM_PhysicalDesignator. Single-channel designs map 1:1   }
+    { so the lookup is a no-op for them.                                  }
+    PhysMap := TStringList.Create;
+    Try
+        Try
+            Workspace := GetWorkspace;
+            If Workspace <> Nil Then Project := Workspace.DM_FocusedProject;
+        Except End;
+        If Project <> Nil Then
+        Begin
+            Try
+                For DI := 0 To Project.DM_LogicalDocumentCount - 1 Do
+                Begin
+                    Try
+                        DmDoc := Project.DM_LogicalDocuments(DI);
+                        If DmDoc = Nil Then Continue;
+                        { Match by file name -- the DM doc and the open sch doc both }
+                        { resolve to the same .SchDoc file. Only walk components of  }
+                        { the doc that matches the active SchDoc so we don't pull in }
+                        { other sheets' designators (multi-channel sheets share a   }
+                        { logical doc but have distinct physical designators per     }
+                        { channel; we want THIS sheet's mapping).                    }
+                        If (DmDoc.DM_FullPath <> SchDocName)
+                           And (DmDoc.DM_FileName <> SchDocName) Then Continue;
+                        For DJ := 0 To DmDoc.DM_ComponentCount - 1 Do
+                        Begin
+                            Try
+                                DmComp := DmDoc.DM_Components(DJ);
+                                If DmComp = Nil Then Continue;
+                                DmLogical := '';
+                                DmPhysical := '';
+                                Try DmLogical := DmComp.DM_LogicalDesignator; Except End;
+                                Try DmPhysical := DmComp.DM_PhysicalDesignator; Except End;
+                                If (DmLogical <> '') And (DmPhysical <> '')
+                                   And (DmLogical <> DmPhysical) Then
+                                    PhysMap.Add(DmLogical + '|' + DmPhysical);
+                            Except End;
+                        End;
+                    Except End;
+                End;
+            Except End;
+        End;
 
     CompsJson := '[';      NumComps := 0;
     PinsJson := '[';       NumPins := 0;
@@ -6594,8 +6650,30 @@ Begin
             Begin
                 Comp := Obj;
                 Loc := Comp.Location;
-                DesigText := '';
-                Try DesigText := Comp.Designator.Text; Except End;
+                { Logical designator (the sub-sheet template name like  }
+                { "R1" for a multi-channel sheet) then look up the      }
+                { physical / board-level name from the map we built     }
+                { earlier. Single-channel designs map 1:1 so the lookup }
+                { miss falls back to the logical value -- net result    }
+                { matches what the BOM endpoint returns.                 }
+                LogicalDes := '';
+                Try LogicalDes := Comp.Designator.Text; Except End;
+                DesigText := LogicalDes;
+                If LogicalDes <> '' Then
+                Begin
+                    For MapIdx := 0 To PhysMap.Count - 1 Do
+                    Begin
+                        DmLogical := PhysMap[MapIdx];
+                        If Copy(DmLogical, 1, Length(LogicalDes) + 1)
+                           = LogicalDes + '|' Then
+                        Begin
+                            DesigText := Copy(DmLogical,
+                                Length(LogicalDes) + 2,
+                                Length(DmLogical) - Length(LogicalDes) - 1);
+                            Break;
+                        End;
+                    End;
+                End;
                 LibRef := '';
                 Try LibRef := Comp.LibReference; Except End;
                 HasBBox := False;
@@ -7048,6 +7126,9 @@ Begin
         ',"sheet_symbols":' + SheetSymsJson +
         ',"buses":' + BusesJson + '}';
     Result := BuildSuccessResponse(RequestId, RespJson);
+    Finally
+        Try PhysMap.Free; Except End;
+    End;
 End;
 
 { Gen_GetPcbGeometry - Walk the active PcbDoc and emit every primitive's    }

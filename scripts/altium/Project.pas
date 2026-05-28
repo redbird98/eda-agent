@@ -896,27 +896,22 @@ Begin
         ForceRecompileIfRequested(Project, Params);
         If WithPinNets Then SmartCompile(Project);
 
-        If WithPinNets Then
-            GetCompiledDocs(Project, DocCount, UsePhysical)
-        Else
-        Begin
-            DocCount := 0;
-            UsePhysical := False;
-            Try DocCount := Project.DM_LogicalDocumentCount; Except End;
-        End;
+        { Always use GetCompiledDocs so this handler enumerates the same        }
+        { doc tree the BOM does. The previous else-branch shortcut walked       }
+        { DM_LogicalDocuments and read source-side DM_PhysicalDesignator,       }
+        { which on a multichannel design returns the un-suffixed source         }
+        { name (e.g. "R5") -- so a drawer lookup for "R5_A" found nothing       }
+        { while the BOM (compiled doc enumeration) happily reported "R5_A".    }
+        { GetCompiledDocs doesn't itself trigger SmartCompile; if the project   }
+        { isn't compiled it falls back to logical docs internally.              }
+        GetCompiledDocs(Project, DocCount, UsePhysical);
 
         BodyJson := '';
         FirstC := True;
 
         For I := 0 To DocCount - 1 Do
         Begin
-            If WithPinNets Then
-                Doc := GetCompiledDoc(Project, I, UsePhysical)
-            Else
-            Begin
-                Doc := Nil;
-                Try Doc := Project.DM_LogicalDocuments(I); Except End;
-            End;
+            Doc := GetCompiledDoc(Project, I, UsePhysical);
             If Doc = Nil Then Continue;
 
             For J := 0 To Doc.DM_ComponentCount - 1 Do
@@ -1041,7 +1036,21 @@ End;
 
 Function Proj_CrossProbe(Params : String; RequestId : String) : String;
 Var
-    Designator, Target : String;
+    Designator, Target, DocKind, FullPath : String;
+    Workspace : IWorkspace;
+    Project : IProject;
+    DmDoc : IDocument;
+    DmComp : IComponent;
+    ServerDoc : IServerDocument;
+    SchDoc : ISch_Document;
+    Board : IPCB_Board;
+    SchIter : ISch_Iterator;
+    SchObj : ISch_GraphicalObject;
+    SchComp : ISch_Component;
+    BoardIter : IPCB_BoardIterator;
+    PcbComp : IPCB_Component;
+    I, J, DocCount : Integer;
+    UsePhysical, Found : Boolean;
 Begin
     Designator := ExtractJsonValue(Params, 'designator');
     Target := ExtractJsonValue(Params, 'target');
@@ -1049,26 +1058,208 @@ Begin
 
     If Designator = '' Then
     Begin
-        Result := BuildErrorResponse(RequestId, 'MISSING_PARAMS', 'designator is required');
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAMS',
+            'designator is required');
         Exit;
     End;
 
+    { Programmatic cross-probe via the SDK -- process-name routes (Sch:Find,  }
+    { PCB:Jump, Sch:FindText) all pop dialogs in current Altium because the  }
+    { parameter conventions documented in TR0124 (2008) drift from what     }
+    { newer Altium expects. SDK iteration is deterministic.                  }
+    Workspace := GetWorkspace;
+    If Workspace = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_WORKSPACE', 'No workspace');
+        Exit;
+    End;
+    Project := Workspace.DM_FocusedProject;
+    If Project = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PROJECT', 'No project focused');
+        Exit;
+    End;
+
+    Found := False;
+
     If Target = 'pcb' Then
     Begin
-        ResetParameters;
-        AddStringParameter('Action', 'JumpToComponent');
-        AddStringParameter('Reference', Designator);
-        RunProcess('PCB:RunGotoJumpDialog');
+        { 1) Find any PCB doc in the project, focus it.                      }
+        For I := 0 To Project.DM_LogicalDocumentCount - 1 Do
+        Begin
+            DmDoc := Project.DM_LogicalDocuments(I);
+            If DmDoc = Nil Then Continue;
+            DocKind := '';
+            Try DocKind := UpperCase(DmDoc.DM_DocumentKind); Except End;
+            If DocKind <> 'PCB' Then Continue;
+            FullPath := '';
+            Try FullPath := DmDoc.DM_FullPath; Except End;
+            If FullPath = '' Then Continue;
+            ServerDoc := Nil;
+            Try ServerDoc := Client.GetDocumentByPath(FullPath); Except End;
+            If ServerDoc = Nil Then Continue;
+            Try Client.ShowDocument(ServerDoc); Except End;
+            Break;
+        End;
+
+        { 2) Walk the board, find the component by Name.Text, select it.    }
+        Board := Nil;
+        Try Board := PCBServer.GetCurrentPCBBoard; Except End;
+        If Board = Nil Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'NO_BOARD',
+                'No active PCB board after focus attempt');
+            Exit;
+        End;
+        { IPCB_Board.ClearSelection is ALSO an undeclared identifier in       }
+        { this Altium version (mirror of the ISch_Document.ClearSelection     }
+        { issue). Use the PCB:DeSelect process instead. Failure here is fine  }
+        { -- adding our selection on top of any prior is acceptable.          }
+        Try
+            ResetParameters;
+            AddStringParameter('Scope', 'All');
+            RunProcess('PCB:DeSelect');
+        Except End;
+        BoardIter := Board.BoardIterator_Create;
+        Try
+            BoardIter.AddFilter_ObjectSet(MkSet(eComponentObject));
+            BoardIter.AddFilter_LayerSet(AllLayers);
+            BoardIter.AddFilter_Method(eProcessAll);
+            PcbComp := BoardIter.FirstPCBObject;
+            While (PcbComp <> Nil) And (Not Found) Do
+            Begin
+                Try
+                    If PcbComp.Name.Text = Designator Then
+                    Begin
+                        Try PcbComp.SetState_Selected(True); Except End;
+                        Found := True;
+                    End;
+                Except End;
+                PcbComp := BoardIter.NextPCBObject;
+            End;
+        Finally
+            Board.BoardIterator_Destroy(BoardIter);
+        End;
+        Try Board.GraphicallyInvalidate; Except End;
+        { Pan/zoom the view to the now-selected component. PCB:Jump with     }
+        { Object=Selected is documented in TR0124 and centres the editor   }
+        { viewport on the selection.                                        }
+        If Found Then
+        Begin
+            Try
+                ResetParameters;
+                AddStringParameter('Object', 'Selected');
+                AddStringParameter('Type', 'First');
+                RunProcess('PCB:Jump');
+            Except End;
+        End;
     End
     Else
     Begin
-        ResetParameters;
-        AddStringParameter('Object', 'Designator');
-        AddStringParameter('Text', Designator);
-        RunProcess('Sch:Find');
+        { Schematic path: find the sheet that owns the designator, focus    }
+        { it, then iterate on-canvas SchComponents and select the match.    }
+        { Use GetCompiledDocs (same enumeration the BOM uses) so multi-    }
+        { channel / hierarchical designs expose the per-instance physical  }
+        { designators -- DM_LogicalDocuments alone misses channel-expanded }
+        { components (the bug that made C103 NOT_FOUND while it IS in the  }
+        { BOM and on the PCB).                                              }
+        SmartCompile(Project);
+        GetCompiledDocs(Project, DocCount, UsePhysical);
+        For I := 0 To DocCount - 1 Do
+        Begin
+            DmDoc := GetCompiledDoc(Project, I, UsePhysical);
+            If DmDoc = Nil Then Continue;
+            DocKind := '';
+            Try DocKind := UpperCase(DmDoc.DM_DocumentKind); Except End;
+            If DocKind <> 'SCH' Then Continue;
+            For J := 0 To DmDoc.DM_ComponentCount - 1 Do
+            Begin
+                DmComp := DmDoc.DM_Components(J);
+                If DmComp = Nil Then Continue;
+                Try
+                    If DmComp.DM_PhysicalDesignator = Designator Then
+                    Begin
+                        FullPath := '';
+                        Try FullPath := DmDoc.DM_FullPath; Except End;
+                        If FullPath <> '' Then
+                        Begin
+                            ServerDoc := Nil;
+                            Try ServerDoc := Client.GetDocumentByPath(FullPath); Except End;
+                            If ServerDoc <> Nil Then
+                            Begin
+                                Try Client.ShowDocument(ServerDoc); Except End;
+                                Found := True;
+                            End;
+                        End;
+                    End;
+                Except End;
+                If Found Then Break;
+            End;
+            If Found Then Break;
+        End;
+
+        If Found Then
+        Begin
+            SchDoc := Nil;
+            Try SchDoc := SchServer.GetCurrentSchDocument; Except End;
+            If SchDoc <> Nil Then
+            Begin
+                { ISch_Document.ClearSelection is rejected as an undeclared    }
+                { identifier at runtime in this Altium version (uncatchable   }
+                { by Try/Except per [[delphiscript_altium_enum_typos]]). Use  }
+                { the Sch:DeSelect process instead -- documented in TR0124    }
+                { and used elsewhere in the codebase (Gen_DeselectAll's PCB   }
+                { sibling). Failure here just leaves prior selections in     }
+                { place; the new component still gets selected below.        }
+                Try
+                    ResetParameters;
+                    AddStringParameter('Scope', 'All');
+                    RunProcess('Sch:DeSelect');
+                Except End;
+                SchIter := SchDoc.SchIterator_Create;
+                Try
+                    SchIter.AddFilter_ObjectSet(MkSet(eSchComponent));
+                    SchObj := SchIter.FirstSchObject;
+                    While SchObj <> Nil Do
+                    Begin
+                        Try
+                            SchComp := SchObj;
+                            If SchComp.Designator.Text = Designator Then
+                            Begin
+                                Try SchComp.SetState_Selected(True); Except End;
+                                Break;
+                            End;
+                        Except End;
+                        SchObj := SchIter.NextSchObject;
+                    End;
+                Finally
+                    SchDoc.SchIterator_Destroy(SchIter);
+                End;
+                Try SchDoc.GraphicallyInvalidate; Except End;
+                { Pan/zoom the editor viewport to the selected component.   }
+                { Sch:Zoom with Action=Selected is the documented pattern   }
+                { in the reference scripts; if that variant isn't accepted, }
+                { Action=All zooms to fit, which is still better than just  }
+                { highlighting an off-screen part.                          }
+                Try
+                    ResetParameters;
+                    AddStringParameter('Action', 'Selected');
+                    RunProcess('Sch:Zoom');
+                Except End;
+            End;
+        End;
     End;
 
-    Result := BuildSuccessResponse(RequestId, '{"success":true,"designator":"' + EscapeJsonString(Designator) + '","target":"' + Target + '"}');
+    If Not Found Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NOT_FOUND',
+            'Designator not found in ' + Target + ': ' + Designator);
+        Exit;
+    End;
+
+    Result := BuildSuccessResponse(RequestId,
+        '{"success":true,"designator":"' + EscapeJsonString(Designator) +
+        '","target":"' + Target + '"}');
 End;
 
 {..............................................................................}

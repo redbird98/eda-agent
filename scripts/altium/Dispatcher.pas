@@ -318,7 +318,10 @@ Begin
                     StatusRequestCount,
                     StatusTotalAltiumMs,
                     (AutoShutdownMs - (GetTickCount - LastActivityMs)) Div 1000);
-                RefreshPerfPanel;
+                { Perf row already updated in-place by TrackPerf (called }
+                { from AppendLogLine inside ProcessSingleRequest). Skip  }
+                { the full RefreshPerfPanel rebuild that used to flash  }
+                { the visible memo on every command.                     }
             End
             Else
             Begin
