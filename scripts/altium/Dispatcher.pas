@@ -35,10 +35,12 @@ Begin
         'library':     Result := HandleLibraryCommand(Action, Params, RequestId);
         'generic':     Result := HandleGenericCommand(Action, Params, RequestId);
         'pcb':         Result := HandlePCBCommand(Action, Params, RequestId);
+        'audit':       Result := HandleAuditCommand(Action, Params, RequestId);
     Else
         Result := BuildErrorResponse(RequestId, 'UNKNOWN_COMMAND',
             'Unknown command category: ' + Category +
-            '. Use generic.* for object operations or pcb.* for PCB-specific commands.');
+            '. Use generic.* for object operations, pcb.* for PCB-specific ' +
+            'commands, or audit.* for design-lint checks.');
     End;
 End;
 

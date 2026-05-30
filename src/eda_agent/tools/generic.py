@@ -476,7 +476,8 @@ def register_generic_tools(mcp):
         """Run Electrical Rules Check on the focused project.
 
         Compiles the project first (required), then runs ERC.
-        Use get_erc_violations() afterward to retrieve any violations found.
+        Call ``get_erc_violations()`` afterwards to retrieve the
+        structured list of violations.
 
         Returns:
             Dictionary confirming ERC execution
@@ -484,6 +485,88 @@ def register_generic_tools(mcp):
         bridge = get_bridge()
         result = await bridge.send_command_async("generic.run_erc", {})
         return result
+
+    @mcp.tool()
+    async def set_sch_components_parameters(
+        stamps: list[dict[str, str]],
+        sheet_path: str = "",
+    ) -> dict[str, Any]:
+        """Bulk-update parameters on PLACED schematic components.
+
+        Single IPC call wraps N component updates inside one
+        PreProcess/PostProcess undo group. Avoids the 10-100x slowdown
+        of looping the singular variant. The canonical follow-up tool
+        after audits that flag parameter-level bugs --
+        ``audit_find_visible_supplier_pn``,
+        ``audit_find_placeholder_values``,
+        ``audit_find_mpn_inconsistencies`` -- recommend it.
+
+        Each stamp targets one component by designator and sets one
+        or more parameters. Special keys allowed:
+          - ``Value``, ``Comment``, ``Manufacturer``, ``MPN``,
+            ``Footprint``, ``Description``, ``HelpURL``, etc.
+          - Custom parameters: any key name. Unknown parameters are
+            CREATED if they don't already exist on the component.
+
+        Args:
+            stamps: List of dicts. Each dict must include ``designator``
+                and one or more parameter key/value pairs. Example:
+                ``[{"designator": "R1", "Value": "10k",
+                "Manufacturer": "Yageo", "MPN": "RC0603FR-0710KL"},
+                {"designator": "C5", "Value": "100nF"}]``
+            sheet_path: Optional explicit SchDoc path. Empty uses the
+                currently-focused schematic.
+
+        Returns:
+            Dict with ``{updated, failed, total}``. ``updated`` is the
+            count of components whose parameters were touched;
+            ``failed`` is the count of stamps that couldn't be applied
+            (designator not found, parameter not settable, etc).
+        """
+        # Encode the list-of-dicts into the Pascal handler's expected
+        # wire format: stamps separated by `~~`, fields within a stamp
+        # separated by `;`, key=value pairs.
+        if not stamps:
+            return {"ok": False, "reason": "stamps list is empty"}
+        encoded_stamps = []
+        for stamp in stamps:
+            if "designator" not in stamp:
+                return {"ok": False,
+                        "reason": f"stamp missing 'designator': {stamp}"}
+            fields = [f"designator={stamp['designator']}"]
+            for key, val in stamp.items():
+                if key == "designator":
+                    continue
+                # Escape `;` and `~~` from values so they don't break
+                # the wire format. Pascal side trims whitespace.
+                clean = str(val).replace("~~", "  ").replace(";", ",")
+                fields.append(f"{key}={clean}")
+            encoded_stamps.append(";".join(fields))
+        params: dict[str, str] = {"stamps": "~~".join(encoded_stamps)}
+        if sheet_path:
+            params["sheet_path"] = sheet_path
+        bridge = get_bridge()
+        return await bridge.send_command_async(
+            "generic.set_sch_components_parameters", params, timeout=60.0)
+
+    @mcp.tool()
+    async def get_erc_violations() -> dict[str, Any]:
+        """Return the ERC violation list produced by the last
+        ``run_erc()`` invocation.
+
+        Two-step pattern by design: ``run_erc()`` performs the
+        compile-and-check (slow, can be 30+ s on a large project);
+        this tool reads back the violations cheaply so the agent can
+        re-query without re-running ERC. Each violation carries the
+        source-level description (sheet, location, rule, primitives
+        involved) the agent needs to navigate to it.
+
+        Returns:
+            Dictionary with violation count and per-violation details.
+        """
+        bridge = get_bridge()
+        return await bridge.send_command_async(
+            "generic.get_erc_violations", {})
 
     @mcp.tool()
     async def highlight_net(
@@ -1904,4 +1987,128 @@ def register_generic_tools(mcp):
         return await bridge.send_command_async(
             "generic.attach_spice_primitives",
             {"attachments": "~~".join(op_strs)},
+        )
+
+    # =========================================================================
+    # Schematic-place ergonomics. Thin wrappers around create_object that name
+    # the common Altium SchObject creations the agent reaches for repeatedly.
+    # Lifted to MCP tools (text + x/y/rot/style call shape) so the agent
+    # can call them by name instead of learning the property-string protocol.
+    # =========================================================================
+
+    @mcp.tool()
+    async def sch_add_net_label(
+        text: str,
+        x: int,
+        y: int,
+        rotation: int = 0,
+    ) -> dict[str, Any]:
+        """Add a net-label to the active schematic.
+
+        Net labels carry the net name; placing one on a wire tags that
+        wire's net with the given text.
+
+        Args:
+            text: Net name to print (e.g. ``"SCL"``, ``"VCC_3V3"``).
+            x, y: Location in mils, in the schematic's coordinate space.
+            rotation: 0 / 90 / 180 / 270 degrees. Default 0 (horizontal).
+
+        Returns:
+            Dict confirming creation (same shape as ``create_object``).
+        """
+        bridge = get_bridge()
+        props = (f"Text={text}|"
+                 f"Location.X={int(x)}|"
+                 f"Location.Y={int(y)}|"
+                 f"Orientation={int(rotation) // 90}")
+        return await bridge.send_command_async(
+            "generic.create_object",
+            {"object_type": "eNetLabel", "properties": props,
+             "container": "document"},
+        )
+
+    @mcp.tool()
+    async def sch_add_text(
+        text: str,
+        x: int,
+        y: int,
+        rotation: int = 0,
+    ) -> dict[str, Any]:
+        """Add free text annotation to the active schematic.
+
+        For labelling regions, version stamps, design notes that aren't
+        net names. Use ``sch_add_net_label`` instead if the string is a
+        net name attached to a wire.
+
+        Args:
+            text: The annotation text.
+            x, y: Location in mils.
+            rotation: 0 / 90 / 180 / 270 degrees. Default 0.
+
+        Returns:
+            Dict confirming creation.
+        """
+        bridge = get_bridge()
+        props = (f"Text={text}|"
+                 f"Location.X={int(x)}|"
+                 f"Location.Y={int(y)}|"
+                 f"Orientation={int(rotation) // 90}")
+        return await bridge.send_command_async(
+            "generic.create_object",
+            {"object_type": "eLabel", "properties": props,
+             "container": "document"},
+        )
+
+    @mcp.tool()
+    async def sch_place_power_port(
+        net_name: str,
+        x: int,
+        y: int,
+        style: str = "bar",
+        rotation: int = 90,
+    ) -> dict[str, Any]:
+        """Place a power-port symbol (rail or ground) on the schematic.
+
+        Power ports carry a net assignment via their visible text. Ground
+        symbols use a ``gnd_*`` style and convention says they face down
+        (rotation=270); supply rails use ``bar``/``arrow``/``wave`` and
+        face up (rotation=90).
+
+        Args:
+            net_name: Net the port labels (e.g. ``"GND"``, ``"+3V3"``).
+                Becomes the port's visible Text.
+            x, y: Location in mils.
+            style: One of ``bar`` (default; horizontal supply rail),
+                ``arrow``, ``wave``, ``gnd_power``, ``gnd_signal``,
+                ``gnd_earth``, ``circle``. The audit_power_port_orientation
+                check expects ``gnd_*`` styles to face down (rotation=270)
+                and ``bar`` to face up (rotation=90).
+            rotation: 0 / 90 / 180 / 270 degrees. Default 90 (rail
+                pointing up).
+
+        Returns:
+            Dict confirming creation.
+        """
+        # Map the canonical style string to Altium's TPowerObjectStyle ordinal
+        # so the property-string protocol carries an integer rather than
+        # leaving Pascal to do the lookup. Order matches Utils.pas
+        # StrToPowerStyle / PowerStyleToStr.
+        style_ord = {
+            "circle": 0, "arrow": 1, "bar": 2, "wave": 3,
+            "gnd_power": 4, "gnd_signal": 5, "gnd_earth": 6,
+            "powerbar": 2, "rail": 2,
+            "powergnd": 4, "signalgnd": 5, "sgnd": 5,
+            "earth": 6, "egnd": 6,
+            "gnd": 4, "ground": 4,
+        }.get(style.lower(), 2)
+        bridge = get_bridge()
+        props = (f"Text={net_name}|"
+                 f"Style={style_ord}|"
+                 f"Location.X={int(x)}|"
+                 f"Location.Y={int(y)}|"
+                 f"Orientation={int(rotation) // 90}")
+        return await bridge.send_command_async(
+            "generic.create_object",
+            {"object_type": "ePowerObject", "properties": props,
+             "container": "document"},
         )

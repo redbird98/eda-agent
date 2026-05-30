@@ -39,9 +39,6 @@ References:
 - Sapatnekar et al. "ALIGN: A System for Automating Analog Layout"
 - Milo et al. "Network Motifs: Simple Building Blocks of Complex
   Networks" (Science, 2002)
-
-See ``reference/research_schematic_layout/09_motifs/REPORT.md`` for the
-research-stream notes that motivate this design.
 """
 
 from __future__ import annotations

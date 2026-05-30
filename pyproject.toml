@@ -72,6 +72,9 @@ exclude = [
 "scripts/altium/PCBGeneric.pas" = "eda_agent/scripts/PCBGeneric.pas"
 "scripts/altium/PCB.pas" = "eda_agent/scripts/PCB.pas"
 "scripts/altium/Generic.pas" = "eda_agent/scripts/Generic.pas"
+"scripts/altium/Audit.pas" = "eda_agent/scripts/Audit.pas"
+"scripts/altium/StatusForm.pas" = "eda_agent/scripts/StatusForm.pas"
+"scripts/altium/StatusForm.dfm" = "eda_agent/scripts/StatusForm.dfm"
 "scripts/altium/Dispatcher.pas" = "eda_agent/scripts/Dispatcher.pas"
 "scripts/altium/SelfTest.pas" = "eda_agent/scripts/SelfTest.pas"
 "scripts/altium/Altium_API.PrjScr" = "eda_agent/scripts/Altium_API.PrjScr"
@@ -80,6 +83,7 @@ exclude = [
 include = [
     "src/eda_agent",
     "scripts/altium/*.pas",
+    "scripts/altium/*.dfm",
     "scripts/altium/*.PrjScr",
     "README.md",
     "LICENSE",

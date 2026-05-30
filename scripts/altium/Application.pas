@@ -454,8 +454,8 @@ Begin
     { Add to the focused project via IProject.DM_AddSourceDocument.            }
     { The earlier RunProcess('WorkspaceManager:AddDocumentToProject') path     }
     { silently no-ops in some workspace states, DM_AddSourceDocument is the  }
-    { documented project-side API and is what working examples in the         }
-    { reference/altium-delphiscripts-brett repo use.                          }
+    { documented project-side API and the approach that works reliably        }
+    { across workspace states.                                                }
     Added := False;
     If AddToProject Then
     Begin

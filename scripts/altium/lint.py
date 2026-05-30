@@ -31,6 +31,7 @@ PAS_FILES = [
     "PCBGeneric.pas",
     "PCB.pas",
     "Generic.pas",
+    "Audit.pas",
     "StatusForm.pas",
     "Dispatcher.pas",
 ]
@@ -161,10 +162,12 @@ RULE_INC_ARRAY = LineRule(
 # Reserved Delphi keywords used as parameter/local names. Multi-line scan
 # below handles the `Var` block case where the keyword sits on its own
 # line. This single-line rule catches the in-parens parameter form like
-# `Procedure F(Label : String)`.
-RESERVED_AS_NAME = {"Label", "Type", "Object", "File", "Set", "Array",
-                    "String", "Function", "Procedure", "Unit", "Begin",
-                    "End", "Var", "Const"}
+# `Procedure F(Label : String)`. Synced with memory:
+# delphiscript_reserved_words.md -- update both together.
+RESERVED_AS_NAME = {"Label", "Type", "Class", "Object", "Record", "Array",
+                    "Set", "String", "File", "Unit", "Function", "Procedure",
+                    "Const", "Var", "End", "Begin", "If", "Then", "Else",
+                    "Goto", "With", "In", "Is", "As", "Of", "Out"}
 RULE_RESERVED_IDENT = LineRule(
     name="reserved-word-as-identifier",
     pattern=re.compile(
@@ -172,6 +175,29 @@ RULE_RESERVED_IDENT = LineRule(
     severity="error",
     memory="delphiscript_reserved_words.md",
     description="Reserved keyword used as parameter name; rename it.",
+)
+
+# Typed constants and Var-with-initializer (Const cPi : Double = 3.14, or
+# Var X : Integer = 5). DelphiScript only accepts UNTYPED constants
+# (Const cPi = 3.14) and uninitialised Var declarations. The compile
+# error is the cryptic "Typed constants aren't supported" with no line
+# number that points at the right place. Drop the type annotation, OR
+# move the initialisation into a Begin..End assignment.
+RULE_TYPED_CONSTANT = LineRule(
+    name="typed-constant",
+    pattern=re.compile(
+        r"^\s*[A-Za-z_]\w*\s*:\s*"
+        r"(Double|Integer|Cardinal|Boolean|String|Byte|Word|Int64"
+        r"|Single|Extended|Real|Char|LongInt|ShortInt|SmallInt)\s*=",
+        re.IGNORECASE,
+    ),
+    severity="error",
+    memory="delphiscript_typed_constants.md",
+    description=(
+        "DelphiScript does not support typed constants or "
+        "initialised Var declarations. Drop the type annotation, or "
+        "move the assignment into a Begin..End block."
+    ),
 )
 
 # ISch_Component.CurrentFootprintModelName is a read-only property.
@@ -326,6 +352,7 @@ LINE_RULES = [
     RULE_BAD_HEX,
     RULE_INC_ARRAY,
     RULE_RESERVED_IDENT,
+    RULE_TYPED_CONSTANT,
     RULE_FOOTPRINT_NAME_WRITE,
     RULE_RULE_PRIORITY_WRITE,
     RULE_PROBE_TEXT_WRITE,

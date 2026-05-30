@@ -47,6 +47,7 @@ def register_library_tools(mcp):
         name: str,
         designator_prefix: str = "U",
         description: str = "",
+        part_count: int = 1,
     ) -> dict[str, Any]:
         """Create a new schematic symbol in the active library.
 
@@ -54,6 +55,12 @@ def register_library_tools(mcp):
             name: Component name
             designator_prefix: Default designator prefix (e.g., "U", "R", "C")
             description: Component description
+            part_count: For multi-part components (quad op-amp, dual gate,
+                etc), the number of sub-parts. Pins added via lib_add_pins
+                with ``owner_part_id`` set to 1..part_count are assigned
+                to that sub-part; ``owner_part_id=0`` shares the pin
+                across all sub-parts (the usual power-pin pattern on a
+                quad op-amp).
 
         Returns:
             Dictionary with created symbol information
@@ -65,6 +72,7 @@ def register_library_tools(mcp):
                 "name": name,
                 "designator_prefix": designator_prefix,
                 "description": description,
+                "part_count": str(max(1, int(part_count))),
             },
         )
         return result
@@ -180,17 +188,27 @@ def register_library_tools(mcp):
                   input/output/bidirectional/passive/open_collector/
                   open_emitter/power/hiz/io
                 - hidden     (bool, default False)
+                - owner_part_id (int, optional). For multi-part
+                  components (e.g. quad op-amp). 1..part_count picks a
+                  specific sub-part; 0 shares the pin across all parts
+                  (typical for V+ / V- power pins on a quad). Omit for
+                  single-part symbols.
 
-        Example, a 4-pin dual op-amp stage:
+        Example, one stage of a dual op-amp (sub-part 1) with shared
+        power pins (sub-part 0):
             lib_add_pins(pins=[
                 {"designator": "1", "name": "OUT1",  "x": 0,   "y": 0,
-                 "rotation": 180, "electrical_type": "output"},
+                 "rotation": 180, "electrical_type": "output",
+                 "owner_part_id": 1},
                 {"designator": "2", "name": "IN1-",  "x": 0,   "y": 100,
-                 "rotation": 180, "electrical_type": "input"},
+                 "rotation": 180, "electrical_type": "input",
+                 "owner_part_id": 1},
                 {"designator": "3", "name": "IN1+",  "x": 0,   "y": 200,
-                 "rotation": 180, "electrical_type": "input"},
-                {"designator": "4", "name": "GND",   "x": 0,   "y": 300,
-                 "rotation": 180, "electrical_type": "power"},
+                 "rotation": 180, "electrical_type": "input",
+                 "owner_part_id": 1},
+                {"designator": "8", "name": "V+",    "x": 0,   "y": 400,
+                 "rotation": 180, "electrical_type": "power",
+                 "owner_part_id": 0},
             ])
 
         Returns:
@@ -212,6 +230,8 @@ def register_library_tools(mcp):
                 f"electrical_type={p.get('electrical_type', 'passive')}",
                 f"hidden={'true' if p.get('hidden') else 'false'}",
             ]
+            if "owner_part_id" in p and p["owner_part_id"] is not None:
+                fields.append(f"owner_part_id={int(p['owner_part_id'])}")
             op_strs.append(";".join(fields))
 
         if not op_strs:
@@ -483,8 +503,8 @@ def register_library_tools(mcp):
         only to the footprint does NOT register it with the placement
         editor -- the text shows up only after a save+reload. This
         tool adds the text to BOTH the footprint and the underlying
-        board, then broadcasts ``PCBM_BoardRegisteration`` to both, per
-        the reference DelphiScript (``PcbLib/FootPrintText_2.pas``).
+        board, then broadcasts ``PCBM_BoardRegisteration`` to both, which
+        is the pattern that registers the primitive reliably.
 
         Args:
             text: The string to place. Required.
@@ -601,6 +621,43 @@ def register_library_tools(mcp):
     # =========================================================================
 
     @mcp.tool()
+    async def lib_update_footprint_heights_from_3d() -> dict[str, Any]:
+        """Sweep the active PCB Library: for every footprint, find the
+        tallest 3D body and propagate its ``OverallHeight`` up to
+        ``Footprint.Height`` when the model is taller than the
+        currently-stored value.
+
+        Footprint.Height is what Altium's placement-collision DRC
+        uses to enforce height-clearance rules (don't place a tall
+        electrolytic under a low overhang; don't sandwich an LCD
+        connector under another PCB in a multi-board stack-up).
+        Libraries shipped from vendors without explicit heights default
+        to 0 which makes the DRC silently no-op -- a real production
+        risk caught only at first-article assembly.
+
+        Safety:
+          - Only updates footprints whose 3D model is TALLER than
+            the current Height -- never shrinks. Protects a manual
+            "I know this part is 5mm despite the model being 3mm"
+            override.
+          - Does NOT save the library; the agent should review the
+            ``items[]`` diff and save via the Altium UI or by
+            re-opening to confirm.
+
+        Returns:
+            Dict with:
+              - ``inspected``: total footprints walked
+              - ``updated``: footprints whose Height was raised
+              - ``items``: per-footprint diff
+                ``{name, old_height_mm, new_height_mm}``
+        """
+        bridge = get_bridge()
+        return await bridge.send_command_async(
+            "library.update_footprint_heights_from_3d", {},
+            timeout=60.0,
+        )
+
+    @mcp.tool()
     async def lib_link_footprint(
         component_name: str,
         footprint_name: str,
@@ -685,6 +742,7 @@ def register_library_tools(mcp):
     async def lib_get_components(
         library_path: Optional[str] = None,
         with_parameters: bool = False,
+        with_designator: bool = False,
     ) -> dict[str, Any]:
         """Get all components in a library.
 
@@ -702,15 +760,27 @@ def register_library_tools(mcp):
         parameters; for a single symbol's parameters, prefer
         ``lib_get_component_details``.
 
+        Setting ``with_designator=True`` adds each component's DEFAULT
+        designator (``Component.Designator.Text``, e.g. ``"U?"`` / ``"R?"``
+        / ``"IC?"``). The CompInfoReader fast path does NOT expose the
+        designator, so this also loads each live symbol (same cost driver
+        as with_parameters) but skips parameter iteration, keeping the
+        payload small. Intended for library-wide designator-consistency
+        audits.
+
         Args:
             library_path: Path to library (uses active library if not specified)
             with_parameters: If True, include each component's parameter
                 dict (slow on large libraries). Default False.
+            with_designator: If True, include each component's default
+                designator string (slow on large libraries; smaller
+                payload than with_parameters). Default False.
 
         Returns:
             Dictionary with ``count`` and ``components`` list. Each
             component carries name, alias_name, part_count, description,
-            and (only when with_parameters is True) parameters.
+            (only when with_parameters is True) parameters, and (only when
+            with_designator is True) designator.
         """
         bridge = get_bridge()
         params: dict[str, Any] = {}
@@ -718,6 +788,8 @@ def register_library_tools(mcp):
             params["library_path"] = library_path
         if with_parameters:
             params["with_parameters"] = "true"
+        if with_designator:
+            params["with_designator"] = "true"
         result = await bridge.send_command_async("library.get_components", params)
         if isinstance(result, dict):
             return tag_response(
@@ -1158,10 +1230,19 @@ def register_library_tools(mcp):
         Each assignment sets one parameter on one component.
         If the parameter exists it is updated; if not it is created.
 
+        Two ``param_name`` values are SPECIAL-CASED to component
+        properties rather than parameters:
+          - ``"Description"`` sets ``Component.ComponentDescription``.
+          - ``"Designator"`` sets the component's DEFAULT designator
+            (``Component.Designator.Text``, e.g. ``"U?"`` / ``"R?"``).
+            Use this to normalize library designator defaults in bulk
+            (pairs with ``lib_get_components(with_designator=True)``).
+
         Args:
             assignments: List of dicts with keys:
                 - component_name: Name of the component in the library
-                - param_name: Parameter name (e.g., "Partnumber", "Manufacturer")
+                - param_name: Parameter name (e.g., "Partnumber", "Manufacturer"),
+                  or the special "Description" / "Designator" property keys
                 - param_value: Value to set
             library_path: Path to library (uses active library if not specified)
 

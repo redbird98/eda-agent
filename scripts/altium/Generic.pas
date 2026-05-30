@@ -2183,10 +2183,9 @@ Begin
         Exit;
     End;
 
-    { Two-vertex wire. Canonical pattern from Altium scripting-reference's   }
-    { PlaceSchObjects.PAS: each vertex needs its own InsertVertex BEFORE the }
-    { SetState_Vertex assignment. The previous code only inserted vertex 1,  }
-    { so the wire was a single point, invisible.                              }
+    { Two-vertex wire. The canonical pattern: each vertex needs its own      }
+    { InsertVertex BEFORE the SetState_Vertex assignment. The previous code  }
+    { only inserted vertex 1, so the wire was a single point, invisible.     }
     Wire.Location := Point(MilsToCoord(X1), MilsToCoord(Y1));
     Wire.InsertVertex := 1;
     Wire.SetState_Vertex(1, Point(MilsToCoord(X1), MilsToCoord(Y1)));
@@ -6919,15 +6918,7 @@ Begin
                         { Electrical type as a string so the renderer can map }
                         { straight to a glyph (input arrow / OC bubble / ...). }
                         ElecStr := 'passive';
-                        Try
-                            If Pin.Electrical = eElectricInput Then ElecStr := 'input'
-                            Else If Pin.Electrical = eElectricOutput Then ElecStr := 'output'
-                            Else If Pin.Electrical = eElectricIO Then ElecStr := 'io'
-                            Else If Pin.Electrical = eElectricPower Then ElecStr := 'power'
-                            Else If Pin.Electrical = eElectricOpenCollector Then ElecStr := 'open_collector'
-                            Else If Pin.Electrical = eElectricOpenEmitter Then ElecStr := 'open_emitter'
-                            Else If Pin.Electrical = eElectricHiZ Then ElecStr := 'hiz';
-                        Except End;
+                        Try ElecStr := PinElectricalToStr(Pin.Electrical); Except End;
                         If NumPins > 0 Then PinsJson := PinsJson + ',';
                         PinsJson := PinsJson +
                             '{"comp":"' + EscapeJsonString(DesigText) + '"' +
@@ -7169,6 +7160,12 @@ Var
     I, K, PtCount : Integer;
     Seg : TPolySegment;
     RespJson : String;
+    NameOnFlag, CommentOnFlag, IsHiddenFlag : Boolean;
+    PCBSysOpts : IPCB_SystemOptions;
+    Lyr : TLayer;
+    LayersJson, LyrNm : String;
+    LyrColor : Integer;
+    LyrVisible, LyrFirst : Boolean;
 Begin
     Board := GetPCBBoardAnywhere;
     If Board = Nil Then
@@ -7337,9 +7334,28 @@ Begin
             Else If Obj.ObjectId = eTextObject Then
             Begin
                 Text := Obj;
+                { Skip hidden text entirely -- footprints from vendor      }
+                { libraries typically carry 5-10 hidden text objects each }
+                { (.Designator / .Comment / .ChannelDesignator on multiple}
+                { mech / solder / paste layers). On a 100-component board }
+                { that's 500-1000 IPC-irrelevant primitives. Skipping at  }
+                { the Pascal side shrinks the JSON payload + client parse }
+                { without losing anything the renderer would render.      }
+                IsHiddenFlag := False;
+                Try IsHiddenFlag := Text.IsHidden; Except End;
+                If IsHiddenFlag Then
+                Begin
+                    Obj := Iter.NextPCBObject;
+                    Continue;
+                End;
                 TextStr := '';
                 Try TextStr := Text.Text; Except End;
                 If TextStr = '' Then Try TextStr := Text.UnderlyingString; Except End;
+                If TextStr = '' Then
+                Begin
+                    Obj := Iter.NextPCBObject;
+                    Continue;
+                End;
                 If NumTexts > 0 Then TextsJson := TextsJson + ',';
                 TextsJson := TextsJson +
                     '{"x":' + IntToStr(CoordToMils(Text.XLocation)) +
@@ -7348,7 +7364,8 @@ Begin
                     ',"size":' + IntToStr(CoordToMils(Text.Size)) +
                     ',"width":' + IntToStr(CoordToMils(Text.Width)) +
                     ',"rotation":' + FloatToJsonStr(Text.Rotation) +
-                    ',"layer":"' + EscapeJsonString(LayerName) + '"}';
+                    ',"layer":"' + EscapeJsonString(LayerName) + '"' +
+                    ',"hidden":false}';
                 Inc(NumTexts);
             End
             Else If Obj.ObjectId = eRegionObject Then
@@ -7395,13 +7412,23 @@ Begin
                 TextStr := '';
                 Try TextStr := CompObj.Name.Text; Except End;
                 If TextStr = '' Then Try TextStr := CompObj.SourceDesignator; Except End;
+                { NameOn / CommentOn drive whether the designator + comment   }
+                { strings are visible in Altium itself. The renderer respects }
+                { these flags so designs that explicitly hide labels render  }
+                { the same in the dashboard.                                 }
+                NameOnFlag := True;
+                Try NameOnFlag := CompObj.NameOn; Except End;
+                CommentOnFlag := True;
+                Try CommentOnFlag := CompObj.CommentOn; Except End;
                 If NumComps > 0 Then CompsJson := CompsJson + ',';
                 CompsJson := CompsJson +
                     '{"des":"' + EscapeJsonString(TextStr) + '"' +
                     ',"x":' + IntToStr(CoordToMils(CompObj.X)) +
                     ',"y":' + IntToStr(CoordToMils(CompObj.Y)) +
                     ',"rotation":' + FloatToJsonStr(CompObj.Rotation) +
-                    ',"layer":"' + EscapeJsonString(LayerName) + '"}';
+                    ',"layer":"' + EscapeJsonString(LayerName) + '"' +
+                    ',"name_on":' + BoolToJsonStr(NameOnFlag) +
+                    ',"comment_on":' + BoolToJsonStr(CommentOnFlag) + '}';
                 Inc(NumComps);
             End;
             Obj := Iter.NextPCBObject;
@@ -7417,6 +7444,41 @@ Begin
     TextsJson   := TextsJson   + ']';
     RegionsJson := RegionsJson + ']';
     CompsJson   := CompsJson   + ']';
+
+    { Layer colours + visibility, straight from Altium so the renderer can }
+    { reproduce exactly what the user sees on the bench instead of guessing }
+    { a palette. "color" is the raw TColor integer (BGR-packed: $00BBGGRR); }
+    { the Python side converts to #RRGGBB. "visible" mirrors Altium's own   }
+    { displayed-layer set so the render can default to showing only what    }
+    { Altium shows. Keyed by GetLayerString -- the SAME name the primitives }
+    { carry -- so the renderer matches by name with no translation. Range   }
+    { eTopLayer..eMultiLayer covers signal, plane, mech, mask, paste, silk, }
+    { keepout and multilayer (the official Altium docs iterate this range). }
+    LayersJson := '{';
+    LyrFirst := True;
+    PCBSysOpts := Nil;
+    Try PCBSysOpts := PCBServer.SystemOptions; Except End;
+    If PCBSysOpts <> Nil Then
+    Begin
+        For Lyr := eTopLayer To eMultiLayer Do
+        Begin
+            LyrNm := GetLayerString(Lyr);
+            If LyrNm <> 'Unknown' Then
+            Begin
+                LyrColor := 0;
+                LyrVisible := True;
+                Try LyrColor := PCBSysOpts.LayerColors[Lyr]; Except End;
+                Try LyrVisible := Board.LayerIsDisplayed[Lyr]; Except End;
+                If Not LyrFirst Then LayersJson := LayersJson + ',';
+                LayersJson := LayersJson +
+                    '"' + EscapeJsonString(LyrNm) + '":{"color":' +
+                    IntToStr(LyrColor) + ',"visible":' +
+                    BoolToJsonStr(LyrVisible) + '}';
+                LyrFirst := False;
+            End;
+        End;
+    End;
+    LayersJson := LayersJson + '}';
 
     RespJson :=
         '{"counts":{"outline":' + IntToStr(NumOutline) +
@@ -7438,7 +7500,8 @@ Begin
         ',"vias":' + ViasJson +
         ',"texts":' + TextsJson +
         ',"regions":' + RegionsJson +
-        ',"components":' + CompsJson + '}';
+        ',"components":' + CompsJson +
+        ',"layers":' + LayersJson + '}';
     Result := BuildSuccessResponse(RequestId, RespJson);
 End;
 

@@ -29,6 +29,7 @@ from ..render import (
     render_sch_svg, SchRenderOptions,
     render_pcb_svg, PcbRenderOptions,
 )
+from ..render.bom_html import render_bom_html
 
 
 def register_render_tools(mcp):
@@ -177,4 +178,67 @@ def register_render_tools(mcp):
             "counts": geometry.get("counts") or {},
             "bbox": geometry.get("bbox") or {},
             "bytes": len(svg),
+        }
+
+    @mcp.tool()
+    async def export_bom_html(
+        output_path: Optional[str] = None,
+        title: str = "Bill of Materials",
+        limit: int = 5000,
+    ) -> dict[str, Any]:
+        """Export the project BOM as a self-contained interactive HTML file.
+
+        Standalone HTML page — no external CSS / JS / Altium runtime
+        dependency. Open it in any browser; sortable columns, free-text
+        filter, toggle between grouped (one row per value+footprint) and
+        per-component layouts. A self-contained one-shot static export.
+
+        Useful for emailing the BOM to a manufacturer, archiving with a
+        board release, or sharing with a non-Altium reviewer.
+
+        Args:
+            output_path: Where to write the HTML. Defaults to
+                ``<workspace>/bom.html``.
+            title: Heading + ``<title>`` for the page.
+            limit: Max components to include (default 5000; the BOM call
+                supports up to ~10000 cleanly).
+
+        Returns:
+            Dict with ``ok``, ``html_path``, ``components`` (count
+            written), ``bytes``.
+        """
+        bridge = get_bridge()
+        bom = await bridge.send_command_async(
+            "project.get_bom",
+            {"limit": str(limit)},
+        )
+        if not isinstance(bom, dict):
+            return {"ok": False, "reason": "no BOM returned"}
+
+        # Resolve project name for the sub-heading -- best-effort, the
+        # focused-project lookup isn't critical for the export to work.
+        project_name = ""
+        try:
+            focused = await bridge.send_command_async(
+                "project.get_focused", {})
+            if isinstance(focused, dict):
+                project_name = (focused.get("project_name")
+                                or focused.get("name") or "")
+        except Exception:
+            pass
+
+        html_str = render_bom_html(bom, title=title, project=project_name)
+
+        if output_path:
+            target = Path(output_path)
+        else:
+            target = get_config().workspace_dir / "bom.html"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(html_str, encoding="utf-8")
+
+        return {
+            "ok": True,
+            "html_path": str(target),
+            "components": len(bom.get("components") or []),
+            "bytes": len(html_str),
         }

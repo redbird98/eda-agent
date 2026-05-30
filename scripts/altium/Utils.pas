@@ -46,6 +46,173 @@ Begin
     End;
 End;
 
+{..............................................................................}
+{ JSON prop builders. Each returns a `"name":value` fragment ready to be     }
+{ joined with comma separators into an object body. Replaces hand-rolled    }
+{ `'"' + EscapeJsonString(...) + '":"' + EscapeJsonString(...) + '"'`        }
+{ patterns scattered across the codebase. Cuts escape-at-the-seams bugs in  }
+{ long response bodies (every key + every string value goes through         }
+{ EscapeJsonString exactly once).                                            }
+{                                                                              }
+{ Usage:                                                                       }
+{   Body := JsonStr('designator', Des) + ',' +                                 }
+{           JsonInt('pin_count', N)    + ',' +                                 }
+{           JsonRaw('pins', PinsArray);                                        }
+{   Result := JsonObj(Body);   // wraps Body in object braces                  }
+{                                                                              }
+{ JsonRaw is the escape hatch for nested objects/arrays whose body is        }
+{ already a serialized string (no extra escaping applied).                   }
+{..............................................................................}
+
+Function JsonStr(Name, Value : String) : String;
+Begin
+    Result := '"' + EscapeJsonString(Name) + '":"' + EscapeJsonString(Value) + '"';
+End;
+
+Function JsonInt(Name : String; Value : Integer) : String;
+Begin
+    Result := '"' + EscapeJsonString(Name) + '":' + IntToStr(Value);
+End;
+
+Function JsonFloat(Name : String; Value : Double) : String;
+Begin
+    Result := '"' + EscapeJsonString(Name) + '":' + FloatToJsonStr(Value);
+End;
+
+Function JsonBool(Name : String; Value : Boolean) : String;
+Begin
+    Result := '"' + EscapeJsonString(Name) + '":' + BoolToJsonStr(Value);
+End;
+
+Function JsonRaw(Name, RawValue : String) : String;
+Begin
+    { For nested objects/arrays already serialized as a string. Caller is    }
+    { responsible for emitting valid JSON in RawValue (no escaping).         }
+    Result := '"' + EscapeJsonString(Name) + '":' + RawValue;
+End;
+
+Function JsonNull(Name : String) : String;
+Begin
+    Result := '"' + EscapeJsonString(Name) + '":null';
+End;
+
+Function JsonObj(Body : String) : String;
+Begin
+    Result := '{' + Body + '}';
+End;
+
+Function JsonArr(Body : String) : String;
+Begin
+    Result := '[' + Body + ']';
+End;
+
+{..............................................................................}
+{ Pin electrical-type <-> string converters. Used for JSON output of sch    }
+{ geometry, and for parsing JSON pin specs when creating symbols. Keeps the }
+{ enum vocabulary in one place instead of scattered If/Else If chains.      }
+{ Verified against the Altium schematic API documentation; note that        }
+{ Altium spells bidirectional as eElectricIO (NOT eElectricBiDir).           }
+{..............................................................................}
+
+Function PinElectricalToStr(Electrical : TPinElectrical) : String;
+Begin
+    If Electrical = eElectricInput Then Result := 'input'
+    Else If Electrical = eElectricOutput Then Result := 'output'
+    Else If Electrical = eElectricIO Then Result := 'io'
+    Else If Electrical = eElectricPower Then Result := 'power'
+    Else If Electrical = eElectricOpenCollector Then Result := 'open_collector'
+    Else If Electrical = eElectricOpenEmitter Then Result := 'open_emitter'
+    Else If Electrical = eElectricHiZ Then Result := 'hiz'
+    Else Result := 'passive';   { eElectricPassive fallback covers unknown ords }
+End;
+
+Function StrToPinElectrical(S : String) : TPinElectrical;
+Var
+    LS : String;
+Begin
+    LS := LowerCase(Trim(S));
+    If (LS = 'input') Or (LS = 'in') Then Result := eElectricInput
+    Else If (LS = 'output') Or (LS = 'out') Then Result := eElectricOutput
+    Else If (LS = 'io') Or (LS = 'bidir') Or (LS = 'bidirectional') Then Result := eElectricIO
+    Else If LS = 'power' Then Result := eElectricPower
+    Else If (LS = 'open_collector') Or (LS = 'oc') Then Result := eElectricOpenCollector
+    Else If (LS = 'open_emitter') Or (LS = 'oe') Then Result := eElectricOpenEmitter
+    Else If (LS = 'hiz') Or (LS = 'tri') Or (LS = 'tristate') Then Result := eElectricHiZ
+    Else Result := eElectricPassive;
+End;
+
+{..............................................................................}
+{ Pin orientation (rotation) <-> degrees / string converters. Altium's       }
+{ TRotationBy90 ordinals are eRotate0/90/180/270 with ord values 0..3;      }
+{ multiplying the ord by 90 gives the degree value used in our JSON API.    }
+{ String form matches Altium's compass-direction convention for symbol pins }
+{ (pin "points" in this direction).                                          }
+{..............................................................................}
+
+Function OrientationToDegrees(Orient : TRotationBy90) : Integer;
+Begin
+    Result := Ord(Orient) * 90;
+End;
+
+Function DegreesToOrientation(Degrees : Integer) : TRotationBy90;
+Begin
+    { Normalize input to [0, 360) and snap to nearest 90. }
+    Degrees := ((Degrees Mod 360) + 360) Mod 360;
+    If Degrees >= 270 Then Result := eRotate270
+    Else If Degrees >= 180 Then Result := eRotate180
+    Else If Degrees >= 90 Then Result := eRotate90
+    Else Result := eRotate0;
+End;
+
+Function StrToPinOrientation(S : String) : TRotationBy90;
+Var
+    LS : String;
+Begin
+    { Accept both compass words ("right" = pin points right = 0 deg) and a    }
+    { raw degree value. The compass mapping follows Altium symbol convention. }
+    LS := LowerCase(Trim(S));
+    If (LS = 'right') Or (LS = '0') Then Result := eRotate0
+    Else If (LS = 'up') Or (LS = '90') Then Result := eRotate90
+    Else If (LS = 'left') Or (LS = '180') Then Result := eRotate180
+    Else If (LS = 'down') Or (LS = '270') Then Result := eRotate270
+    Else Result := DegreesToOrientation(StrToIntDef(LS, 0));
+End;
+
+{..............................................................................}
+{ Power-port style <-> string converters. TPowerObjectStyle has the standard }
+{ Altium variants for GND symbols (signal / power / earth), supply rails    }
+{ (Bar / Arrow / Wave), and a generic Circle. Used when authoring power    }
+{ ports programmatically and when auditing orientation / net-name rules.   }
+{..............................................................................}
+
+Function PowerStyleToStr(Style : TPowerObjectStyle) : String;
+Begin
+    If Style = ePowerCircle Then Result := 'circle'
+    Else If Style = ePowerArrow Then Result := 'arrow'
+    Else If Style = ePowerBar Then Result := 'bar'
+    Else If Style = ePowerWave Then Result := 'wave'
+    Else If Style = ePowerGndPower Then Result := 'gnd_power'
+    Else If Style = ePowerGndSignal Then Result := 'gnd_signal'
+    Else If Style = ePowerGndEarth Then Result := 'gnd_earth'
+    Else Result := '';
+End;
+
+Function StrToPowerStyle(S : String) : TPowerObjectStyle;
+Var
+    LS : String;
+Begin
+    LS := LowerCase(Trim(S));
+    If (LS = 'circle') Or (LS = 'gnd_circle') Then Result := ePowerCircle
+    Else If LS = 'arrow' Then Result := ePowerArrow
+    Else If (LS = 'bar') Or (LS = 'powerbar') Or (LS = 'rail') Then Result := ePowerBar
+    Else If LS = 'wave' Then Result := ePowerWave
+    Else If (LS = 'gnd_power') Or (LS = 'powergnd') Then Result := ePowerGndPower
+    Else If (LS = 'gnd_signal') Or (LS = 'signalgnd') Or (LS = 'sgnd') Then Result := ePowerGndSignal
+    Else If (LS = 'gnd_earth') Or (LS = 'earth') Or (LS = 'egnd') Then Result := ePowerGndEarth
+    Else If (LS = 'gnd') Or (LS = 'ground') Then Result := ePowerGndPower  { common shorthand }
+    Else Result := ePowerBar;  { sensible default for a supply rail }
+End;
+
 Function StrToBool(S : String) : Boolean;
 Begin
     Result := (LowerCase(S) = 'true') Or (S = '1');

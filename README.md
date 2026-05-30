@@ -35,6 +35,7 @@ This is **not** a batch tool that opens a project, runs a script, and exits. It'
 - **Generic primitives** (`query_objects`, `modify_objects`, `create_object`, `delete_objects`, `run_process`) that work on almost any schematic or PCB object type via late-binding, avoiding per-type handler proliferation
 - **Bulk batch primitives**: `batch_modify`, `batch_create`, `batch_delete`, `pcb_place_tracks`, `pcb_move_components`, `place_wires`, `place_net_labels`, `place_power_ports`, `place_sch_components_from_library`, `set_sch_components_parameters`, `get_sch_doc_pins`, `lib_add_pins`, `get_connectivity_many`, `sch_attach_spice_primitives`. Collapse N LLM turns + N IPC round-trips into one. Typical wall-time savings: 10 to 100x on multi-item edits
 - **Design review snapshot**: `design_review_snapshot` bundles 8 to 12 review reads (project info, components, nets, rules, diff, messages, stats, unrouted, BOM) into a single call. One LLM turn instead of a dozen
+- **Design-lint sweep**: `design_lint_report` runs 31 audit checks in one IPC pass and returns a structured violation list — schematic-side (component-parameter visibility per class, power-port orientation, floating ports, multi-output / no-driver nets, duplicate designators, off-grid components) and PCB-side (DNP variant components, tented-via ratio, near-miss track endpoints, signal vias without nearby return via, via antennas, removed pad shapes, components outside outline, pads too close to board edge, invalid polygon regions, optional DRC). Each check is also exposed as a standalone `audit_*` MCP tool; the dashboard's Status → Health subtab has a one-click Lint panel that calls `/api/lint` and groups results by Schematic / PCB
 - **Datasheet-first discipline**: every component-surfacing response (`pcb_get_components`, `get_bom`, `get_component_info`, `find_component`, `lib_search`, `design_review_snapshot`, `sch_get_simulation_readiness`) carries a `_datasheet_guidance` block with per-part vendor search queries. `attach_to_altium` / `ping_altium` carry a `_system_reminder` so every MCP client that connects sees the rule at session start. LLM-fabricated datasheet values are forbidden; WebFetch/WebSearch are called out by name
 - **Sch <-> PCB netlist crossref**: `crossref_net(net_name)` compares the schematic pin list against the PCB pad list for the same net. Catches ECO drift, stale post-fabrication routing, phantom nets from port/sheet-entry rename conflicts. `in_sync` flag + `sch_only` / `pcb_only` diff
 - **SPICE simulation workflow**: `sch_get_simulation_readiness` audits every component and partitions into ready / needs-primitive / needs-file. `sch_attach_spice_primitive(s)` sets SpicePrefix + Value on passives. `sch_attach_spice_model` links a vendor `.mdl` / `.ckt`. `sim_run` dispatches the simulator. Built-in guardrail: never fabricate a SPICE model file, fetch the vendor one
@@ -290,7 +291,7 @@ These six tools cover most day-to-day work. They accept any object type supporte
 | `diag_workspace` | Diagnostic: enumerate the IPC workspace directory and report pending request files. Useful when investigating IPC plumbing |
 | `set_intent` | Record the current conversation's intent so the web dashboard can display what the agent is working on |
 
-### Project (47 tools)
+### Project (49 tools)
 
 Lifecycle, parameters, compilation, analysis, outputs, ECO sync, variants.
 
@@ -304,16 +305,16 @@ Lifecycle, parameters, compilation, analysis, outputs, ECO sync, variants.
 | `get_project_options` | Compiler / variant / channel settings |
 | `compile_project` / `get_messages` | Compile and read violations |
 | `get_design_stats` / `get_design_differences` / `get_board_info` | Design analysis |
-| `get_bom` / `get_nets` / `get_component_info` / `get_connectivity` / `find_component` | Design queries |
+| `get_bom` / `get_nets` / `get_component_info` / `get_component_info_many` / `get_connectivity` / `find_component` | Design queries (`get_component_info_many` is the bulk variant) |
 | `cross_probe` / `lock_designator` / `annotate` | Designator management |
 | `compare_sch_pcb` / `update_pcb` / `update_schematic` | ECO sync (see [ECO limitation](#eco-sch--pcb-update-is-not-reliably-scriptable)) |
 | `get_connectivity_many` | Pin-net connectivity for many designators in one round-trip (bulk) |
 | `force_recompile` / `get_compile_freshness` | Explicit SmartCompile cache control: save all dirty docs, invalidate, recompile; report cache age + dirty-in-editor docs |
 | `get_variants` / `get_active_variant` / `set_active_variant` / `create_variant` | Variant management |
 | `export_pdf` / `export_step` / `export_dxf` / `export_image` / `generate_output` | Output generation |
-| `get_outjob_containers` / `run_outjob` | OutJob execution |
+| `get_outjob_containers` / `run_outjob` / `run_outjob_all` | OutJob execution (`run_outjob_all` fires every container in one pass) |
 
-### Library (22 tools)
+### Library (31 tools)
 
 Symbol and footprint creation, linking, batch editing, comparison.
 
@@ -328,6 +329,7 @@ Symbol and footprint creation, linking, batch editing, comparison.
 | `lib_get_components` / `lib_get_component_details` / `lib_search` | Browse and search |
 | `lib_batch_set_params` / `lib_batch_rename` | Bulk parameter / rename operations |
 | `lib_diff_libraries` | Compare two libraries |
+| `lib_update_footprint_heights_from_3d` | Propagate `IPCB_ComponentBody.OverallHeight` up to `Footprint.Height` so placement-collision DRC actually fires (libraries from vendors often ship Height=0) |
 
 ### Schematic and general (62 tools)
 
@@ -361,10 +363,12 @@ Schematic-side operations plus viewport and sheet management.
 | `sch_get_constraint_groups` | Enumerate `DM_ConstraintGroups` (FPGA-style pin/timing constraints) |
 | `sch_get_simulation_readiness` / `sch_attach_spice_primitive` / `sch_attach_spice_primitives` / `sch_attach_spice_model` / `sim_run` | SPICE workflow: audit, attach, simulate |
 | `design_review_snapshot` / `datasheet_checklist` | One-call full-project review + datasheet discipline |
+| `design_lint_report` | One-call run of all `audit_*` checks (component params, port direction, designator collisions, off-grid, tented vias, near-miss tracks, via antennas, removed pad shapes, off-board components, edge clearance, single-pin nets, MPN inconsistencies, ...) returned as a grouped violation list |
+| `audit_*` (32 tools) | Individual design-lint checks; each returns `{checked, violations, items[]}`. Wired into `design_lint_report` and the dashboard's Status → Health → Design lint panel via `/api/lint` |
 | `crossref_net` | Sch pin list vs PCB pad list for a named net: diff + `in_sync` flag |
 | `generic_run_process` | Run any Altium process command |
 
-### PCB (55 tools)
+### PCB (70 tools)
 
 Queries and modifications on the active PCB document.
 
@@ -373,10 +377,12 @@ Queries and modifications on the active PCB document.
 | `pcb_get_nets` / `pcb_get_net_classes` / `pcb_create_net_class` | Net / net class management |
 | `pcb_get_design_rules` / `pcb_create_design_rule` / `pcb_delete_design_rule` / `pcb_get_diff_pair_rules` / `pcb_get_room_rules` | Design rules. `pcb_create_design_rule` dispatches to typed `IPCB_*Constraint` subtypes for clearance / width / via-size with the proper per-layer setters |
 | `pcb_get_rule_properties` / `pcb_set_rule_properties` | Read rule metadata + the `descriptor` string (which carries every constraint value in human-readable form, e.g. `Width Constraint (Min=0.102mm) (Max=5.08mm) (Preferred=0.127mm)`); set metadata-only (Enabled / Priority / Scope1 / Scope2 / Comment). Constraint values must be set via `pcb_create_design_rule` or the Altium UI; they live on per-kind subtypes that DelphiScript cannot dispatch to safely from a base `IPCB_Rule` reference |
-| `pcb_run_drc` | Run design rule check, return violations |
+| `pcb_set_rules_enabled` | Bulk DRC-rule enable/disable by name pattern |
+| `pcb_run_drc` / `pcb_get_clearance_violations` | Run DRC and read back enriched violations (each with x/y/layer + primitive1/2 net + type). `pcb_get_clearance_violations(net="X")` filters to one net |
+| `pcb_get_differential_pairs` | Enumerate every `IPCB_DifferentialPair` with both half-lengths + skew_mils. Catch length-mismatch high-speed bugs (USB / HDMI / PCIe transceiver skew limits) pre-fab |
 | `pcb_get_components` / `pcb_move_component` / `pcb_move_components` / `pcb_flip_component` / `pcb_align_components` / `pcb_snap_to_grid` | Component placement (bulk `pcb_move_components` for N components in one round-trip) |
 | `pcb_get_component_pads` / `pcb_get_pad_properties` | Pad inspection |
-| `pcb_place_track` / `pcb_place_tracks` / `pcb_set_track_width` / `pcb_get_trace_lengths` | Track operations (batch variant for whole-net routing) |
+| `pcb_place_track` / `pcb_place_tracks` / `pcb_set_track_width` / `pcb_get_trace_lengths` / `pcb_fillet_corners` | Track operations (batch variant for whole-net routing; `pcb_fillet_corners` rounds acute same-net joins with a tangent arc, defaults to dry_run) |
 | `pcb_place_via` / `pcb_place_via_array` / `pcb_get_vias` | Via operations and stitching arrays |
 | `pcb_place_arc` / `pcb_place_text` / `pcb_place_fill` / `pcb_place_pad` | Primitive placement |
 | `pcb_place_dimension` / `pcb_place_angular_dimension` / `pcb_place_radial_dimension` | Dimension annotations |
@@ -386,10 +392,19 @@ Queries and modifications on the active PCB document.
 | `pcb_create_room` | Room placement |
 | `pcb_get_unrouted_nets` | Ratsnest / unrouted analysis |
 | `pcb_get_layer_stackup` / `pcb_add_layer` / `pcb_remove_layer` / `pcb_modify_layer` / `pcb_set_layer_visibility` | Layer stack: get, add/remove layers, copper thickness + dielectric properties |
-| `pcb_get_board_outline` / `pcb_get_board_statistics` | Board-level queries |
+| `pcb_get_board_outline` / `pcb_get_board_statistics` / `pcb_get_fab_stats` | Board-level queries. `pcb_get_fab_stats` returns the DFM summary fab houses ask for (min annular ring, min track width, via type counts, distinct hole count) |
 | `pcb_get_selected_objects` | Current selection |
 | `pcb_export_coordinates` | Pick-and-place export |
 | `pcb_delete_object` | Delete a specific object |
+| `pcb_lock_net_routing` | Lock/unlock tracks + arcs + vias by net, optional component lock |
+| `pcb_copy_component_placement` | Mapping-based clone of layout from src → dst designators |
+| `pcb_set_text_visibility` | Bulk `NameOn`/`CommentOn` toggle, optional designator filter |
+| `pcb_clear_source_footprint_library` | Clear `SourceFootprintLibrary` so components re-match by lib-ref name from current Available Libraries (library-consolidation housekeeping) |
+| `pcb_place_stitching_vias` | Fill a rectangle with via stitching on a target net (collision-checked, defaults to dry_run) |
+| `pcb_make_paste_grid` | Split a thermal pad's paste opening into a grid (QFN swimming fix) |
+| `pcb_add_testpoints_for_net_class` | Auto-place SMD or through-hole testpoints above the board for every net in a netclass without existing coverage |
+| `pcb_calc_track_current_capacity` | IPC-2221 current capacity at multiple ΔT (pure Python, no Altium hit) |
+| `pcb_calc_impedance` | IPC-2141 microstrip / stripline + Wadell differential variants — pick the right track width for USB/HDMI/PCIe target impedance |
 
 ### Design agent (8 tools)
 

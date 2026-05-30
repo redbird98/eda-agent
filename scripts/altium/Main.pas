@@ -13,7 +13,7 @@ Const
     // returns, mismatch means Altium is running a stale compiled script
     // (DelphiScript caches compiled units until the script project is
     // reopened or Altium is restarted).
-    SCRIPT_VERSION = '2026.05.28.17';
+    SCRIPT_VERSION = '2026.05.30.2';
 
     // Wire protocol version. Bumped whenever the request/response JSON shape
     // changes incompatibly. Python and Pascal must agree; mismatch returns
@@ -456,58 +456,85 @@ End;
 
 Function ReadFileContent(FilePath : String) : String;
 Var
-    F : TextFile;
-    Line, Content : String;
-    First : Boolean;
+    SL : TStringList;
+    Content : String;
+    Attempt : Integer;
+    Ok : Boolean;
 Begin
+    { Read via TStringList.LoadFromFile, NOT TextFile Reset/ReadLn. The RTL    }
+    { Reset raises a low-level EInOutError on a sharing violation (I/O error   }
+    { 32) which the Altium script engine intercepts with a modal BEFORE the    }
+    { surrounding Try/Except can swallow it, stalling the polling loop.        }
+    { LoadFromFile opens through a TFileStream and raises an ordinary VCL      }
+    { EFOpenError that Try/Except catches cleanly -- no engine modal. The      }
+    { lock is transient (Defender scanning the freshly renamed request file,   }
+    { or a collision with Python's atomic replace), so retry briefly.          }
+    { NOTE: stash the content in a LOCAL string and assign Result from it as }
+    { the LAST statement. Assigning Result directly from SL.Text (an object  }
+    { property) and then Exit-ing triggers the DelphiScript return-clobber    }
+    { bug: the caller receives the FilePath argument instead of the file      }
+    { content, so the dispatcher reads the request path as the command and    }
+    { silently processes nothing. See delphiscript_result_clobber.            }
+    Result := '';
+    If Not FileExists(FilePath) Then Exit;
     Content := '';
-    First := True;
-    Try
-        If FileExists(FilePath) Then
-        Begin
-            AssignFile(F, FilePath);
-            Reset(F);
-            While Not EOF(F) Do
-            Begin
-                ReadLn(F, Line);
-                If Not First Then Content := Content + #10;
-                Content := Content + Line;
-                First := False;
+    Attempt := 0;
+    While Attempt < 12 Do
+    Begin
+        Inc(Attempt);
+        Ok := False;
+        SL := TStringList.Create;
+        Try
+            Try
+                SL.LoadFromFile(FilePath);
+                Content := SL.Text;
+                Ok := True;
+            Except
+                Ok := False;
             End;
-            CloseFile(F);
+        Finally
+            SL.Free;
         End;
-    Except
-        Content := '';
+        If Ok Then Break;
+        Sleep(15);
     End;
     Result := Content;
 End;
 
 Procedure WriteFileContent(FilePath : String; Content : String);
 Var
-    F : TextFile;
+    SL : TStringList;
+    Attempt : Integer;
+    Ok : Boolean;
 Begin
-    Try
-        AssignFile(F, FilePath);
-        Rewrite(F);
+    { Write via TStringList.SaveToFile, NOT TextFile Rewrite/Write. Rewrite    }
+    { raises a low-level EInOutError on a sharing violation (I/O error 32)     }
+    { that the Altium script engine surfaces as a modal before the            }
+    { surrounding Try/Except can swallow it, stalling the polling loop.        }
+    { SaveToFile goes through a TFileStream and raises an ordinary VCL         }
+    { exception that Try/Except catches cleanly -- no engine modal. The lock   }
+    { is transient (Defender scan, or Python reading the response mid-write),  }
+    { so retry briefly. Mirrors ReadFileContent and the proven sibling-MCP     }
+    { idiom (OutputLines.Text := json; SaveToFile).                           }
+    Attempt := 0;
+    While Attempt < 12 Do
+    Begin
+        Inc(Attempt);
+        Ok := False;
+        SL := TStringList.Create;
         Try
-            Write(F, Content);
-        Finally
-            CloseFile(F);
-        End;
-    Except
-        // Retry once after short delay
-        Sleep(50);
-        Try
-            AssignFile(F, FilePath);
-            Rewrite(F);
             Try
-                Write(F, Content);
-            Finally
-                CloseFile(F);
+                SL.Text := Content;
+                SL.SaveToFile(FilePath);
+                Ok := True;
+            Except
+                Ok := False;
             End;
-        Except
-            // Silently fail
+        Finally
+            SL.Free;
         End;
+        If Ok Then Exit;
+        Sleep(15);
     End;
 End;
 

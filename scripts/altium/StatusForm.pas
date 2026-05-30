@@ -413,23 +413,28 @@ End;
 { and tell the user via caption that no dashboard is reachable.            }
 Procedure UpdateOpenWebState;
 Var
-    HeartbeatPath, Content : String;
-    FileEpoch, NowEpoch : Double;
+    HeartbeatPath : String;
+    HeartbeatStamp, ThresholdStamp : Integer;
     NewEnabled : Boolean;
 Begin
     NewEnabled := False;
     Try
         HeartbeatPath := WorkspaceDir + 'dashboard.heartbeat';
-        Content := ReadFileContent(HeartbeatPath);
-        If Content <> '' Then
+        { Read the heartbeat's MODIFICATION TIME, not its content. The      }
+        { dashboard rewrites this file every ~3s, so its file timestamp is  }
+        { the last-seen time. Opening the file content (ReadFileContent)    }
+        { trips a Windows sharing violation whenever the dashboard is       }
+        { mid-write, and the script engine surfaces that as a modal that    }
+        { stalls the loop. FileAge queries the directory entry instead of   }
+        { locking the content, so it never raises here regardless of how    }
+        { the dashboard writes. It returns a DOS date-time stamp (-1 if     }
+        { missing); DOS stamps are chronologically ordered, so a plain >=   }
+        { against the threshold stamp tests "updated within 15s".           }
+        HeartbeatStamp := FileAge(HeartbeatPath);
+        If HeartbeatStamp >= 0 Then
         Begin
-            { Use the project's locale-safe StrToFloatDef from Utils.pas; }
-            { plain StrToFloat can throw on comma-decimal locales.        }
-            FileEpoch := StrToFloatDef(Trim(Content), 0.0);
-            { Pascal's Now returns days-since-1899-12-30; Unix epoch starts }
-            { at TDateTime 25569.0. Subtract and convert days to seconds.  }
-            NowEpoch := (Now - 25569.0) * 86400.0;
-            If (FileEpoch > 0.0) And (NowEpoch - FileEpoch < 15.0) Then
+            ThresholdStamp := DateTimeToFileDate(Now - (15.0 / 86400.0));
+            If HeartbeatStamp >= ThresholdStamp Then
                 NewEnabled := True;
         End;
     Except End;

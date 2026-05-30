@@ -41,6 +41,7 @@ REVIEW_SECTIONS: dict[str, tuple[str, dict[str, Any], float]] = {
     "diff":          ("project.get_design_differences", {}, 30.0),
     "messages":      ("project.get_messages",        {},  10.0),
     "board_stats":   ("pcb.get_board_statistics",    {},  10.0),
+    "fab_stats":     ("pcb.get_fab_stats",           {},  20.0),
     # Slow / optional, only run on explicit request.
     "bom":           ("project.get_bom",             {},  60.0),
     "drc":           ("pcb.run_drc",                 {},  90.0),
@@ -58,6 +59,108 @@ DEFAULT_SECTIONS = [
     "diff",
     "messages",
     "board_stats",
+    "fab_stats",
+]
+
+
+# Per-audit severity classification used by design_lint_report and by the
+# dashboard's /api/lint endpoint. Calibrated by real impact, not by how many
+# items the check tends to fire on. Three buckets:
+#
+#   critical -- broken state escaping to fab / will-not-work bug.
+#               The agent should treat ANY violation as a top
+#               finding in its review.
+#   warning  -- high risk of malfunction or fab feedback. Worth
+#               investigating each instance.
+#   info     -- style / curation / library hygiene. Surface if
+#               there's a pattern, but don't gate release on
+#               isolated instances.
+#
+# Module-scope so dashboard.py can import without circular-import or
+# scope-mismatch surprises.
+LINT_SEVERITY: dict[str, str] = {
+    # ---- critical: phantom nets, escaped placeholders, things that
+    # break the board or block fab ----
+    "find_designator_collisions":        "critical",
+    "find_orphan_net_labels":            "critical",
+    "find_orphan_power_objects":         "critical",
+    "find_placeholder_values":           "critical",
+    "find_invalid_regions":              "critical",
+    "find_mirrored_pcb_text":            "critical",
+    "find_components_outside_board_outline": "critical",
+    "find_non_embedded_images":          "critical",
+    # ---- warning: real risk, but recoverable ----
+    "find_floating_ports":               "warning",
+    "find_unmatched_ports":              "warning",
+    "find_signal_vias_without_return":   "warning",
+    "find_via_antennas":                 "warning",
+    "find_bad_connections":              "warning",
+    "find_acute_angles":                 "warning",
+    "find_inconsistent_track_widths":    "warning",
+    "find_pads_near_board_edge":         "warning",
+    "find_removed_pad_shapes":           "warning",
+    "find_pads_center_not_connected":    "warning",
+    "variant_not_fitted":                "warning",
+    "find_unlocked_component_primitives":"warning",
+    "power_port_orientation":            "warning",
+    "tented_via_ratio":                  "warning",
+    "find_single_pin_nets":              "warning",
+    "find_missing_decoupling":           "warning",
+    "find_pin_net_name_mismatches":      "warning",
+    "find_unconnected_ic_pins":          "warning",
+    # ---- info: style / curation ----
+    "component_param_visibility":        "info",
+    "find_off_grid_components":          "info",
+    "find_missing_datasheets":           "info",
+    "find_mpn_inconsistencies":          "info",
+    "find_visible_supplier_pn":          "info",
+    "find_mixed_designator_rotation":    "info",
+}
+
+
+# Ordered list of Pascal-side audits the design-lint sweep runs. Both
+# the MCP design_lint_report tool AND the dashboard /api/lint endpoint
+# iterate this same list -- so adding a new audit means appending here
+# once, instead of fixing two parallel call lists. BOM-side audits (which
+# share a single BOM fetch) are NOT in this list; they run as a separate
+# block in each consumer because the BOM-fetch + dispatch shape differs.
+#
+# Each entry: (section_name, mcp_command). For audits that take params
+# (currently only find_bad_connections), the caller threads them in.
+LINT_AUDIT_LIST: list[tuple[str, str]] = [
+    # --- schematic ---
+    ("component_param_visibility",      "audit.validate_component_params"),
+    ("power_port_orientation",          "audit.power_port_orientation"),
+    ("find_floating_ports",             "audit.find_floating_ports"),
+    ("find_unmatched_ports",            "audit.find_unmatched_ports"),
+    ("find_designator_collisions",      "audit.find_designator_collisions"),
+    ("find_missing_datasheets",         "audit.find_missing_datasheets"),
+    ("find_mpn_inconsistencies",        "audit.find_mpn_inconsistencies"),
+    ("find_single_pin_nets",            "audit.find_single_pin_nets"),
+    ("find_non_embedded_images",        "audit.find_non_embedded_images"),
+    ("find_visible_supplier_pn",        "audit.find_visible_supplier_pn"),
+    ("find_orphan_net_labels",          "audit.find_orphan_net_labels"),
+    ("find_orphan_power_objects",       "audit.find_orphan_power_objects"),
+    ("find_placeholder_values",         "audit.find_placeholder_values"),
+    # --- pcb ---
+    ("find_off_grid_components",        "audit.find_off_grid_components"),
+    ("find_components_outside_board_outline",
+                                        "audit.find_components_outside_board_outline"),
+    ("find_pads_near_board_edge",       "audit.find_pads_near_board_edge"),
+    ("variant_not_fitted",              "audit.variant_not_fitted"),
+    ("tented_via_ratio",                "audit.tented_via_ratio"),
+    ("find_bad_connections",            "audit.find_bad_connections"),
+    ("find_signal_vias_without_return", "audit.find_signal_vias_without_return"),
+    ("find_via_antennas",               "audit.find_via_antennas"),
+    ("find_removed_pad_shapes",         "audit.find_removed_pad_shapes"),
+    ("find_pads_center_not_connected",  "audit.find_pads_center_not_connected"),
+    ("find_invalid_regions",            "audit.find_invalid_regions"),
+    ("find_mixed_designator_rotation",  "audit.find_mixed_designator_rotation"),
+    ("find_unlocked_component_primitives",
+                                        "audit.find_unlocked_component_primitives"),
+    ("find_mirrored_pcb_text",          "audit.find_mirrored_pcb_text"),
+    ("find_acute_angles",               "audit.find_acute_angles"),
+    ("find_inconsistent_track_widths",  "audit.find_inconsistent_track_widths"),
 ]
 
 
@@ -212,7 +315,7 @@ def register_review_tools(mcp):
             sections: Which snapshot sections to include. Defaults to
                 the standard review set (project_info, design_stats,
                 components, nets, design_rules, unrouted, diff,
-                messages, board_stats). Available extras: "bom",
+                messages, board_stats, fab_stats). Available extras: "bom",
                 "drc", "erc", "unconnected_pins", "project_options".
             include_bom: Convenience - adds "bom" to sections if True
                 (default). BOM is the best source of manufacturer
@@ -304,6 +407,147 @@ def register_review_tools(mcp):
         ]
 
         return result
+
+    @mcp.tool()
+    async def design_lint_report(
+        run_drc: bool = False,
+        bad_connection_tolerance_mils: float = 1.0,
+    ) -> dict[str, Any]:
+        """Run all design-lint checks and return a consolidated violation
+        report.
+
+        Sequences the individual ``audit.*`` checks the way a pre-release
+        review would: compile-gate first, then schematic-side rules, then
+        PCB-side rules, then optional ERC/DRC. Each section's raw result
+        is preserved so an agent can drill in; a top-level ``summary``
+        gives counts per check.
+
+        Returns structured JSON instead of dumping to the Messages panel
+        (Altium's panel is fine for human review but the agent needs a
+        machine-readable shape).
+
+        Checks executed:
+          - ``component_param_visibility`` -- per-class parameter
+            visibility (cap voltage, IC MPN, etc).
+          - ``power_port_orientation`` -- ground down / rails up.
+          - ``find_floating_ports`` -- SCH ports not connected to a pin
+            or sheet entry.
+          - ``tented_via_ratio`` -- PCB tented vs untented via surfaces.
+          - ``find_bad_connections`` -- PCB tracks / arcs with dangling
+            endpoints within ``bad_connection_tolerance_mils``.
+          - ``find_signal_vias_without_return`` -- PCB signal vias with
+            no nearby ground/power via for return-current.
+          - ``drc`` (only if ``run_drc=True``) -- Altium's Design Rule
+            Check, full project.
+
+        Args:
+            run_drc: If True, also runs Altium's DRC and includes its
+                violations. Off by default because DRC mutates the .DRC
+                report file and can take ~5-10s on a busy board.
+            bad_connection_tolerance_mils: Coord tolerance for
+                ``find_bad_connections``. Default 1.0; raise to surface
+                only gross misalignments.
+
+        Returns:
+            Dict with:
+              - ``summary``: per-check `{checked, violations}` (best
+                effort -- missing/failed checks listed under ``_failed``)
+              - ``sections``: per-check raw result objects under their
+                section name
+              - ``totals``: overall ``violations`` count across all
+                sections (does NOT include DRC raw count -- DRC items
+                are listed separately because severity / fix-cost
+                differs)
+        """
+        bridge = get_bridge()
+        sections: dict[str, Any] = {}
+        summary: dict[str, dict[str, int]] = {}
+        failed: list[str] = []
+
+        async def _run(name: str, command: str, params: dict[str, Any] | None = None):
+            try:
+                data = await bridge.send_command_async(command, params or {})
+            except Exception as e:
+                failed.append(f"{name}: {e}")
+                sections[name] = {"ok": False, "error": str(e)}
+                return
+            sections[name] = data
+            if isinstance(data, dict):
+                ch = data.get("checked")
+                vi = data.get("violations")
+                if isinstance(ch, int) or isinstance(vi, int):
+                    summary[name] = {
+                        "checked": int(ch) if isinstance(ch, int) else 0,
+                        "violations": int(vi) if isinstance(vi, int) else 0,
+                        "severity": LINT_SEVERITY.get(name, "info"),
+                    }
+
+        # Iterate the shared LINT_AUDIT_LIST -- one source of truth for
+        # the audit ordering, shared with dashboard.py /api/lint.
+        # find_bad_connections is the only audit that needs a parameter
+        # (tolerance_mils); special-case it here.
+        for name, command in LINT_AUDIT_LIST:
+            if name == "find_bad_connections":
+                await _run(name, command,
+                           {"tolerance_mils": str(bad_connection_tolerance_mils)})
+            else:
+                await _run(name, command)
+
+        # Python-side BOM checks (no Pascal handler — run off the
+        # project.get_bom snapshot the bridge already cached). Fetch
+        # the BOM ONCE and feed all three helpers from it. Kept separate
+        # from LINT_AUDIT_LIST because the call shape differs.
+        try:
+            from .audit import (
+                find_unconnected_ic_pins_from_bom,
+                find_pin_net_name_mismatches_from_bom,
+                find_missing_decoupling_from_bom,
+            )
+            bom = await bridge.send_command_async(
+                "project.get_bom", {"limit": "5000"})
+            for name, fn in [
+                ("find_unconnected_ic_pins", find_unconnected_ic_pins_from_bom),
+                ("find_pin_net_name_mismatches",
+                 find_pin_net_name_mismatches_from_bom),
+                ("find_missing_decoupling", find_missing_decoupling_from_bom),
+            ]:
+                data = fn(bom or {})
+                sections[name] = data
+                summary[name] = {
+                    "checked": data.get("checked", 0),
+                    "violations": data.get("violations", 0),
+                    "severity": LINT_SEVERITY.get(name, "info"),
+                }
+        except Exception as e:
+            failed.append(f"bom-side audits: {e}")
+
+        if run_drc:
+            await _run("drc", "pcb.run_drc")
+
+        # Severity-bucketed counts -- the agent should prioritize
+        # critical → warning → info in its review writeup.
+        sev_buckets: dict[str, int] = {"critical": 0, "warning": 0, "info": 0}
+        for s in summary.values():
+            sev = s.get("severity", "info")
+            sev_buckets[sev] = sev_buckets.get(sev, 0) + s.get("violations", 0)
+        totals = {
+            "violations": sum(s.get("violations", 0) for s in summary.values()),
+            "violations_by_severity": sev_buckets,
+            "checks_run": len(summary),
+            "checks_failed": len(failed),
+        }
+        return {
+            "summary": summary,
+            "sections": sections,
+            "totals": totals,
+            "_failed": failed,
+            "_hint": (
+                "Each section is the same shape the individual audit_* "
+                "tool returns. Drill into sections[<name>].items for "
+                "specific violations. Re-run with run_drc=True for an "
+                "ERC/DRC-inclusive sweep."
+            ),
+        }
 
     @mcp.tool()
     async def datasheet_checklist() -> dict[str, Any]:

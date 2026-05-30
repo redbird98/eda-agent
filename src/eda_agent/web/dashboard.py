@@ -62,6 +62,17 @@ _cache: dict[str, tuple[float, Any]] = {}
 # duplicate work. Single-flight collapses them to one fetch per key.
 _keyfetch_locks: dict[str, threading.Lock] = {}
 
+# Last successfully-fetched PCB geometry, kept so a transient fetch failure
+# (timeout / Altium busy mid-operation) serves the last good board instead
+# of blanking the Drawing/Assembly tabs and wrongly claiming Altium is down.
+_last_good_geometry: dict[str, Any] = {}
+
+# Last good project snapshot (focused / nets / bom / messages / ...), kept
+# for the same reason: a transient snapshot fetch failure should serve the
+# last good data instead of blanking every snapshot-backed tab (Nets, BOM,
+# Messages, Project) at once.
+_last_good_snapshot: dict[str, Any] = {}
+
 # NOTE: we deliberately do NOT serialise bridge calls with a process-wide
 # lock. The IPC scheme is per-request-file (request_<id>.json /
 # response_<id>.json), so concurrent callers never collide -- each polls
@@ -84,6 +95,33 @@ def _cache_peek(key: str, ttl_seconds: float) -> Any:
         if hit and (now - hit[0]) < ttl_seconds:
             return hit[1]
     return None
+
+
+def _pcb_geometry_cached(ttl_seconds: float = 30.0):
+    """Memoized `generic.get_pcb_geometry` fetch.
+
+    The geometry payload is the single most expensive call in the
+    dashboard -- on a real board it takes 30-60 s because the Pascal
+    side walks every track / arc / pad / via / region / component /
+    text on the board. The dashboard fires it from THREE endpoints
+    (/api/drawing/pcb, /api/pcb/components, /api/drawing/pcb/layers)
+    so without memoization the assembly-tab load cost is 3x that.
+
+    Single-flight collapses concurrent callers to one IPC round-trip
+    AND a fresh fetch is bounded to once per TTL window. Refresh
+    button explicitly invalidates by calling /api/refresh/pcb.
+    """
+    val = _cached("generic.get_pcb_geometry", ttl_seconds,
+                  lambda: _bridge_call("generic.get_pcb_geometry",
+                                        {}, timeout=120.0))
+    if isinstance(val, dict):
+        _last_good_geometry["v"] = val
+        return val
+    # Fresh fetch failed (timeout / transient IPC hiccup / Altium busy on a
+    # long op so it couldn't answer in time). Serve the last good geometry
+    # so the board stays up instead of flashing an error. Returns None only
+    # if we've NEVER had a successful fetch this session.
+    return _last_good_geometry.get("v")
 
 
 def _cached(key: str, ttl_seconds: float, fn) -> Any:
@@ -114,7 +152,13 @@ def _cached(key: str, ttl_seconds: float, fn) -> Any:
                 return hit[1]
         val = fn()
         with _cache_lock:
-            _cache[key] = (time.time(), val)
+            # Never cache a failure (None). Caching it would pin the error
+            # for the whole TTL window -- e.g. one timed-out geometry fetch
+            # would make the Drawing tab claim "Altium not running" for 30s
+            # even after Altium answers again. Leaving None uncached means
+            # the next caller retries immediately.
+            if val is not None:
+                _cache[key] = (time.time(), val)
         return val
 
 
@@ -651,6 +695,7 @@ def create_app(workspace_dir: Optional[Path] = None) -> Flask:
     # so a standalone dashboard run also keeps the button live.
     heartbeat_stop = threading.Event()
     heartbeat_path = workspace_dir / "dashboard.heartbeat"
+    heartbeat_tmp = workspace_dir / "dashboard.heartbeat.tmp"
     def _heartbeat_loop() -> None:
         # IMPORTANT: write a local-naive epoch (seconds since 1970-01-01
         # measured against the local clock), NOT time.time() which is
@@ -663,7 +708,19 @@ def create_app(workspace_dir: Optional[Path] = None) -> Flask:
         while not heartbeat_stop.is_set():
             try:
                 ts = (_dt.now() - _epoch).total_seconds()
-                heartbeat_path.write_text(str(ts), encoding="utf-8")
+                # Atomic write: stage to a temp file, then os.replace onto
+                # the final name. A plain write_text holds dashboard.heartbeat
+                # open for write every 3s; when the Altium polling loop opens
+                # it for read in that window it hits a Windows sharing
+                # violation, which the script engine surfaces as a modal that
+                # stalls the loop. Writing to a temp + atomic rename means the
+                # reader only ever opens a complete, closed file. If the
+                # rename loses a race with the reader holding the old file,
+                # os.replace raises -> we skip this tick and refresh on the
+                # next one (staleness window is well above 3s).
+                heartbeat_tmp.write_text(str(ts), encoding="utf-8")
+                import os as _os
+                _os.replace(heartbeat_tmp, heartbeat_path)
             except OSError:
                 pass
             heartbeat_stop.wait(3.0)
@@ -757,6 +814,130 @@ def create_app(workspace_dir: Optional[Path] = None) -> Flask:
         with tailer._lock:
             entries = list(tailer.entries)
         return jsonify({"commands": _aggregate(entries)})
+
+    @app.route("/api/lint", methods=["GET", "POST"])
+    def lint() -> Response:
+        """Run the bundled design-lint sweep and return a consolidated report.
+
+        Wraps the same chain ``design_lint_report`` runs from MCP: each
+        ``audit.*`` check fires in sequence, the responses are collected
+        under their section name, plus a per-section ``{checked,
+        violations}`` summary and a top-level total. The dashboard's
+        Lint panel pulls from here for in-browser drill-down without
+        requiring an agent call.
+
+        Query params (all optional):
+          - ``bad_connection_tolerance_mils`` (default 1.0): forwarded
+            to ``audit.find_bad_connections``.
+          - ``run_drc`` (default false): also runs Altium's DRC.
+
+        Returns the same shape as the ``design_lint_report`` MCP tool
+        (summary / sections / totals / _failed).
+        """
+        from flask import request as _req
+        try:
+            tol = float(_req.args.get("bad_connection_tolerance_mils", "1.0"))
+        except (TypeError, ValueError):
+            tol = 1.0
+        run_drc = (_req.args.get("run_drc", "false").lower()
+                   in ("true", "1", "yes"))
+
+        # Shared lint state (lives in tools.review at module scope so
+        # this endpoint and the MCP design_lint_report agree -- single
+        # source of truth for which audits run, in what order, with what
+        # severity).
+        try:
+            from ..tools.review import (
+                LINT_SEVERITY as _LINT_SEVERITY,
+                LINT_AUDIT_LIST as _LINT_AUDIT_LIST,
+            )
+        except Exception:
+            _LINT_SEVERITY = {}
+            _LINT_AUDIT_LIST = []
+
+        sections: dict[str, Any] = {}
+        summary: dict[str, dict[str, int]] = {}
+        failed: list[str] = []
+
+        def _run(name: str, command: str, params: dict[str, Any] | None = None):
+            try:
+                data = _bridge_call(command, params or {}, timeout=30)
+            except Exception as e:
+                failed.append(f"{name}: {e}")
+                sections[name] = {"ok": False, "error": str(e)}
+                return
+            if data is None:
+                failed.append(f"{name}: altium-not-running")
+                sections[name] = {"ok": False, "error": "altium-not-running"}
+                return
+            sections[name] = data
+            if isinstance(data, dict):
+                ch = data.get("checked")
+                vi = data.get("violations")
+                if isinstance(ch, int) or isinstance(vi, int):
+                    summary[name] = {
+                        "checked": int(ch) if isinstance(ch, int) else 0,
+                        "violations": int(vi) if isinstance(vi, int) else 0,
+                        "severity": _LINT_SEVERITY.get(name, "info"),
+                    }
+
+        # Iterate the shared LINT_AUDIT_LIST. find_bad_connections is the
+        # only audit that takes a param; special-case it.
+        for name, command in _LINT_AUDIT_LIST:
+            if name == "find_bad_connections":
+                _run(name, command, {"tolerance_mils": str(tol)})
+            else:
+                _run(name, command)
+
+        # Python-side BOM checks (no Pascal handler). Fetch BOM once,
+        # share across the three helpers. Kept separate from
+        # LINT_AUDIT_LIST because the call shape differs.
+        try:
+            from eda_agent.tools.audit import (
+                find_unconnected_ic_pins_from_bom,
+                find_pin_net_name_mismatches_from_bom,
+                find_missing_decoupling_from_bom,
+            )
+            bom = _bridge_call("project.get_bom",
+                                {"limit": "5000"}, timeout=20)
+            for name, fn in [
+                ("find_unconnected_ic_pins",
+                 find_unconnected_ic_pins_from_bom),
+                ("find_pin_net_name_mismatches",
+                 find_pin_net_name_mismatches_from_bom),
+                ("find_missing_decoupling",
+                 find_missing_decoupling_from_bom),
+            ]:
+                data = fn(bom or {})
+                sections[name] = data
+                summary[name] = {
+                    "checked": data.get("checked", 0),
+                    "violations": data.get("violations", 0),
+                    "severity": _LINT_SEVERITY.get(name, "info"),
+                }
+        except Exception as e:
+            failed.append(f"bom-side audits: {e}")
+
+        if run_drc:
+            _run("drc", "pcb.run_drc")
+
+        sev_buckets: dict[str, int] = {"critical": 0, "warning": 0, "info": 0}
+        for s in summary.values():
+            sev = s.get("severity", "info")
+            sev_buckets[sev] = sev_buckets.get(sev, 0) + s.get("violations", 0)
+        totals = {
+            "violations": sum(s.get("violations", 0)
+                              for s in summary.values()),
+            "violations_by_severity": sev_buckets,
+            "checks_run": len(summary),
+            "checks_failed": len(failed),
+        }
+        return jsonify({
+            "summary": summary,
+            "sections": sections,
+            "totals": totals,
+            "_failed": failed,
+        })
 
     @app.route("/api/health")
     def health() -> Response:
@@ -854,15 +1035,26 @@ def create_app(workspace_dir: Optional[Path] = None) -> Flask:
         the review-summary endpoints read from this single entry.
         """
         def call():
+            # Return None (NOT an {"ok":False} dict) on failure so _cached
+            # doesn't pin the failure for the whole TTL -- otherwise one
+            # flaky fetch blanks Nets/BOM/Messages for 15s. None => the next
+            # caller retries immediately.
             try:
                 data = _bridge_call("project.dashboard_snapshot", {},
                                     timeout=45.0)
-            except Exception as e:
-                return {"ok": False, "reason": str(e)}
-            if data is None:
-                return {"ok": False, "reason": "altium-not-running"}
-            return {"ok": True, "data": data}
-        return _cached("project.dashboard_snapshot", 15.0, call)
+            except Exception:
+                return None
+            return {"ok": True, "data": data} if data is not None else None
+        val = _cached("project.dashboard_snapshot", 15.0, call)
+        if val is not None:
+            _last_good_snapshot["v"] = val
+            return val
+        # Transient failure: serve the last good snapshot so the panels keep
+        # their data. Only report not-running if we've never had one.
+        last = _last_good_snapshot.get("v")
+        if last is not None:
+            return last
+        return {"ok": False, "reason": "altium-not-running"}
 
     def _snapshot_section(section: str) -> dict:
         """Pull one section out of the bundled snapshot, shaped as the
@@ -1248,23 +1440,169 @@ def create_app(workspace_dir: Optional[Path] = None) -> Flask:
         (outside the SVG) so the floating panel would just duplicate
         controls. The open-in-tab path keeps the legend so the standalone
         SVG file remains self-contained and usable on its own.
+
+        Failures (bridge timeout, renderer crash on a degenerate
+        geometry shape, hot-reload import error) are caught and
+        downgraded to a 200 with an explanatory empty-SVG. A 500 here
+        would break both the Drawing tab and the Assembly tab, both of
+        which expect an SVG response by Content-Type.
         """
         from flask import request as _req
-        geom = _bridge_call("generic.get_pcb_geometry", {}, timeout=120.0)
+        try:
+            geom = _pcb_geometry_cached()
+        except Exception as e:
+            return Response(
+                _empty_drawing_svg(f"PCB geometry fetch failed: {e}"),
+                mimetype="image/svg+xml", status=200)
         if geom is None:
-            return Response(_empty_drawing_svg("Altium is not running"),
+            # geom is None ONLY when we've never had a good fetch this
+            # session (transient failures now serve the last good board).
+            # Use the reliable PROCESS check to word the message correctly
+            # instead of crying "Altium not running" on every hiccup.
+            try:
+                from eda_agent.bridge import get_bridge
+                alive = get_bridge().is_altium_running()
+            except Exception:
+                alive = False
+            msg = ("No PCB geometry yet -- open a PcbDoc and refresh"
+                   if alive else "Altium is not running")
+            return Response(_empty_drawing_svg(msg),
                             mimetype="image/svg+xml", status=200)
         if not isinstance(geom, dict):
             return Response(_empty_drawing_svg("no PCB geometry returned"),
                             mimetype="image/svg+xml", status=200)
-        _hot_reload_render_modules()
-        from ..render import render_pcb_svg, PcbRenderOptions
-        no_legend = _req.args.get("nolegend", "").strip() in ("1", "true", "yes")
-        opts = PcbRenderOptions(interactive_legend=not no_legend)
-        svg = render_pcb_svg(geom, opts)
+        try:
+            _hot_reload_render_modules()
+            from ..render import render_pcb_svg, PcbRenderOptions
+            no_legend = _req.args.get("nolegend", "").strip() in (
+                "1", "true", "yes")
+            # ?view=bottom requests the bottom-side render: top-side
+            # layers fade to the back, bottom-side becomes prominent, AND
+            # the SVG is mirrored in X so the rendered board matches a
+            # physically-flipped board. Default "top" keeps the historical
+            # behaviour.
+            view = (_req.args.get("view") or "top").strip().lower()
+            if view not in ("top", "bottom"):
+                view = "top"
+            opts = PcbRenderOptions(
+                interactive_legend=not no_legend,
+                view_side=view,
+            )
+            svg = render_pcb_svg(geom, opts)
+        except Exception as e:
+            import traceback
+            tb = traceback.format_exc()
+            # Log the full trace to the Flask logger so the user can
+            # see it in their MCP server console -- the empty SVG only
+            # carries the short summary.
+            try:
+                app.logger.error("render_pcb_svg failed: %s\n%s", e, tb)
+            except Exception:
+                pass
+            return Response(
+                _empty_drawing_svg(f"PCB render failed: {e}"),
+                mimetype="image/svg+xml", status=200)
         resp = Response(svg, mimetype="image/svg+xml")
         resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
         return resp
+
+    @app.route("/api/pcb/components")
+    def pcb_components_positions() -> Response:
+        """PCB components enriched with position + side data.
+
+        The bundled snapshot's `bom` section comes from the SCH side
+        (project.get_bom) and lacks x/y/side -- that information lives
+        on the placed components on the PCB. The Assembly tab needs
+        the spatial data to sort by side and highlight on the SVG.
+
+        Pulls from the same `generic.get_pcb_geometry` payload the SVG
+        renderer uses (heavy but cached by the bridge / snapshot
+        layer), projecting components to a compact shape:
+        ``{designator, x, y, layer, side, rotation, footprint}``.
+        Coords are in Altium internal mils (same units the SVG uses
+        for ``viewBox``).
+        """
+        geom = _pcb_geometry_cached()
+        if not isinstance(geom, dict):
+            return jsonify({"ok": False, "reason": "no PCB geometry"})
+
+        # Group pads by owning component so we can MEASURE each part's real
+        # footprint extent from copper rather than trusting the (often
+        # wrong/empty) footprint string. The geometry payload tags every
+        # pad with `comp` = its component designator + x/y/x_size/y_size.
+        pads_by_comp: dict[str, list[dict[str, Any]]] = {}
+        for p in (geom.get("pads") or []):
+            if not isinstance(p, dict):
+                continue
+            cn = str(p.get("comp") or "")
+            if cn:
+                pads_by_comp.setdefault(cn, []).append(p)
+
+        def _fp_extent(des: str) -> tuple[float, float, int]:
+            """(length_mils, width_mils, pad_count) from the pad bbox."""
+            pads = pads_by_comp.get(des) or []
+            if not pads:
+                return (0.0, 0.0, 0)
+            xmn = ymn = 1e18
+            xmx = ymx = -1e18
+            for p in pads:
+                px = float(p.get("x") or 0)
+                py = float(p.get("y") or 0)
+                hw = float(p.get("x_size") or 0) / 2.0
+                hh = float(p.get("y_size") or 0) / 2.0
+                xmn = min(xmn, px - hw); xmx = max(xmx, px + hw)
+                ymn = min(ymn, py - hh); ymx = max(ymx, py + hh)
+            w = xmx - xmn
+            h = ymx - ymn
+            return (max(w, h), min(w, h), len(pads))
+
+        # Imperial 2-terminal chip case codes by overall pad-span length
+        # (mils). Upper bound per code; a 2-pad part's measured span lands
+        # in exactly one bucket. Tuned to typical land patterns (pads
+        # extend a little past the body, so spans run slightly long).
+        _CASE_BY_LEN = [
+            (42, "0201"), (62, "0402"), (84, "0603"), (114, "0805"),
+            (165, "1206"), (205, "1210"), (265, "1812"), (1e9, "2512"),
+        ]
+
+        def _case_code(length_mils: float, pad_count: int) -> str:
+            if pad_count != 2 or length_mils <= 0:
+                return ""
+            for lim, code in _CASE_BY_LEN:
+                if length_mils <= lim:
+                    return code
+            return ""
+
+        out: list[dict[str, Any]] = []
+        for c in (geom.get("components") or []):
+            if not isinstance(c, dict):
+                continue
+            des = c.get("des") or c.get("designator")
+            if not des:
+                continue
+            layer = str(c.get("layer") or "")
+            # Components on bottom mounting belong to the "Bottom" side.
+            # Altium's `BottomLayer` covers the placed-mount side; anything
+            # else (TopLayer or no layer) defaults to "Top".
+            side = "Bottom" if layer.lower() == "bottomlayer" else "Top"
+            length_mils, width_mils, pad_count = _fp_extent(str(des))
+            out.append({
+                "designator": str(des),
+                "x": float(c.get("x") or 0),
+                "y": float(c.get("y") or 0),
+                "layer": layer,
+                "side": side,
+                "rotation": float(c.get("rotation") or 0),
+                "footprint": str(c.get("footprint") or ""),
+                "comment": str(c.get("comment") or c.get("value") or ""),
+                # Measured-from-copper extent + derived chip case code (2-pad
+                # passives only); empty case_code for ICs/multi-pad parts.
+                "fp_length_mils": round(length_mils, 1),
+                "fp_width_mils": round(width_mils, 1),
+                "case_code": _case_code(length_mils, pad_count),
+            })
+        return jsonify({"ok": True, "data": {"components": out,
+                                              "count": len(out)}})
 
     @app.route("/api/drawing/pcb/layers")
     def drawing_pcb_layers() -> Response:
@@ -1275,7 +1613,7 @@ def create_app(workspace_dir: Optional[Path] = None) -> Flask:
         designators pseudo-layer. The dashboard sidebar uses this to
         build its checkbox list without re-rendering an entire PCB SVG.
         """
-        geom = _bridge_call("generic.get_pcb_geometry", {}, timeout=120.0)
+        geom = _pcb_geometry_cached()
         if not isinstance(geom, dict):
             return jsonify({"ok": False, "reason": "no PCB geometry"})
         layers: set[str] = set()
@@ -1302,13 +1640,19 @@ def create_app(workspace_dir: Optional[Path] = None) -> Flask:
     def force_refresh(topic: str) -> Response:
         """Invalidate cached entries for one topic so the next GET re-fetches.
 
-        The project / components / nets / messages tabs all read from the
-        single bundled `project.dashboard_snapshot` cache entry, so every
-        topic drops that.
+        Project / components / nets / messages all read from one bundled
+        `project.dashboard_snapshot` cache entry, so they share an
+        invalidation. ``pcb`` invalidates the PCB geometry cache used by
+        the Drawing tab, the Assembly tab, and the layer sidebar -- one
+        fetch costs 30-60 s on a real board so the explicit refresh
+        button gives the user control.
         """
-        if topic not in ("project", "components", "nets", "messages"):
+        if topic not in ("project", "components", "nets", "messages", "pcb"):
             return jsonify({"ok": False, "reason": "unknown topic"}), 400
-        drop_prefixes = ("project.dashboard_snapshot",)
+        if topic == "pcb":
+            drop_prefixes = ("generic.get_pcb_geometry",)
+        else:
+            drop_prefixes = ("project.dashboard_snapshot",)
         with _cache_lock:
             for k in list(_cache.keys()):
                 if any(k.startswith(p) for p in drop_prefixes):

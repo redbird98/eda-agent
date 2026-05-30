@@ -1237,9 +1237,9 @@ Begin
                 End;
                 Try SchDoc.GraphicallyInvalidate; Except End;
                 { Pan/zoom the editor viewport to the selected component.   }
-                { Sch:Zoom with Action=Selected is the documented pattern   }
-                { in the reference scripts; if that variant isn't accepted, }
-                { Action=All zooms to fit, which is still better than just  }
+                { Sch:Zoom with Action=Selected is the documented pattern;  }
+                { if that variant isn't accepted, Action=All zooms to fit,  }
+                { which is still better than just                           }
                 { highlighting an off-screen part.                          }
                 Try
                     ResetParameters;

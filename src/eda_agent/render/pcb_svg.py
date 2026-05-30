@@ -17,38 +17,140 @@ from __future__ import annotations
 
 import html
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Iterable
 
 
-# Render z-order (bottom-up). Each entry maps an Altium layer name (as
-# returned by GetLayerString) to a render bucket. Anything else falls
-# through into an "other" group.
-_LAYER_ORDER = [
-    "KeepOutLayer",
+def _tcolor_to_hex(value: Any) -> str | None:
+    """Convert an Altium TColor integer (BGR-packed, ``$00BBGGRR``) to an
+    SVG ``#RRGGBB`` string. Returns None for non-integer / missing input so
+    callers can fall back to the default palette.
+    """
+    try:
+        v = int(value) & 0xFFFFFF
+    except (TypeError, ValueError):
+        return None
+    r = v & 0xFF
+    g = (v >> 8) & 0xFF
+    b = (v >> 16) & 0xFF
+    return f"#{r:02x}{g:02x}{b:02x}"
+
+
+# Render z-order, bottom-up (= painter's algorithm: first drawn = deepest).
+# When viewing the board from the bottom (view_side='bottom') this list is
+# reversed so the bottom layers become visually dominant.
+#
+# Key principle: AUXILIARY layers (mask / paste / assembly / mech) go
+# UNDER copper, never over it. The auxiliary layers carry filled regions
+# that would obscure copper if drawn on top. Real Altium renders mask
+# semi-transparent OVER copper, but the geometry we receive is the
+# mask OPENINGS (i.e., where mask is removed), so colouring them on top
+# is the inverse of the truth and just hides the copper.
+_LAYER_ORDER_TOPVIEW = [
+    # Deepest: bottom-side stuff, faded by the view-side multiplier.
+    "BottomAssembly",
+    "BottomOverlay",
+    "BottomPaste",
     "BottomSolder",
     "BottomLayer",
-    "TopLayer",
+    # Internal copper / planes (also faded).
+    "InternalPlane1", "InternalPlane2", "InternalPlane3", "InternalPlane4",
+    "InternalPlane5", "InternalPlane6", "InternalPlane7", "InternalPlane8",
+    "InternalPlane9", "InternalPlane10", "InternalPlane11", "InternalPlane12",
+    "InternalPlane13", "InternalPlane14", "InternalPlane15", "InternalPlane16",
+    "MidLayer1", "MidLayer2", "MidLayer3", "MidLayer4", "MidLayer5",
+    "MidLayer6", "MidLayer7", "MidLayer8", "MidLayer9", "MidLayer10",
+    "MidLayer11", "MidLayer12", "MidLayer13", "MidLayer14", "MidLayer15",
+    "MidLayer16", "MidLayer17", "MidLayer18", "MidLayer19", "MidLayer20",
+    "MidLayer21", "MidLayer22", "MidLayer23", "MidLayer24", "MidLayer25",
+    "MidLayer26", "MidLayer27", "MidLayer28", "MidLayer29", "MidLayer30",
+    # Mechanical drawing layers UNDER copper (subtle background reference).
+    "Mechanical1", "Mechanical2", "Mechanical3", "Mechanical4",
+    "Mechanical5", "Mechanical6", "Mechanical7", "Mechanical8",
+    "Mechanical9", "Mechanical10", "Mechanical11", "Mechanical12",
+    "Mechanical13", "Mechanical14", "Mechanical15", "Mechanical16",
+    "KeepOutLayer",
+    # Top-side auxiliary layers UNDER copper (faint references).
+    "TopAssembly",
     "TopSolder",
-    "BottomOverlay",
+    "TopPaste",
+    # Multi-layer pads sit just below top copper so their copper shows
+    # against the colour of pads belonging to TopLayer-only nets.
+    "MultiLayer",
+    # SOLID top copper -- the star of the show.
+    "TopLayer",
+    # Silkscreen above copper (subtle so copper colour reads).
     "TopOverlay",
 ]
 
-# Default per-layer fill / stroke. Tuned for a dark review background;
-# overridable through SchRenderOptions.layer_colors. PCB convention uses
-# red for top, blue for bottom, yellow for overlays.
+# Altium's "Maximize PCB Editor" theme native palette. Bright primary
+# colours, the same scheme the user sees in Altium itself so the dashboard
+# render matches the bench view. Overridable via PcbRenderOptions.layer_colors.
 _DEFAULT_COLORS: dict[str, str] = {
-    "TopLayer":      "#c0392b",
-    "BottomLayer":   "#2980b9",
-    "TopOverlay":    "#f1c40f",
-    "BottomOverlay": "#f39c12",
-    "TopSolder":     "#27ae60",
-    "BottomSolder":  "#16a085",
-    "KeepOutLayer":  "#8e44ad",
-    "MultiLayer":    "#bdc3c7",
-    "Outline":       "#ecf0f1",
-    "ViaPlated":     "#bdc3c7",
-    "Drill":         "#000000",
+    "TopLayer":         "#FF0000",  # red
+    "BottomLayer":      "#0000FF",  # blue
+    "TopOverlay":       "#FFFF00",  # yellow silkscreen
+    "BottomOverlay":    "#FFFF00",
+    "TopPaste":         "#A0A0A0",  # neutral grey stencil
+    "BottomPaste":      "#606060",
+    "TopSolder":        "#A020F0",  # violet mask
+    "BottomSolder":     "#8000B0",
+    "KeepOutLayer":     "#FF00FF",  # magenta routing keepout
+    "MultiLayer":       "#A0A0A0",  # through-hole pad copper
+    "DrillGuide":       "#3030FF",
+    "DrillDrawing":     "#000000",
+    "TopAssembly":      "#00C000",  # green assembly drawing
+    "BottomAssembly":   "#A00000",
+    # Internal copper layers: brown / brass family so they stay distinct
+    # from top (red) and bottom (blue) when faded.
+    "MidLayer1":        "#FF8000",
+    "MidLayer2":        "#FFA050",
+    "MidLayer3":        "#A0A000",
+    "MidLayer4":        "#A0FF00",
+    "InternalPlane1":   "#FF80A0",
+    "InternalPlane2":   "#A080FF",
+    "InternalPlane3":   "#80A0FF",
+    "InternalPlane4":   "#80FFA0",
+    # Mechanical layers: cyan / teal family.
+    "Mechanical1":      "#00FFFF",
+    "Mechanical2":      "#00C0C0",
+    "Mechanical3":      "#008080",
+    "Mechanical13":     "#80FFFF",
+    "Mechanical15":     "#60E0E0",
+    # Renderer-internal pseudo-layers.
+    "Outline":          "#FFFFFF",
+    "ViaPlated":        "#A0A0A0",
+    "Drill":            "#000000",
+}
+
+# Subset of layers that get rendered at reduced opacity when they're "the
+# other side" of the board the user is looking at. Bottom-side layers
+# fade when viewing top, and vice-versa via the view_side reverse.
+_BOTTOM_SIDE_LAYERS = {
+    "BottomLayer", "BottomPaste", "BottomSolder", "BottomOverlay",
+    "BottomAssembly",
+}
+_TOP_SIDE_LAYERS = {
+    "TopLayer", "TopPaste", "TopSolder", "TopOverlay", "TopAssembly",
+}
+# Internal copper layers always fade -- they live inside the board.
+_INNER_LAYERS_PREFIX = ("InternalPlane", "MidLayer")
+
+# Per-layer base opacity. Altium's default 2D view draws layers OPAQUE in
+# stack order (the upper layer wins per-pixel) -- so copper, silk, mech and
+# keepout all render at full opacity here. The only see-through layers are
+# the mask / paste / assembly overlays: they're meant to read AS overlays
+# on top of copper (mask openings, paste apertures, courtyards), so we give
+# them a moderate alpha. Anything not listed defaults to 1.0 (opaque),
+# matching Altium. Tune via PcbRenderOptions if a design needs different
+# emphasis.
+_LAYER_BASE_OPACITY: dict[str, float] = {
+    "TopSolder":         0.45,
+    "BottomSolder":      0.45,
+    "TopPaste":          0.45,
+    "BottomPaste":       0.45,
+    "TopAssembly":       0.55,
+    "BottomAssembly":    0.55,
 }
 
 
@@ -58,15 +160,35 @@ class PcbRenderOptions:
     margin_mils: int = 250
     flip_y: bool = True
     layers: list[str] | None = None        # None = render all known layers
-    background: str = "#1f2937"            # board background fill
+    background: str = "#0a0a0a"            # near-black to match Altium dark scheme
     outline_stroke_mils: float = 8.0
     layer_colors: dict[str, str] = field(default_factory=dict)
-    fade_others_opacity: float = 0.35      # objects on un-z-ordered layers
+    fade_others_opacity: float = 0.35      # unknown / mech layers when faded
     show_drills: bool = True
     show_texts: bool = True
     show_designators: bool = True          # render per-component designator labels
+    show_hidden_text: bool = False         # honour Text.IsHidden / Comp.NameOn
     pad_label_min_mils: float = 30.0       # below this size pad numbers are hidden
     interactive_legend: bool = True        # embed a click-to-toggle layer legend
+    # 'top' (default) draws bottom-side faded behind, top-side bright on top.
+    # 'bottom' reverses: top-side fades behind, bottom-side bright on top
+    # AND the X coordinate gets mirrored so the rendered board matches the
+    # physical board when flipped on the bench.
+    view_side: str = "top"
+    # Opacity for "the other side" so the operator can still see them but
+    # they don't compete with the active side. 0.0 = invisible. Altium's
+    # own top view shows the far side faintly through the board, so keep
+    # this fairly high for a faithful look.
+    other_side_opacity: float = 0.45
+    # Opacity for internal copper layers (always reduced -- they're inside
+    # the board, not visible from either face).
+    inner_layer_opacity: float = 0.50
+    # Set of layer names Altium currently DISPLAYS (from the geometry
+    # payload's "layers" map). Layers not in this set are still rendered
+    # but start hidden (display:none) so the default view matches Altium's
+    # displayed-layer set while the legend can still toggle them on. None
+    # = no visibility info available (render everything visible).
+    altium_visible: set[str] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -78,16 +200,64 @@ def render_pcb_svg(geometry: dict[str, Any],
                    options: PcbRenderOptions | None = None) -> str:
     """Render the PCB geometry payload to a self-contained SVG string."""
     opt = options or PcbRenderOptions()
+
+    # Pull Altium's actual per-layer colours + visibility out of the
+    # geometry payload (emitted by Gen_GetPcbGeometry) so the render
+    # reproduces exactly what the user sees on the bench. Real colours win
+    # over the built-in default palette; an explicit caller-supplied
+    # layer_colors override still wins over Altium (so callers can force a
+    # colour). Visibility seeds opt.altium_visible so hidden layers start
+    # collapsed but stay legend-toggleable.
+    layers_meta = geometry.get("layers")
+    if isinstance(layers_meta, dict) and layers_meta:
+        altium_colors: dict[str, str] = {}
+        visible: set[str] = set()
+        for name, meta in layers_meta.items():
+            if not isinstance(meta, dict):
+                continue
+            hexc = _tcolor_to_hex(meta.get("color"))
+            if hexc:
+                altium_colors[name] = hexc
+            if meta.get("visible"):
+                visible.add(name)
+        opt = replace(
+            opt,
+            layer_colors={**altium_colors, **opt.layer_colors},
+            # Non-empty set => use Altium's displayed-layer set. Empty =>
+            # treat as "no info" (None) so we don't hide every layer.
+            altium_visible=(visible or None),
+        )
+
     pieces: list[str] = []
     pieces.extend(_compute_viewbox_and_root(geometry, opt))
     pieces.append(_embedded_style(opt))
     pieces.append(_render_background(geometry, opt))
 
+    # Bottom-view: mirror X around the board's centre so the rendered
+    # board matches the physical board when flipped on the bench. The
+    # viewBox stays the same; we wrap the rest of the SVG in a scaleX(-1)
+    # group translated by the X span.
+    bottom_view = (opt.view_side or "top").lower() == "bottom"
+    if bottom_view:
+        bbox = geometry.get("bbox") or {}
+        # Mirror around the board centre cx=(x1+x2)/2: translate(2*cx)
+        # scale(-1,1) = translate(x1+x2) scale(-1,1). The bbox uses x1/x2
+        # (same keys as the viewBox); reading x_min/x_max here was the bug
+        # that flung the flipped board off-screen.
+        x1 = float(bbox.get("x1", 0) or 0)
+        x2 = float(bbox.get("x2", 0) or 0)
+        pieces.append(
+            f'<g transform="translate({x1 + x2} 0) scale(-1 1)">'
+        )
+
     # Bucket geometry by layer so we can z-order.
     by_layer = _bucket_by_layer(geometry, opt)
 
-    layer_list = list(_LAYER_ORDER)
-    # Append any unknown layers we saw (so we still draw them).
+    layer_list = list(_LAYER_ORDER_TOPVIEW)
+    if bottom_view:
+        layer_list = list(reversed(layer_list))
+    # Append any unknown layers we saw (so we still draw them, but at the
+    # very top -- they're usually mech / overlay extras).
     for lay in by_layer.keys():
         if lay not in layer_list and lay != "_outline":
             layer_list.append(lay)
@@ -112,6 +282,8 @@ def render_pcb_svg(geometry: dict[str, Any],
     if opt.show_drills:
         pieces.append(_render_drills(geometry, opt))
 
+    if bottom_view:
+        pieces.append("</g>")  # close X-mirror wrapper
     if opt.flip_y:
         pieces.append("</g>")  # close outer Y-flip wrapper
 
@@ -170,7 +342,9 @@ def _color_for(layer: str, opt: PcbRenderOptions) -> str:
 
 def _embedded_style(opt: PcbRenderOptions) -> str:
     rules = [
-        "  .layer { mix-blend-mode: screen; }",
+        # Normal alpha compositing -- Altium's default 2D view draws layers
+        # opaque in stack order (no additive/screen blend). Screen blend was
+        # washing solid red copper out to pink.
         f"  .layer-other {{ opacity: {opt.fade_others_opacity}; }}",
         "  .outline { fill: none; }",
         "  .drill { fill: #000; }",
@@ -236,12 +410,48 @@ def _bucket_by_layer(geometry: dict[str, Any],
 # ---------------------------------------------------------------------------
 
 
+def _layer_opacity(layer: str, opt: PcbRenderOptions) -> float:
+    """Per-layer opacity. Combines three factors multiplicatively:
+        1. Base opacity for auxiliary layers (mask / paste / mech /
+           assembly / silk) so they stay subtle vs. copper.
+        2. View-side fade: the side the user is looking AT renders at
+           full side-opacity, the other side at other_side_opacity.
+        3. Internal copper always fades.
+    """
+    base = _LAYER_BASE_OPACITY.get(layer, 1.0)
+    if layer.startswith(_INNER_LAYERS_PREFIX):
+        return base * opt.inner_layer_opacity
+    side = (opt.view_side or "top").lower()
+    if side == "bottom":
+        if layer in _TOP_SIDE_LAYERS:
+            return base * opt.other_side_opacity
+        if layer in _BOTTOM_SIDE_LAYERS:
+            return base
+    else:  # top view (default)
+        if layer in _BOTTOM_SIDE_LAYERS:
+            return base * opt.other_side_opacity
+        if layer in _TOP_SIDE_LAYERS:
+            return base
+    return base
+
+
 def _render_layer(layer: str, bucket: dict[str, list[dict[str, Any]]],
                   opt: PcbRenderOptions) -> str:
     color = _color_for(layer, opt)
-    is_known = layer in _LAYER_ORDER or layer == "MultiLayer"
+    is_known = (layer in _LAYER_ORDER_TOPVIEW or layer == "MultiLayer")
     klass = "layer" if is_known else "layer layer-other"
-    out: list[str] = [f'<g class="{klass}" data-layer="{_xml(layer)}">']
+    opacity = _layer_opacity(layer, opt)
+    op_attr = f' opacity="{opacity:.2f}"' if opacity < 1.0 else ""
+    # Start hidden if Altium isn't currently displaying this layer, so the
+    # default view matches the bench. The legend checkbox can toggle it
+    # back on (it flips this same group's display).
+    hidden = (opt.altium_visible is not None
+              and layer in _LAYER_ORDER_TOPVIEW
+              and layer not in opt.altium_visible)
+    style_attr = ' style="display:none"' if hidden else ""
+    out: list[str] = [
+        f'<g class="{klass}" data-layer="{_xml(layer)}"{op_attr}{style_attr}>'
+    ]
 
     # Regions go first so tracks / pads / arcs paint over them.
     for r in bucket.get("regions", []):
@@ -251,8 +461,7 @@ def _render_layer(layer: str, bucket: dict[str, list[dict[str, Any]]],
         net = r.get("net", "")
         out.append(
             f'<polygon class="region" data-net="{_xml(net)}" '
-            f'points="{pts}" fill="{color}" stroke="none" '
-            f'fill-opacity="0.85"/>'
+            f'points="{pts}" fill="{color}" stroke="none"/>'
         )
 
     for t in bucket.get("tracks", []):
@@ -322,7 +531,7 @@ def _render_pad(p: dict[str, Any], color: str, opt: PcbRenderOptions) -> str:
             f'width="{xs}" height="{ys}" fill="{color}"/>'
         )
 
-    comp = pad.get("comp", "") or ""
+    comp = p.get("comp", "") or ""
     # data-designator on the pad <g> lets the dashboard's existing
     # click handler open the owning component's drawer on a PCB click.
     # Free pads (fiducials, mounting holes) have comp="" and stay
@@ -362,6 +571,10 @@ def _render_via(v: dict[str, Any], opt: PcbRenderOptions) -> str:
 def _render_text(tx: dict[str, Any], color: str, opt: PcbRenderOptions) -> str:
     text = tx.get("text", "") or ""
     if not text:
+        return ""
+    # Skip text that's hidden in the source design (IsHidden=True on
+    # IPCB_Text). The Pascal emitter sends "hidden": true on those.
+    if not opt.show_hidden_text and tx.get("hidden"):
         return ""
     x = float(tx.get("x", 0))
     y = float(tx.get("y", 0))
@@ -447,6 +660,14 @@ def _render_designators(components: Iterable[dict[str, Any]],
         des = c.get("des", "") or ""
         if not des:
             continue
+        # Respect Component.NameOn -- if the designator is hidden in the
+        # source design, don't paint it here either. The Pascal emitter
+        # sends "name_on": false on components where NameOn = False.
+        # Default to True when the field is missing so an old geometry
+        # payload still shows designators.
+        name_on = c.get("name_on")
+        if name_on is False and not opt.show_hidden_text:
+            continue
         x = float(c.get("x", 0))
         y = float(c.get("y", 0))
         rot = float(c.get("rotation", 0) or 0)
@@ -459,17 +680,28 @@ def _render_designators(components: Iterable[dict[str, Any]],
             f'fill="{color}" font-family="JetBrains Mono, monospace" '
             f'font-weight="700" pointer-events="none"'
         )
+        # Keep the label readable: fold the component rotation into
+        # (-90, 90] so a part placed at 180 deg doesn't render its
+        # designator upside-down. Altium keeps designators upright too.
+        rr = ((rot + 90.0) % 180.0) - 90.0
+        bottom = (opt.view_side or "top").lower() == "bottom"
         if opt.flip_y:
+            # scale(1,-1) cancels the outer Y-flip; in bottom view
+            # scale(-1,-1) ALSO cancels the X-mirror wrapper so labels read
+            # forwards instead of mirrored/upside-down.
+            sx = -1 if bottom else 1
+            disp_rot = rr if bottom else -rr
             out.append(
                 f'<g data-designator="{_xml(des)}" '
-                f'transform="translate({x},{y}) scale(1,-1) rotate({-rot})">'
+                f'transform="translate({x},{y}) scale({sx},-1) '
+                f'rotate({disp_rot})">'
                 f'<text {attrs} x="0" y="0">{_xml(des)}</text></g>'
             )
         else:
             out.append(
                 f'<g data-designator="{_xml(des)}">'
                 f'<text {attrs} x="{x}" y="{y}" '
-                f'transform="rotate({rot} {x} {y})">{_xml(des)}</text></g>'
+                f'transform="rotate({rr} {x} {y})">{_xml(des)}</text></g>'
             )
     out.append("</g>")
     return "".join(out)
@@ -618,7 +850,7 @@ def _render_layer_legend(geometry: dict[str, Any],
             seen.add(extra)
     # Order by the canonical layer z-order so the legend reads sensibly.
     ordered: list[str] = []
-    for lay in (_LAYER_ORDER + ["MultiLayer", "Outline", "Designators"]):
+    for lay in (_LAYER_ORDER_TOPVIEW + ["MultiLayer", "Outline", "Designators"]):
         if lay in seen:
             ordered.append(lay)
     for lay in layers:
@@ -631,11 +863,22 @@ def _render_layer_legend(geometry: dict[str, Any],
     width = 2600
     height = max(160, 60 + len(ordered) * 80)
 
+    def _checked(lay: str) -> str:
+        # Mirror Altium's displayed-layer set: layers Altium hides start
+        # unchecked (and their group starts display:none), so the legend
+        # and the canvas agree on first paint. Pseudo-layers (Outline /
+        # Designators / MultiLayer) and unknown layers default checked.
+        if (opt.altium_visible is not None
+                and lay in _LAYER_ORDER_TOPVIEW
+                and lay not in opt.altium_visible):
+            return ""
+        return " checked"
+
     rows = "".join(
         f'<label style="display:block; padding:2px 4px; cursor:pointer; '
         f'color:#fff; font:600 22px monospace;">'
-        f'<input type="checkbox" class="layer-cb" data-layer="{_xml(lay)}" '
-        f'checked style="margin-right:6px;">'
+        f'<input type="checkbox" class="layer-cb" data-layer="{_xml(lay)}"'
+        f'{_checked(lay)} style="margin-right:6px;">'
         f'<span style="display:inline-block; width:14px; height:14px; '
         f'background:{_color_for(lay, opt)}; '
         f'vertical-align:-2px; margin-right:6px;"></span>'

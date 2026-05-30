@@ -78,15 +78,115 @@ def register_pcb_tools(mcp):
         return result
 
     @mcp.tool()
+    async def pcb_set_rules_enabled(
+        names: list[str],
+        enabled: bool,
+        match: str = "name",
+    ) -> dict[str, Any]:
+        """Bulk-toggle the DRC-enabled flag on design rules by name.
+
+        Useful for focused review passes: disable a noisy class of rules
+        to surface the violations that matter (e.g. silence Silk-to-Silk
+        while you sweep Clearance), or re-enable a set before a release
+        sweep. Matches case-insensitively; supports trailing-* wildcards
+        so a rule family can be targeted without listing every name
+        (``"DiffPair_*"`` hits every rule whose name starts with that).
+
+        Note that this flips ``DRCEnabled`` (whether DRC actually checks the rule),
+        not ``Enabled`` (whether the rule exists in the rule list); the
+        former is the right knob for review iteration.
+
+        Args:
+            names: Rule names to toggle. With ``match="name"`` (default)
+                each entry is matched case-insensitively against
+                ``Rule.Name``; a trailing ``*`` wildcards the suffix
+                (``"Clearance*"``). With ``match="kind"`` each entry is
+                a TRuleKind ordinal as a string (look up via
+                ``pcb_get_design_rules``).
+            enabled: New value for ``DRCEnabled``. True turns the rule
+                ON in DRC; False disables it for this run.
+            match: ``"name"`` (default) or ``"kind"``.
+
+        Returns:
+            Dict with:
+              - ``matched``: rules that matched any pattern
+              - ``updated``: how many actually changed value
+              - ``enabled``: the requested target value (for confirmation)
+              - ``items``: per-matched ``{name, kind, prev_enabled, new_enabled}``
+        """
+        if not names:
+            return {"ok": False, "reason": "names list is empty"}
+        bridge = get_bridge()
+        return await bridge.send_command_async(
+            "pcb.set_rules_enabled",
+            {
+                "names": "|".join(str(n) for n in names),
+                "enabled": "true" if enabled else "false",
+                "match": match,
+            },
+        )
+
+    @mcp.tool()
+    async def pcb_get_clearance_violations(
+        net: str = "",
+    ) -> dict[str, Any]:
+        """Run DRC and return clearance / other violations, optionally
+        filtered to one net.
+
+        Sibling of ``pcb_run_drc`` -- same underlying DRC trigger, but
+        accepts a ``net`` filter so the agent can drill into a single
+        net's violations without scrolling through the whole board's
+        DRC report. Useful when investigating a specific high-speed
+        signal or power rail.
+
+        Filter is substring-matched against the violation's Description
+        and Name, so it catches both "Net USB_DP and Net GND" clearance
+        warnings and net-named via antennas.
+
+        Returns the same enriched payload as ``pcb_run_drc`` -- each
+        violation carries ``x_mils`` / ``y_mils`` / ``layer`` for the
+        agent to navigate to, plus ``primitive1`` / ``primitive2``
+        objects with ``{detail, type, net, layer, x_mils, y_mils}``.
+
+        Args:
+            net: Net name to filter by (substring match). Empty string
+                returns ALL violations (equivalent to ``pcb_run_drc``).
+
+        Returns:
+            Dict with ``{violation_count, violations}``. Capped at 200.
+        """
+        bridge = get_bridge()
+        params = {"net": net} if net else {}
+        return await bridge.send_command_async(
+            "pcb.get_clearance_violations", params, timeout=90.0)
+
+    @mcp.tool()
     async def pcb_run_drc() -> dict[str, Any]:
         """Run Design Rule Check (DRC) on the active PCB.
 
-        Executes the DRC and returns the violation count and details.
-        Up to 100 violations are returned with descriptions.
+        Executes the DRC and returns up to 100 violations with full
+        location data, so the agent can jump straight to the offending
+        spot instead of guessing from the description.
+
+        Per-violation shape:
+          - ``name``, ``description``, ``rule``: text from Altium
+          - ``x_mils`` / ``y_mils`` / ``layer``: violation's bbox
+            centre (the "go here" hint)
+          - ``primitive1`` / ``primitive2``: objects with
+            ``{detail, type, net, layer, x_mils, y_mils}``. ``type``
+            is the object kind (Track / Pad / Via / Region / Comp);
+            ``net`` is the net name. Two primitives are involved in
+            most rule kinds (Clearance, Short Circuit); a single-
+            primitive violation (e.g. AcuteAngle) leaves
+            ``primitive2`` with empty fields.
+
+        Use ``primitive1.net`` and ``primitive2.net`` to spot the
+        nets in conflict; use ``x_mils`` / ``y_mils`` to drive
+        ``cross_probe`` or the dashboard's Drawing tab to the site.
 
         Returns:
-            Dictionary with "violation_count" and "violations" array
-            (each with description and name)
+            Dict with ``violation_count`` (full count even if > 100)
+            and ``violations`` array (first 100).
         """
         bridge = get_bridge()
         result = await bridge.send_command_async("pcb.run_drc", {})
@@ -215,6 +315,701 @@ def register_pcb_tools(mcp):
             {"moves": "|".join(ops)},
         )
         return result
+
+    @mcp.tool()
+    async def pcb_copy_component_placement(
+        mapping: dict[str, str],
+        include_designator: bool = True,
+        include_comment: bool = True,
+    ) -> dict[str, Any]:
+        """Clone placement from source components onto destination components.
+
+        For each ``src -> dst`` pair, copy the source's PCB placement
+        (layer, X, Y, rotation) onto the destination. With the optional
+        flags also clone the designator-text placement (X/Y offset from
+        component centre, rotation, size, width, layer, on/off) and the
+        comment-text placement.
+
+        Real-world use: a board with N identical channels (filter / amp /
+        switching stages). Lay out channel 1 once, then call this tool
+        with a mapping like ``{"R1": "R11", "C1": "C11", "U1": "U2"}``
+        and channel 2 picks up channel 1's layout instantly. Saves the
+        manual click-and-drag-drag-drag of replicating identical layouts.
+
+        Mapping-driven rather than relying on sort-order matching of
+        selections -- the agent-callable equivalent of a manual replicate.
+
+        Args:
+            mapping: ``{source_designator: dest_designator}``. Each
+                source must already be placed somewhere; each dest gets
+                overwritten with the source's placement.
+            include_designator: Also copy designator-text placement
+                (offset, rotation, size, layer, visibility). Default
+                True.
+            include_comment: Also copy comment-text placement. Default
+                True.
+
+        Returns:
+            Dict with:
+              - ``applied``: pairs that succeeded
+              - ``failed``: pairs that failed (src/dst missing or apply
+                exception)
+              - ``items``: per-pair ``{src, dst, ok, error}``
+        """
+        if not mapping:
+            return {"applied": 0, "failed": 0, "items": [],
+                    "error": "mapping is empty"}
+        pairs = "|".join(f"{s}={d}" for s, d in mapping.items())
+        bridge = get_bridge()
+        return await bridge.send_command_async(
+            "pcb.copy_component_placement",
+            {
+                "mapping": pairs,
+                "include_designator": "true" if include_designator else "false",
+                "include_comment": "true" if include_comment else "false",
+            },
+        )
+
+    @mcp.tool()
+    async def pcb_place_stitching_vias(
+        net: str,
+        x1_mils: int,
+        y1_mils: int,
+        x2_mils: int,
+        y2_mils: int,
+        spacing_mils: int = 50,
+        via_size_mils: int = 30,
+        via_hole_mils: int = 14,
+        clearance_mils: int = 10,
+        dry_run: bool = True,
+    ) -> dict[str, Any]:
+        """Place a grid of stitching vias on a named net within a rectangle.
+
+        Standard RF / EMC tool: place GND stitch vias around high-speed
+        traces so the return current has a low-inductance path between
+        reference planes. Also used near connectors / clock generators
+        / EMI-sensitive areas.
+
+        Algorithm: walk a regular grid inside the rectangle; for each
+        gridpoint, spatial-iterate within ``via_size_mils/2 +
+        clearance_mils``. Skip the gridpoint if any non-same-net
+        primitive (pad / via / track / arc) is in range. Otherwise
+        create a top→bottom through-via on the target net.
+
+        **The default is dry-run** because mutating a board with N×M
+        new vias is risky. Confirm the ``placed`` / ``skipped`` count
+        looks right, then call again with ``dry_run=False``.
+
+        Args:
+            net: Target net (must already exist on the board).
+            x1_mils, y1_mils, x2_mils, y2_mils: Inclusive rectangle
+                where the grid is placed. PCB origin is bottom-left
+                by Altium convention.
+            spacing_mils: Grid spacing (default 50). For GND stitching
+                near a high-speed bus, /4 of the wavelength of the
+                highest harmonic is a common rule of thumb.
+            via_size_mils: Via pad diameter (default 30).
+            via_hole_mils: Via drill diameter (default 14).
+            clearance_mils: Min gap to any non-same-net existing
+                primitive (default 10).
+            dry_run: When True (default), only count would-be
+                placements without mutating the board.
+
+        Returns:
+            Dict with ``{net, dry_run, placed, skipped, spacing_mils,
+            clearance_mils}``.
+        """
+        bridge = get_bridge()
+        return await bridge.send_command_async(
+            "pcb.place_stitching_vias",
+            {
+                "net": net,
+                "x1_mils": str(int(x1_mils)),
+                "y1_mils": str(int(y1_mils)),
+                "x2_mils": str(int(x2_mils)),
+                "y2_mils": str(int(y2_mils)),
+                "spacing_mils": str(int(spacing_mils)),
+                "via_size_mils": str(int(via_size_mils)),
+                "via_hole_mils": str(int(via_hole_mils)),
+                "clearance_mils": str(int(clearance_mils)),
+                "dry_run": "true" if dry_run else "false",
+            },
+            timeout=60.0,
+        )
+
+    @mcp.tool()
+    async def pcb_calc_impedance(
+        geometry: str,
+        width_mils: float,
+        dielectric_height_mils: float,
+        dielectric_constant: float = 4.2,
+        copper_oz: float = 1.0,
+        spacing_mils: float = 0.0,
+    ) -> dict[str, Any]:
+        """Characteristic impedance of a PCB trace via IPC-2141 / Wadell
+        closed-form approximations. Pure math, no Altium hit.
+
+        Use this BEFORE routing a high-speed signal to pick the track
+        width that matches your transceiver's target impedance (USB
+        90 Ω diff, HDMI 100 Ω diff, single-ended PCIe 50 Ω, MIPI 100 Ω
+        diff, etc). For controlled-impedance fab spec sheets, the
+        accuracy of these closed-form formulas is ± ~10% -- good
+        enough for picking widths but fab houses will refine the
+        actual stackup. For real controlled-impedance boards, send
+        the stackup to your fab and use their Polar Si9000 / similar
+        report values.
+
+        Chaining with the layer stack: call ``pcb_get_layer_stackup``
+        first to read the actual dielectric heights and εr values
+        from the project, then feed those into this calculator. This
+        is essential -- guessing FR-4 at εr=4.2 ignores the stackup
+        the user actually picked and can give a 15-20% off answer
+        if they're using Megtron 6 or Rogers.
+
+        Supported geometries:
+          - ``"microstrip"`` -- single-ended outer-layer track with
+            reference plane below. IPC-2141 microstrip formula.
+          - ``"microstrip_diff"`` -- differential pair on outer
+            layer. Adds Wadell's mutual-coupling correction.
+          - ``"stripline"`` -- single-ended inner-layer track between
+            two reference planes.
+          - ``"stripline_diff"`` -- differential pair on an inner
+            layer between two reference planes.
+
+        Formula sources:
+          - IPC-2141 microstrip:
+            Z₀ = (87 / √(εr + 1.41)) × ln(5.98 × h / (0.8 × w + t))
+          - Symmetric stripline:
+            Z₀ = (60 / √εr) × ln(4 × b / (0.67 × π × (0.8 × w + t)))
+          - Differential variants apply the standard Wadell
+            correction: Zdiff ≈ 2 × Z₀ × (1 - 0.48 × exp(-0.96 × s/h))
+            for microstrip, similarly with empirical coefficients
+            for stripline.
+
+        Args:
+            geometry: One of ``"microstrip"``, ``"microstrip_diff"``,
+                ``"stripline"``, ``"stripline_diff"``.
+            width_mils: Track width in mils. For differential, this
+                is the width of EACH conductor (not the pair).
+            dielectric_height_mils: For microstrip, the dielectric
+                thickness BELOW the trace (track-to-reference-plane).
+                For stripline, this is the TOTAL dielectric thickness
+                between the two reference planes (``b`` in IPC).
+            dielectric_constant: εr of the dielectric. Common: 4.2
+                (FR-4 at 1 GHz), 3.5 (Megtron 6), 3.0 (Rogers 4350B),
+                2.2 (PTFE). Default 4.2.
+            copper_oz: Copper weight in oz/ft² (used for ``t``,
+                trace thickness). 1 oz = 1.378 mils. Default 1.0.
+            spacing_mils: Edge-to-edge gap between conductors of a
+                differential pair, in mils. Ignored for single-ended.
+
+        Returns:
+            Dict with:
+              - ``geometry``, ``width_mils``, ``dielectric_height_mils``,
+                ``dielectric_constant``, ``thickness_mils``,
+                ``spacing_mils`` (when diff)
+              - ``z0_ohms``: single-ended characteristic impedance
+              - ``zdiff_ohms`` (diff geometries only): differential
+                pair impedance
+              - ``propagation_delay_ps_per_inch``: propagation delay,
+                derived from the effective εr (microstrip uses
+                εr_eff = (εr + 1)/2; stripline uses εr directly).
+        """
+        import math
+        geometry = geometry.strip().lower()
+        valid = ("microstrip", "microstrip_diff",
+                 "stripline", "stripline_diff")
+        if geometry not in valid:
+            return {"ok": False,
+                    "reason": "geometry must be one of " + ", ".join(valid)}
+        if width_mils <= 0 or dielectric_height_mils <= 0:
+            return {"ok": False,
+                    "reason": "width_mils and dielectric_height_mils must be > 0"}
+        if dielectric_constant <= 0:
+            return {"ok": False,
+                    "reason": "dielectric_constant must be > 0"}
+        is_diff = geometry.endswith("_diff")
+        if is_diff and spacing_mils <= 0:
+            return {"ok": False,
+                    "reason": "spacing_mils must be > 0 for differential geometries"}
+
+        t = copper_oz * 1.378
+        w = float(width_mils)
+        h = float(dielectric_height_mils)
+        er = float(dielectric_constant)
+
+        if geometry.startswith("microstrip"):
+            # IPC-2141 microstrip.
+            z0 = (87.0 / math.sqrt(er + 1.41)) * \
+                 math.log(5.98 * h / (0.8 * w + t))
+            er_eff = (er + 1.0) / 2.0
+        else:
+            # Symmetric stripline (trace centered between two planes,
+            # h is the FULL dielectric thickness between planes).
+            z0 = (60.0 / math.sqrt(er)) * \
+                 math.log(4.0 * h / (0.67 * math.pi * (0.8 * w + t)))
+            er_eff = er
+
+        # Propagation delay: c0 = 11.8 in/ns in vacuum;
+        # tpd = sqrt(er_eff) / c0 = sqrt(er_eff) * 1000 / 11.8 ps/in
+        tpd = math.sqrt(er_eff) * 1000.0 / 11.8
+
+        out: dict[str, Any] = {
+            "ok": True,
+            "geometry": geometry,
+            "width_mils": w,
+            "dielectric_height_mils": h,
+            "dielectric_constant": er,
+            "thickness_mils": round(t, 3),
+            "z0_ohms": round(z0, 1),
+            "propagation_delay_ps_per_inch": round(tpd, 2),
+        }
+        if is_diff:
+            s = float(spacing_mils)
+            out["spacing_mils"] = s
+            if geometry == "microstrip_diff":
+                # Wadell microstrip diff approximation.
+                zdiff = 2.0 * z0 * (1.0 - 0.48 * math.exp(-0.96 * s / h))
+            else:
+                # Stripline diff approximation.
+                zdiff = 2.0 * z0 * (1.0 - 0.347 * math.exp(-2.9 * s / h))
+            out["zdiff_ohms"] = round(zdiff, 1)
+        return out
+
+    @mcp.tool()
+    async def pcb_calc_track_current_capacity(
+        width_mils: float,
+        copper_oz: float = 1.0,
+        layer: str = "external",
+        length_mils: float = 0.0,
+    ) -> dict[str, Any]:
+        """IPC-2221 current-carrying capacity for a PCB track.
+
+        Pure math, no Altium hit -- safe to call without an attached
+        session. Returns the current the track can sustain at each
+        of several temperature rises (1, 5, 10, 20, 30 °C above
+        ambient), plus DC resistance if a length is supplied.
+
+        Formula (IPC-2221, also IPC-2152's curve-fit predecessor):
+          ``I = k × (ΔT)^0.44 × (h × w)^0.725``
+        where ``h`` and ``w`` are in mils, ``ΔT`` in °C, and:
+          ``k = 0.048`` for external layers (top, bottom)
+          ``k = 0.024`` for internal layers (mid)
+        Internal-layer derating is the dominant correction; running a
+        signal that draws 5 A on TopLayer might be fine but on an
+        inner plane the same width only handles ~3 A at the same
+        ΔT because heat dissipates more slowly.
+
+        Copper thickness conversion: 1 oz/ft² ≈ 1.378 mils. So
+        ``copper_oz=1.0`` → ``h = 1.378 mils``, ``copper_oz=2.0`` →
+        ``h = 2.756 mils``.
+
+        Resistance: ``R = ρ × L / (h × w)`` with ρ = 6.7 × 10⁻⁷ Ω-mil
+        (annealed copper, 25 °C). Multiply current × resistance to
+        get voltage drop across the track.
+
+        Exposes the track-current math so the agent can apply it
+        across an entire power net after pulling track widths from
+        ``pcb_get_trace_lengths``.
+
+        Args:
+            width_mils: Track width in mils.
+            copper_oz: Copper weight in oz/ft². Common values:
+                0.5 oz (HDI inner), 1.0 oz (standard), 2.0 oz (power
+                planes), 3.0 oz (heavy-current).
+            layer: ``"external"`` (top / bottom) or ``"internal"``
+                (mid / inner planes). Defaults to external.
+            length_mils: If > 0, also returns DC resistance and
+                voltage drop at each temperature rise.
+
+        Returns:
+            Dict with:
+              - ``width_mils``, ``copper_oz``, ``thickness_mils``, ``layer``
+              - ``current_amps`` (dict, keys ``1c``, ``5c``, ``10c``,
+                ``20c``, ``30c``)
+              - ``resistance_mohm`` (only if length_mils > 0)
+              - ``voltage_drop_mv`` (only if length_mils > 0, dict
+                keyed same as ``current_amps``)
+        """
+        if width_mils <= 0:
+            return {"ok": False, "reason": "width_mils must be > 0"}
+        if copper_oz <= 0:
+            return {"ok": False, "reason": "copper_oz must be > 0"}
+        layer_norm = layer.strip().lower()
+        if layer_norm not in ("external", "internal"):
+            return {"ok": False,
+                    "reason": "layer must be 'external' or 'internal'"}
+
+        thickness_mils = copper_oz * 1.378
+        k = 0.024 if layer_norm == "internal" else 0.048
+        b = 0.44
+        c = 0.725
+        hw_c = (thickness_mils * width_mils) ** c
+
+        rises = (1, 5, 10, 20, 30)
+        current = {f"{t}c": round(k * (t ** b) * hw_c, 3) for t in rises}
+        out: dict[str, Any] = {
+            "ok": True,
+            "width_mils": width_mils,
+            "copper_oz": copper_oz,
+            "thickness_mils": round(thickness_mils, 3),
+            "layer": layer_norm,
+            "current_amps": current,
+        }
+        if length_mils > 0:
+            rho = 6.7e-7
+            r_ohm = rho * length_mils / (thickness_mils * width_mils)
+            out["resistance_mohm"] = round(r_ohm * 1000.0, 4)
+            out["voltage_drop_mv"] = {
+                k_: round(current[k_] * r_ohm * 1000.0, 3) for k_ in current
+            }
+        return out
+
+    @mcp.tool()
+    async def pcb_add_testpoints_for_net_class(
+        net_class: str,
+        type: str = "smd",
+        pad_size_mils: int = 40,
+        hole_size_mils: int = 20,
+        fab_top: bool = False,
+        fab_bottom: bool = False,
+        assy_top: bool = True,
+        assy_bottom: bool = False,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        """For each net in a netclass that does NOT already have a
+        testpoint, place a new pad above the board outline with the
+        net assigned and the standard ``IsTestpoint`` /
+        ``IsAssyTestpoint`` flags set.
+
+        Typical workflow:
+          1. Set up a netclass in Altium called ``TestPoints`` and
+             add the signals you want probed (clocks, power rails,
+             reset, debug signals).
+          2. Call this tool with ``net_class="TestPoints"`` and the
+             pad geometry your bed-of-nails fixture requires.
+          3. Open the PCB; the new pads sit in a row above the
+             board, with the right net + testpoint flags already set.
+          4. Drag them into their final positions (or run
+             ``pcb_move_components`` if you've pre-computed where
+             they go).
+
+        Coverage detection: a net is treated as "already covered" if
+        any pad or via on it carries ANY of the four testpoint flags
+        (so DFM tools, fab-side bed-of-nails vendors, and assembly-
+        side probe vendors all see the same coverage). Pass
+        ``force=True`` to override and place anyway.
+
+        Agent-friendly: no GUI, results returned for follow-up.
+
+        Args:
+            net_class: Netclass name to scan.
+            type: ``"smd"`` (top-layer SMD pad, no hole) or
+                ``"through_hole"`` (multi-layer pad with drill).
+            pad_size_mils: Outer pad size in mils. Default 40.
+            hole_size_mils: Drill diameter, only used for through-hole
+                testpoints. Default 20.
+            fab_top: Set ``IsTestpoint_Top`` (top-side bed-of-nails).
+            fab_bottom: Set ``IsTestpoint_Bottom``.
+            assy_top: Set ``IsAssyTestpoint_Top`` (top-side assembly
+                probe). Default True.
+            assy_bottom: Set ``IsAssyTestpoint_Bottom``.
+            force: Ignore existing testpoint coverage and always
+                place a new pad.
+
+        Returns:
+            Dict with ``{net_class, type, placed, skipped_already_covered,
+            placed_nets[], skipped_nets[]}``.
+        """
+        bridge = get_bridge()
+        return await bridge.send_command_async(
+            "pcb.add_testpoints_for_net_class",
+            {
+                "net_class": net_class,
+                "type": type,
+                "pad_size_mils": str(int(pad_size_mils)),
+                "hole_size_mils": str(int(hole_size_mils)),
+                "fab_top": "true" if fab_top else "false",
+                "fab_bottom": "true" if fab_bottom else "false",
+                "assy_top": "true" if assy_top else "false",
+                "assy_bottom": "true" if assy_bottom else "false",
+                "force": "true" if force else "false",
+            },
+            timeout=60.0,
+        )
+
+    @mcp.tool()
+    async def pcb_make_paste_grid(
+        designator: str,
+        pad_name: str,
+        min_grid_size_mils: int = 15,
+        min_gap_mils: int = 5,
+        min_coverage_pct: float = 60.0,
+    ) -> dict[str, Any]:
+        """Split a single pad's solder-paste opening into a grid of
+        smaller fills. The classic use case is the central thermal
+        pad on a QFN / DFN / QFP -- a full-area paste opening makes
+        the IC "swim" sideways during reflow as the molten solder
+        pool reduces friction. Splitting the opening into smaller
+        squares totalling ~50-75% coverage gives the IC something
+        to bond to while letting flux gases escape.
+
+        Standard datasheet recommendations:
+          - QFN / DFN exposed pad: 50-75% coverage, 0.3-0.5 mm
+            squares with ≥ 0.2 mm gap (≈ 15 mils / 8 mils)
+          - QFP heat-spreader: 60-70% coverage
+          - Large connector body pads: 60% is usually enough
+
+        ALWAYS consult the IC manufacturer's recommended stencil
+        pattern before defaulting to this script -- some packages
+        specify a star, diagonal, or windowpane pattern; this tool
+        only does a regular grid.
+
+        Args:
+            designator: Component reference designator, e.g. ``"U5"``.
+            pad_name: Pad identifier on that component. For QFN /
+                DFN exposed pads this is usually ``"0"`` or the
+                largest-numbered pad. Check the footprint first.
+            min_grid_size_mils: Starting grid block size, in mils.
+                Bumped up in 5-mil steps if coverage % is below
+                target. Default 15 mils (≈ 0.38 mm).
+            min_gap_mils: Minimum spacing between grid blocks, in
+                mils. Default 5 mils (≈ 0.13 mm).
+            min_coverage_pct: Target paste coverage as a percentage
+                of pad area, 0-100. Default 60. Iterates grid size
+                upward until met.
+
+        Returns:
+            Dict with ``{designator, pad_name, grid_x, grid_y,
+            grid_size_mils, gap_x_mils, gap_y_mils, fills_placed,
+            coverage_pct}``. The existing full-area paste opening is
+            suppressed via ``PasteMaskExpansion = -pad_dimension`` on
+            the pad cache before the grid fills are laid down.
+        """
+        bridge = get_bridge()
+        return await bridge.send_command_async(
+            "pcb.make_paste_grid",
+            {
+                "designator": designator,
+                "pad_name": pad_name,
+                "min_grid_size_mils": str(int(min_grid_size_mils)),
+                "min_gap_mils": str(int(min_gap_mils)),
+                "min_coverage_pct": str(float(min_coverage_pct)),
+            },
+            timeout=30.0,
+        )
+
+    @mcp.tool()
+    async def pcb_get_differential_pairs() -> dict[str, Any]:
+        """Enumerate every ``IPCB_DifferentialPair`` on the active PCB
+        and report each pair's two halves with length skew.
+
+        Length mismatch between the two halves of a diff pair is one
+        of the most common high-speed routing bugs. Transceiver
+        specs:
+          - **USB 2.0**: skew < 150 mils
+          - **USB 3.x SuperSpeed**: skew < 5 mils per pair
+          - **HDMI**: skew < 200 mils within pair, < 800 mils between
+          - **MIPI D-PHY (high-rate)**: skew < 5 mils
+          - **PCIe Gen3+**: skew < 5 mils within lane
+          - **Ethernet PHY**: typically < 50 mils
+        Catching skew violations pre-fab saves a respin -- the agent
+        should call this near the end of a layout review.
+
+        Returns one row per pair with:
+          - ``name``: pair name (e.g. ``"USB_DATA"`` if the SCH had
+            ``.DiffPair`` directives ``USB_DATA_P`` / ``USB_DATA_N``)
+          - ``positive_net`` / ``negative_net``: the two member nets
+          - ``pos_length_mils`` / ``neg_length_mils``: summed track +
+            arc length for each half (signal layers only)
+          - ``skew_mils``: absolute difference, the number you compare
+            against the transceiver spec
+          - ``both_routed``: false means one half is still ratsnest-
+            only (lengths are unreliable in that state)
+
+        Uses the PCB API ``IPCB_DifferentialPair`` interface.
+
+        Returns:
+            Dict with ``{count, pairs: [...]}``.
+        """
+        bridge = get_bridge()
+        return await bridge.send_command_async(
+            "pcb.get_differential_pairs", {}, timeout=30.0,
+        )
+
+    @mcp.tool()
+    async def pcb_clear_source_footprint_library(
+        designator_filter: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Clear ``Comp.SourceFootprintLibrary`` on board components.
+
+        Background: when a project is created from an Integrated
+        Library, every placed component remembers WHICH library it
+        came from. If the user later renames, moves, or consolidates
+        that library, ECO and "Update From Library" start failing
+        with "library not found" warnings because the component
+        still points at the stale path. Clearing
+        ``SourceFootprintLibrary`` unpins it so Altium re-matches by
+        library-reference name from whatever's currently in
+        Available Libraries.
+
+        This is a standard step when consolidating multiple legacy
+        libraries into a single curated library: drop the new lib
+        into Available Libraries, call this tool, then run an ECO --
+        the components now bind to the new library.
+
+        Generalized with an optional filter.
+
+        Args:
+            designator_filter: Restrict to these designators
+                (e.g. ``["U1", "U5"]``). ``None`` / empty clears all
+                components on the board. Match is case-sensitive
+                whole-string.
+
+        Returns:
+            Dict with ``{total, cleared}``. ``total`` counts components
+            inspected after filter; ``cleared`` counts ones that
+            actually had a non-empty SourceFootprintLibrary cleared.
+        """
+        bridge = get_bridge()
+        params: dict[str, str] = {}
+        if designator_filter:
+            params["designator_filter"] = "|".join(
+                str(d) for d in designator_filter)
+        return await bridge.send_command_async(
+            "pcb.clear_source_footprint_library", params, timeout=30.0,
+        )
+
+    @mcp.tool()
+    async def pcb_get_fab_stats() -> dict[str, Any]:
+        """DFM (Design For Manufacturing) summary -- the numbers fab
+        houses ask for on their quote forms.
+
+        One IPC call returns:
+          - ``board_width_mm``, ``board_height_mm``, ``board_area_mm2``
+          - ``num_copper_layers``
+          - ``vias_total``, ``vias_through``, ``vias_blind``,
+            ``vias_buried``
+          - ``pads_plated``, ``pads_unplated``, ``pads_slotted``
+          - ``min_annular_ring_mils`` -- across all plated holes
+            (vias + plated pads). Most fabs need ≥ 4 mil for the
+            standard process; sub-4-mil bumps to HDI.
+          - ``min_track_width_mils`` -- minimum across all copper
+            layers. Standard fabs offer 4-5 mil; sub-3 mil is HDI.
+          - ``smallest_hole_mils``, ``largest_hole_mils``,
+            ``distinct_hole_count`` -- the drill bit story. Fab
+            houses charge per distinct drill diameter; collapsing
+            from 7 distinct sizes to 4 can shave noticeable cost.
+
+        Useful before sending gerbers to the fab: the agent can spot
+        sub-process-minimum values and warn the user. Aspect-ratio
+        check (depth / drill) is NOT included here because it
+        requires layer-stack walking; if you need it, fetch
+        ``pcb_get_layer_stackup`` separately.
+
+        Returns:
+            Dict with all keys above. All linear measurements use the
+            stated unit suffix (``_mm`` vs ``_mils``).
+        """
+        bridge = get_bridge()
+        return await bridge.send_command_async("pcb.get_fab_stats", {})
+
+    @mcp.tool()
+    async def pcb_lock_net_routing(
+        nets: list[str],
+        lock: bool,
+        lock_components: bool = False,
+    ) -> dict[str, Any]:
+        """Lock or unlock track / arc / via primitives on a list of nets.
+
+        Standard workflow: before letting the autorouter touch the board,
+        lock the power / ground / clock / oscillator nets so a partial
+        re-route pass doesn't undo your careful hand-routing on them.
+        Set ``lock=False`` afterwards to free everything up.
+
+        Locked primitives have ``Moveable=False``; the autorouter and
+        the interactive editor respect that flag when DXP Preferences →
+        PCB Editor → General → "Protect Locked Objects" is enabled.
+
+        The net-list-driven MCP equivalent of a cursor-driven lock.
+
+        Args:
+            nets: Net names to lock / unlock (e.g. ``["VCC", "GND",
+                "CLK_24M"]``). Case-sensitive.
+            lock: True to lock (sets Moveable=False), False to unlock.
+            lock_components: Also lock any component with at least one
+                pad on a matched net. Useful to freeze the connectors /
+                regulators that anchor a hand-routed power section.
+                Default False.
+
+        Returns:
+            Dict with:
+              - ``locked``: True / False mirror of the input
+              - ``matched_primitives``: track + arc + via objects whose
+                net matched
+              - ``updated_primitives``: how many actually changed state
+              - ``matched_components``: components touched (only filled
+                when ``lock_components=True``)
+              - ``updated_components``: components whose Moveable flipped
+        """
+        if not nets:
+            return {"ok": False, "reason": "nets list is empty"}
+        bridge = get_bridge()
+        return await bridge.send_command_async(
+            "pcb.lock_net_routing",
+            {
+                "nets": "|".join(str(n) for n in nets),
+                "lock": "true" if lock else "false",
+                "lock_components": "true" if lock_components else "false",
+            },
+        )
+
+    @mcp.tool()
+    async def pcb_set_text_visibility(
+        designators: bool | None = None,
+        comments: bool | None = None,
+        filter: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Bulk-toggle component designator and / or comment visibility.
+
+        For the common workflows:
+          - Hide all designators before generating an assembly PDF.
+          - Show comments during a value-review pass.
+          - Hide just the noisy 0402 designators while keeping IC labels.
+
+        Args:
+            designators: If True/False, set ``Component.NameOn`` for
+                matched components. ``None`` leaves designator visibility
+                alone.
+            comments: If True/False, set ``Component.CommentOn``. ``None``
+                leaves comment visibility alone.
+            filter: Restrict to these designator names (e.g. ``["U1",
+                "U2", "C5"]``). ``None`` applies to every component.
+                Match is case-sensitive whole-string.
+
+        At least one of ``designators`` / ``comments`` must be supplied.
+
+        Returns:
+            Dict with:
+              - ``matched``: components inspected (after filter)
+              - ``updated_names``: components whose NameOn flipped
+              - ``updated_comments``: components whose CommentOn flipped
+        """
+        if designators is None and comments is None:
+            return {"ok": False,
+                    "reason": ("supply at least one of designators / "
+                               "comments")}
+        bridge = get_bridge()
+        params: dict[str, str] = {}
+        if designators is not None:
+            params["designators"] = "true" if designators else "false"
+        if comments is not None:
+            params["comments"] = "true" if comments else "false"
+        if filter:
+            params["filter"] = "|".join(str(d) for d in filter)
+        return await bridge.send_command_async(
+            "pcb.set_text_visibility", params,
+        )
 
     @mcp.tool()
     async def pcb_check_placement_collision(
@@ -1229,18 +2024,124 @@ def register_pcb_tools(mcp):
 
     @mcp.tool()
     async def pcb_get_polygons() -> dict[str, Any]:
-        """Get all polygon pours on the active PCB.
+        """Get all polygon pours on the active PCB with copper area.
 
-        Returns polygon pour details including layer, net assignment,
-        hatching style, and pour settings.
+        Each polygon row carries:
+          - ``index``, ``name``: positional + Altium-assigned name
+          - ``net``: assigned net (often ``GND`` / a power rail)
+          - ``layer``: ``TopLayer``, ``InternalPlane1``, etc.
+          - ``hatch_style``: ``Solid`` / ``45Degree`` / ``Horizontal`` ...
+          - ``pour_over``, ``remove_dead_copper``: pour-policy flags
+          - ``area_sqmils`` / ``area_mm2``: ACTUAL copper area after
+            the pour has been computed (excludes thermal-relief and
+            clearance cutouts). Use this for current-capacity audits
+            (multiply by copper thickness for cubic copper, then
+            apply IPC-2152 / IPC-2221).
+          - ``bbox_mm2``: bounding-rectangle area; ratio
+            ``area_mm2 / bbox_mm2`` shows how much of the outline is
+            real copper. Low ratio = pour is fighting with cutouts.
+          - ``vertex_count``: a smooth pour has 4-8 vertices; many
+            more usually means hand-editing that may have introduced
+            narrow necks.
+
+        Pair with ``pcb_calc_track_current_capacity`` for
+        per-net current-carrying analysis.
 
         Returns:
-            Dictionary with "polygons" array (each with index, name, net,
-            layer, hatch_style, pour_over, remove_dead_copper) and "count"
+            Dict with ``{polygons: [...], count: N}``.
         """
         bridge = get_bridge()
         result = await bridge.send_command_async("pcb.get_polygons", {})
         return result
+
+    @mcp.tool()
+    async def pcb_calc_track_current_capacity(
+        width_mils: float,
+        copper_oz: float = 1.0,
+        layer: str = "external",
+        length_mils: float = 0.0,
+    ) -> dict[str, Any]:
+        """IPC-2221 current-carrying capacity for a PCB track.
+
+        Pure math, no Altium hit -- safe to call without an attached
+        session. Returns the current the track can sustain at each
+        of several temperature rises (1, 5, 10, 20, 30 °C above
+        ambient), plus DC resistance if a length is supplied.
+
+        Formula (IPC-2221, also IPC-2152's curve-fit predecessor):
+          ``I = k × (ΔT)^0.44 × (h × w)^0.725``
+        where ``h`` and ``w`` are in mils, ``ΔT`` in °C, and:
+          ``k = 0.048`` for external layers (top, bottom)
+          ``k = 0.024`` for internal layers (mid)
+        Internal-layer derating is the dominant correction; running a
+        signal that draws 5 A on TopLayer might be fine but on an
+        inner plane the same width only handles ~3 A at the same
+        ΔT because heat dissipates more slowly.
+
+        Copper thickness conversion: 1 oz/ft² ≈ 1.378 mils. So
+        ``copper_oz=1.0`` → ``h = 1.378 mils``, ``copper_oz=2.0`` →
+        ``h = 2.756 mils``.
+
+        Resistance: ``R = ρ × L / (h × w)`` with ρ = 6.7 × 10⁻⁷ Ω-mil
+        (annealed copper, 25 °C). Multiply current × resistance to
+        get voltage drop across the track.
+
+        Exposes the track-current math so the agent can apply it
+        across an entire power net after pulling track widths from
+        ``pcb_get_trace_lengths``.
+
+        Args:
+            width_mils: Track width in mils.
+            copper_oz: Copper weight in oz/ft². Common values:
+                0.5 oz (HDI inner), 1.0 oz (standard), 2.0 oz (power
+                planes), 3.0 oz (heavy-current).
+            layer: ``"external"`` (top / bottom) or ``"internal"``
+                (mid / inner planes). Defaults to external.
+            length_mils: If > 0, also returns DC resistance and
+                voltage drop at each temperature rise.
+
+        Returns:
+            Dict with:
+              - ``width_mils``, ``copper_oz``, ``thickness_mils``, ``layer``
+              - ``current_amps``: dict, keys ``1c``, ``5c``, ``10c``,
+                ``20c``, ``30c``
+              - ``resistance_mohm`` (only if ``length_mils`` > 0)
+              - ``voltage_drop_mv`` (only if ``length_mils`` > 0, dict
+                keyed the same as ``current_amps``)
+        """
+        if width_mils <= 0:
+            return {"ok": False, "reason": "width_mils must be > 0"}
+        if copper_oz <= 0:
+            return {"ok": False, "reason": "copper_oz must be > 0"}
+        layer_norm = layer.strip().lower()
+        if layer_norm not in ("external", "internal"):
+            return {"ok": False,
+                    "reason": "layer must be 'external' or 'internal'"}
+
+        thickness_mils = copper_oz * 1.378
+        k = 0.024 if layer_norm == "internal" else 0.048
+        b = 0.44
+        c = 0.725
+        hw_c = (thickness_mils * width_mils) ** c
+
+        rises = (1, 5, 10, 20, 30)
+        current = {f"{t}c": round(k * (t ** b) * hw_c, 3) for t in rises}
+        out: dict[str, Any] = {
+            "ok": True,
+            "width_mils": width_mils,
+            "copper_oz": copper_oz,
+            "thickness_mils": round(thickness_mils, 3),
+            "layer": layer_norm,
+            "current_amps": current,
+        }
+        if length_mils > 0:
+            rho = 6.7e-7
+            r_ohm = rho * length_mils / (thickness_mils * width_mils)
+            out["resistance_mohm"] = round(r_ohm * 1000.0, 4)
+            out["voltage_drop_mv"] = {
+                k_: round(current[k_] * r_ohm * 1000.0, 3) for k_ in current
+            }
+        return out
 
     @mcp.tool()
     async def pcb_modify_polygon(

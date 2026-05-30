@@ -162,6 +162,25 @@ button:disabled { opacity:0.45; cursor:not-allowed; }
   background:var(--err); color:var(--on-accent); border-color:var(--err);
 }
 .btn-danger:hover { filter:brightness(1.08); }
+/* Custom modal dialogs -- the dashboard NEVER uses native
+   confirm()/alert()/prompt(). */
+.ui-dialog-backdrop {
+  position: fixed; inset: 0; z-index: 10000;
+  background: rgba(0,0,0,0.55);
+  display: flex; align-items: center; justify-content: center;
+  animation: ui-dialog-fade 0.12s ease;
+}
+@keyframes ui-dialog-fade { from { opacity: 0; } to { opacity: 1; } }
+.ui-dialog {
+  background: var(--bg-elev); border: 1px solid var(--border);
+  border-radius: 8px; box-shadow: 0 14px 44px rgba(0,0,0,0.55);
+  min-width: 300px; max-width: 460px; padding: 18px 20px;
+  color: var(--text); font-size: 13px;
+}
+.ui-dialog .ui-dialog-title { font-weight: 700; margin-bottom: 8px; font-size: 14px; }
+.ui-dialog .ui-dialog-msg { margin-bottom: 16px; line-height: 1.5; white-space: pre-wrap; }
+.ui-dialog .ui-dialog-actions { display: flex; gap: 8px; justify-content: flex-end; }
+.ui-dialog .ui-dialog-actions button { min-width: 76px; }
 .btn-sm  { padding:2px var(--s-2); font-size:var(--fs-xs); }
 .btn-lg  { padding:var(--s-2) var(--s-4); font-size:var(--fs-md); }
 input[type="text"], input[type="search"] {
@@ -282,6 +301,125 @@ nav.tabs button.active::after {
   filter:blur(4px); opacity:0.6;
 }
 nav.tabs .spacer { flex:1; }
+nav.tabs .tab-count {
+  display:none;
+  margin-left:6px;
+  padding:1px 6px;
+  font-size:11px;
+  font-weight:var(--fw-medium);
+  color:var(--text-mute);
+  background:var(--bg-soft);
+  border:1px solid var(--border);
+  border-radius:8px;
+  line-height:1.4;
+}
+nav.tabs .tab-count.shown { display:inline-block; }
+
+/* Lint panel: when the user checks "Show only violations", hide rows
+   with zero violations (and their detail blocks) so the meaningful
+   findings pop. Driven purely by class toggle, no re-render needed. */
+#lint-body.lint-hide-clean .lint-row-clean { display:none; }
+
+/* Assembly tab styles. The step list looks like the existing Components
+   table but tighter, with a hard-current row and per-step checkboxes.
+   Bottom-view mirror is applied to the SVG outer group via a class on
+   the wrapper, see #assembly-host.assembly-flip below. */
+/* (Removed the CSS scaleX flip -- server-side ?view=bottom now mirrors
+   the SVG in X with proper layer reordering and native colors.) */
+.assembly-row {
+  display: flex; align-items: center; gap: 6px;
+  padding: 4px 10px;
+  border-bottom: 1px solid transparent;
+  cursor: pointer;
+  font-family: var(--mono);
+}
+.assembly-row:hover { background: var(--bg-card); }
+.assembly-row.current {
+  background: rgba(100,220,140,0.10);
+  border-left: 3px solid var(--ok);
+  padding-left: 7px;
+}
+.assembly-row.placed { opacity: 0.55; }
+.assembly-row .des { flex: 0 0 60px; font-weight: 600; color: var(--text); }
+.assembly-row .val { flex: 1 1 auto; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--text-mute); font-family: var(--font); }
+.assembly-row .side {
+  flex: 0 0 18px; text-align: center;
+  font-size: 10px; padding: 1px 4px; border-radius: 3px;
+  font-weight: 700;
+}
+.assembly-row .side.top    { color: #ff9999; background: rgba(220,80,80,0.15); }
+.assembly-row .side.bottom { color: #9bb9ff; background: rgba(80,120,220,0.15); }
+.assembly-row .check {
+  flex: 0 0 14px; width: 14px; height: 14px;
+  border: 1px solid var(--border); border-radius: 3px;
+  display: inline-flex; align-items: center; justify-content: center;
+  color: var(--ok); font-size: 11px; line-height: 1;
+}
+.assembly-row.placed .check { background: var(--ok); color: var(--bg); }
+.assembly-group-header {
+  padding: 6px 10px 3px 10px;
+  font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px;
+  color: var(--text-mute); background: var(--bg);
+  border-top: 1px solid var(--border);
+  position: sticky; top: 0; z-index: 1;
+}
+.assembly-group-header:first-child { border-top: none; }
+
+/* Current-part focus: when .asm-focus is on the SVG, every rendered
+   board layer is desaturated to grayscale and dimmed, while a cloned,
+   un-filtered copy of the CURRENT part's footprint primitives (class
+   .asm-color-part, appended on top in the same coordinate space) keeps
+   full colour. That makes the part being placed pop in colour against a
+   gray board -- far clearer than a box when small parts sit side by
+   side. */
+#assembly-host svg.asm-focus g.layer,
+#assembly-host svg.asm-focus g.designators,
+#assembly-host svg.asm-focus g.drills,
+#assembly-host svg.asm-focus g.outline {
+  filter: grayscale(1) brightness(0.78);
+  transition: filter 0.12s ease;
+}
+#assembly-host svg .asm-color-part { filter: none; }
+/* Bottom-side view: mirror the board in X so it matches a physically-
+   flipped board on the bench. Pure CSS = instant, no server re-render.
+   The minimap lives in #assembly-stage (not host), so it isn't mirrored. */
+#assembly-host.assembly-flip > svg:not(.asm-minimap) {
+  transform: scaleX(-1);
+  transform-origin: center center;
+}
+/* Overlay minimap, pinned top-right of the board view. Mounted in the
+   #assembly-stage wrapper (NOT inside #assembly-host -- a second <svg>
+   there shadows the board SVG lookup). Kept slightly transparent so it's
+   unobtrusive. Strokes use non-scaling-stroke so they stay ~1px on
+   screen despite the mil-scale viewBox. */
+#assembly-stage .asm-minimap {
+  /* right offset clears the fixed 420px sidebar so the minimap sits at
+     the BOARD's top-right (the board is the flex:1 left pane). */
+  position: absolute; top: 8px; right: 428px;
+  background: rgba(6,8,14,0.42);
+  border: 1px solid rgba(255,255,255,0.14);
+  border-radius: 4px;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.35);
+  opacity: 0.78;
+  pointer-events: none; z-index: 6;
+}
+/* Bottom view: mirror the minimap to match the CSS-mirrored main board. */
+#assembly-stage .asm-minimap.mm-flip {
+  transform: scaleX(-1); transform-origin: center center;
+}
+#assembly-stage .asm-minimap .mm-content { opacity: 0.92; }
+#assembly-stage .asm-minimap .mm-view {
+  fill: rgba(255,215,0,0.08);
+  stroke: #ffd700; stroke-width: 1.5px;
+  vector-effect: non-scaling-stroke;
+}
+#assembly-stage .asm-minimap .mm-dot {
+  fill: #ff3b30; stroke: #fff; stroke-width: 0.6px;
+  vector-effect: non-scaling-stroke;
+}
+nav.tabs button.active .tab-count { color:var(--text); }
 nav.tabs .refresh {
   margin:var(--s-1) var(--s-1) var(--s-1) 0;
   padding:0; width:30px; height:26px;
@@ -289,6 +427,18 @@ nav.tabs .refresh {
   background:var(--bg-card); border:1px solid var(--border);
   border-radius:var(--r-md); color:var(--text-mute);
 }
+/* Spin the refresh icon while a refresh is in flight. Two-second
+   period (slow enough to read as "working" not as a glitch). The class
+   is added at the start of refreshActive() and removed in a finally so
+   it cleans up even if the underlying fetch rejects. */
+@keyframes refresh-spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+nav.tabs .refresh.spinning svg {
+  animation: refresh-spin 1.2s linear infinite;
+}
+nav.tabs .refresh.spinning { color:var(--accent); }
 
 /* Icon buttons: square, SVG centred, inherits colour via currentColor. */
 .iconbtn {
@@ -299,6 +449,21 @@ nav.tabs .refresh {
 .iconbtn:hover { color:var(--text); }
 .iconbtn svg { display:block; }
 .iconbtn.sm { width:24px; height:22px; }
+
+.back-to-top {
+  position:fixed; right:20px; bottom:20px;
+  width:36px; height:36px; padding:0;
+  display:inline-flex; align-items:center; justify-content:center;
+  background:var(--bg-soft); color:var(--text);
+  border:1px solid var(--border); border-radius:50%;
+  box-shadow:0 2px 6px rgba(0,0,0,0.25);
+  cursor:pointer; opacity:0; pointer-events:none;
+  transition:opacity 160ms ease, transform 160ms ease;
+  z-index:50;
+}
+.back-to-top.visible { opacity:1; pointer-events:auto; }
+.back-to-top:hover { background:var(--accent); color:var(--bg); transform:translateY(-1px); }
+.back-to-top svg { display:block; }
 
 main {
   padding:var(--s-5);
@@ -1002,10 +1167,11 @@ main > section.full-bleed {
 <nav class="tabs" id="tabs">
   <button data-tab="drawing" class="active">Drawing</button>
   <button data-tab="project">Project</button>
-  <button data-tab="components">Components</button>
-  <button data-tab="nets">Nets</button>
-  <button data-tab="libraries">Libraries</button>
-  <button data-tab="plan">Plan</button>
+  <button data-tab="components">Components<span class="tab-count" data-count-for="components"></span></button>
+  <button data-tab="nets">Nets<span class="tab-count" data-count-for="nets"></span></button>
+  <button data-tab="libraries">Libraries<span class="tab-count" data-count-for="libraries"></span></button>
+  <button data-tab="plan">Plan<span class="tab-count" data-count-for="plan"></span></button>
+  <button data-tab="assembly">Assembly<span class="tab-count" data-count-for="assembly"></span></button>
   <button data-tab="actions">Actions</button>
   <button data-tab="status">Status</button>
   <div class="spacer"></div>
@@ -1054,8 +1220,18 @@ main > section.full-bleed {
        so the SVG canvas occupies the entire viewport below the tabs.
        The toolbar lives as a thin inline strip (no outer panel border)
        so vertical real estate goes to the drawing instead of chrome. -->
-  <section data-pane="drawing" class="full-bleed">
-    <div class="drawing-toolbar">
+  <!-- Drawing tab uses the same viewport-pinned position:fixed strategy
+       as Assembly so the SVG canvas takes the entire space below the
+       sticky chrome with no main-padding gap. -->
+  <section data-pane="drawing" class="full-bleed"
+           style="position:fixed;
+                  top:calc(var(--header-h, 52px) + var(--nav-h, 44px));
+                  left:0; right:0; bottom:0;
+                  width:auto; margin:0;
+                  display:flex; flex-direction:column;
+                  background:var(--bg);
+                  overflow:hidden; z-index:5;">
+    <div class="drawing-toolbar" style="flex:0 0 auto;">
       <div class="row-actions" id="drawing-mode-row">
         <button class="drawing-mode active" data-mode="sch">Schematic</button>
         <button class="drawing-mode" data-mode="pcb">PCB</button>
@@ -1065,7 +1241,6 @@ main > section.full-bleed {
       </select>
       <span class="count" id="drawing-status"></span>
       <div class="toolbar-right row-actions">
-        <button id="drawing-refresh">refresh</button>
         <button id="drawing-open" title="Open the SVG in a new browser tab">open ↗</button>
       </div>
     </div>
@@ -1081,8 +1256,8 @@ main > section.full-bleed {
       <button id="drawing-selbar-clear" class="iconbtn"
               title="clear selection (Esc)">clear</button>
     </div>
-    <div style="padding:0; overflow:hidden; border:none; background:transparent;">
-      <div id="drawing-stage" style="position:relative; height:calc(100vh - 150px); min-height:480px; background:var(--bg); display:flex;">
+    <div style="flex:1 1 auto; min-height:0; padding:0; overflow:hidden; border:none; background:transparent; display:flex; flex-direction:column;">
+      <div id="drawing-stage" style="position:relative; flex:1 1 auto; min-height:0; background:var(--bg); display:flex;">
         <div id="drawing-host" style="flex:1; height:100%; overflow:auto;"></div>
         <div id="drawing-layers" hidden
              style="width:180px; border-left:1px solid var(--border);
@@ -1101,6 +1276,92 @@ main > section.full-bleed {
         </div>
       </div>
     </div>
+  </section>
+
+  <!-- ===== Assembly tab =====
+       Guided hand-assembly: sorts the PCB's components into a logical
+       placement order (small passives → ICs → connectors, by value /
+       footprint runs), highlights the current part on the SVG, lets the
+       operator tick off each step. Side-view flip (top / bottom) so the
+       PCB SVG matches the physical board orientation on the bench.   -->
+  <!-- Pinned to the viewport via position:fixed so the bottom nav
+       buttons are guaranteed visible regardless of main's padding or
+       sticky-header math. top:--header-h + --nav-h (set by JS) keeps
+       this below the sticky chrome. -->
+  <section data-pane="assembly" class="full-bleed" hidden
+           style="position:fixed;
+                  top:calc(var(--header-h, 52px) + var(--nav-h, 44px));
+                  left:0; right:0; bottom:0;
+                  width:auto; margin:0;
+                  display:flex; flex-direction:column;
+                  background:var(--bg);
+                  overflow:hidden; z-index:5;">
+    <!-- Single compact toolbar: side toggles, inline progress + bar,
+         action buttons. Replaces the previous two-row chrome to give
+         the stage another 28px of vertical real estate. -->
+    <div class="drawing-toolbar" style="gap:10px; flex:0 0 auto;">
+      <div class="row-actions" id="assembly-side-row" style="gap:2px;">
+        <span class="hint" style="font-size:11px;">first</span>
+        <button class="drawing-mode active" data-asm-firstside="top">Top</button>
+        <button class="drawing-mode" data-asm-firstside="bottom">Bottom</button>
+      </div>
+      <div class="row-actions" style="gap:2px;">
+        <span class="hint" style="font-size:11px;">view</span>
+        <button class="drawing-mode active" data-asm-view="top">Top</button>
+        <button class="drawing-mode" data-asm-view="bottom" title="Mirror SVG horizontally to match a physically-flipped board">Bottom</button>
+      </div>
+      <div style="display:flex; align-items:center; gap:8px; flex:1; min-width:0;">
+        <span id="assembly-progress-text" class="hint mono" style="font-size:11px; white-space:nowrap;">0 / 0</span>
+        <div style="flex:1; height:6px; background:var(--bg); border-radius:3px; overflow:hidden; min-width:60px;">
+          <div id="assembly-progress-fill" style="height:100%; width:0%;
+               background:var(--ok); transition:width 200ms ease;"></div>
+        </div>
+        <span id="assembly-progress-pct" class="mono" style="font-size:11px; min-width:54px; text-align:right; white-space:nowrap;">0.0%</span>
+      </div>
+      <span class="count" id="assembly-status"></span>
+      <div class="toolbar-right row-actions">
+        <button id="assembly-reset" title="Reset placement progress for this board">reset</button>
+      </div>
+    </div>
+    <!-- Stage is a direct flex:1 child of the column-flex section so it
+         gets the leftover height after the toolbar. No intermediate
+         wrapper -- previous version had one that broke height:100%
+         propagation when the section was position:fixed. -->
+    <div id="assembly-stage" style="flex:1 1 auto; min-height:0; position:relative; background:var(--bg); display:flex; overflow:hidden;">
+      <div id="assembly-host" style="flex:1; min-width:0; min-height:0; overflow:auto; position:relative;">
+          <div class="empty" style="padding:24px;">Open a PCB and click <b>refresh</b> to load the assembly sequence.</div>
+        </div>
+        <div id="assembly-sidebar"
+             style="width:420px; flex:0 0 420px; min-height:0;
+                    border-left:1px solid var(--border);
+                    background:var(--bg-elev);
+                    display:flex; flex-direction:column;">
+          <div id="assembly-current"
+               style="padding:10px 12px; border-bottom:1px solid var(--border);
+                      background:rgba(100,220,140,0.06); flex:0 0 auto;">
+            <div class="empty" style="font-size:11px;">no part selected</div>
+          </div>
+          <!-- min-height:0 is the critical flexbox gotcha: without it, the
+               step list's overflow:auto is bypassed because the flex
+               item refuses to shrink below its intrinsic content height,
+               which forces the nav buttons below the parent. -->
+          <div id="assembly-list" style="flex:1 1 auto; min-height:0;
+                                          overflow-y:auto;
+                                          font-size:12px; padding:4px 0;">
+          </div>
+          <div id="assembly-nav"
+               style="padding:8px; border-top:1px solid var(--border);
+                      display:flex; gap:4px; background:var(--bg);
+                      flex:0 0 auto;">
+            <button id="assembly-prev" style="flex:0 0 auto;" title="K / ←">‹ Prev</button>
+            <button id="assembly-mark" class="btn-primary" style="flex:1;"
+                    title="Mark placed and advance (Space)">Mark placed</button>
+            <button id="assembly-next" style="flex:0 0 auto;" title="J / →">Next ›</button>
+            <button id="assembly-skip" style="flex:0 0 auto;"
+                    title="Skip to next group (PageDown)">»</button>
+          </div>
+        </div>
+      </div>
   </section>
 
   <section data-pane="project" hidden>
@@ -1292,6 +1553,21 @@ main > section.full-bleed {
         </button>
       </div>
       <div id="health-body"><div class="empty">click "run probes"</div></div>
+
+      <div style="margin-top:24px; border-top:1px solid var(--border); padding-top:16px;">
+        <div class="row-actions" style="margin-bottom:10px;">
+          <strong>Design lint</strong>
+          <button id="lint-run">Run lint sweep</button>
+          <label class="hint" style="display:none; cursor:pointer; user-select:none;"
+                 id="lint-violations-only-label">
+            <input type="checkbox" id="lint-violations-only"
+                   style="vertical-align:middle; margin:0 4px 0 8px;">
+            Show only violations
+          </label>
+          <span class="hint" id="lint-status"></span>
+        </div>
+        <div id="lint-body"><div class="empty">Click "Run lint sweep" to run all <code>audit.*</code> checks (parametric validators, port direction, tented vias, near-miss connections, via antennas, etc) in one pass.</div></div>
+      </div>
     </div>
   </section>
 
@@ -1311,6 +1587,15 @@ main > section.full-bleed {
       <span class="tag" id="drawer-tag" style="flex:none;">-</span>
       <strong id="drawer-cmd" class="mono"
               style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">-</strong>
+      <button class="iconbtn sm" id="drawer-copy" title="Copy name (Shift+C)"
+              aria-label="Copy designator / net name" style="flex:none;">
+        <svg viewBox="0 0 16 16" width="12" height="12" fill="none"
+             stroke="currentColor" stroke-width="1.6" stroke-linecap="round"
+             stroke-linejoin="round">
+          <rect x="4" y="3" width="9" height="11" rx="1.5"/>
+          <path d="M3 11V2.5A1.5 1.5 0 014.5 1H11"/>
+        </svg>
+      </button>
     </div>
     <div style="display:flex; gap:2px; flex:none;">
       <button class="iconbtn" id="drawer-prev"
@@ -1346,6 +1631,15 @@ main > section.full-bleed {
 
 <!-- Toast stack is created on first showToast call; no static container needed. -->
 
+<button id="back-to-top" class="back-to-top" hidden
+        title="Scroll to top" aria-label="Scroll to top">
+  <svg viewBox="0 0 16 16" width="14" height="14" fill="none"
+       stroke="currentColor" stroke-width="1.8" stroke-linecap="round"
+       stroke-linejoin="round">
+    <path d="M8 13V3M3.5 7.5L8 3l4.5 4.5"/>
+  </svg>
+</button>
+
 <div id="help-overlay" class="help-overlay" hidden>
   <div class="help-card" role="dialog" aria-label="Keyboard shortcuts">
     <div class="help-head">
@@ -1362,9 +1656,10 @@ main > section.full-bleed {
         <h4>Navigate</h4>
         <dl>
           <dt><kbd>/</kbd></dt><dd>focus search</dd>
-          <dt><kbd>1</kbd>-<kbd>7</kbd>, <kbd>0</kbd></dt><dd>switch tabs (Drawing - Actions, Status)</dd>
+          <dt><kbd>1</kbd>-<kbd>9</kbd></dt><dd>switch tabs (Drawing - Status); <kbd>7</kbd> = Assembly, <kbd>0</kbd> also = Status</dd>
           <dt><kbd>R</kbd></dt><dd>refresh current tab</dd>
           <dt><kbd>T</kbd></dt><dd>toggle theme</dd>
+          <dt><kbd>Shift</kbd>+<kbd>L</kbd></dt><dd>run design-lint sweep (jumps to Status &rarr; Health)</dd>
           <dt><kbd>?</kbd></dt><dd>this help</dd>
         </dl>
       </section>
@@ -1379,6 +1674,16 @@ main > section.full-bleed {
           <dt><kbd>+</kbd> / <kbd>-</kbd></dt><dd>zoom in / out (from centre)</dd>
           <dt><kbd>0</kbd></dt><dd>reset view (with SVG focused)</dd>
           <dt><kbd>Esc</kbd></dt><dd>clear selection</dd>
+        </dl>
+      </section>
+      <section>
+        <h4>Assembly tab</h4>
+        <dl>
+          <dt><kbd>J</kbd> / <kbd>↓</kbd> / <kbd>→</kbd></dt><dd>next part</dd>
+          <dt><kbd>K</kbd> / <kbd>↑</kbd> / <kbd>←</kbd></dt><dd>previous part</dd>
+          <dt><kbd>Space</kbd></dt><dd>mark placed and advance</dd>
+          <dt><kbd>PageDown</kbd></dt><dd>skip to next group (next value / footprint run)</dd>
+          <dt><kbd>F</kbd></dt><dd>flip board view (top ↔ bottom mirror)</dd>
         </dl>
       </section>
       <section>
@@ -1397,6 +1702,7 @@ main > section.full-bleed {
           <dt><kbd>N</kbd></dt><dd>next un-reviewed component</dd>
           <dt><kbd>Shift</kbd> + <kbd>N</kbd></dt><dd>previous un-reviewed</dd>
           <dt><kbd>Alt</kbd> + <kbd>←</kbd></dt><dd>back through drill-in history</dd>
+          <dt><kbd>Shift</kbd> + <kbd>C</kbd></dt><dd>copy designator / net name to clipboard</dd>
           <dt><kbd>Esc</kbd></dt><dd>close drawer</dd>
         </dl>
       </section>
@@ -1428,6 +1734,71 @@ function el(tag, attrs) {
     n.appendChild(typeof k === "string" ? document.createTextNode(k) : k);
   }
   return n;
+}
+
+// Custom modal dialogs. The dashboard NEVER calls native
+// confirm()/alert()/prompt() -- use uiConfirm()/uiAlert(), which return a
+// Promise (resolves true/false for confirm, undefined for alert).
+function uiDialog(opts) {
+  opts = opts || {};
+  return new Promise(function(resolve){
+    let done = false;
+    function close(val){
+      if (done) return;
+      done = true;
+      document.removeEventListener("keydown", onKey, true);
+      backdrop.remove();
+      resolve(val);
+    }
+    function onKey(ev){
+      if (ev.key === "Escape" && opts.showCancel !== false) {
+        ev.preventDefault(); ev.stopPropagation(); close(false);
+      } else if (ev.key === "Enter") {
+        ev.preventDefault(); ev.stopPropagation(); close(true);
+      }
+    }
+    const okBtn = el("button",
+      {class: opts.danger ? "btn-danger" : "btn-primary",
+       onClick: function(){ close(true); }},
+      opts.confirmText || "OK");
+    const actions = el("div", {class: "ui-dialog-actions"});
+    if (opts.showCancel !== false) {
+      actions.appendChild(el("button",
+        {class: "btn-ghost", onClick: function(){ close(false); }},
+        opts.cancelText || "Cancel"));
+    }
+    actions.appendChild(okBtn);
+    const box = el("div", {class: "ui-dialog"});
+    if (opts.title) box.appendChild(el("div", {class: "ui-dialog-title"}, opts.title));
+    box.appendChild(el("div", {class: "ui-dialog-msg"}, String(opts.message || "")));
+    box.appendChild(actions);
+    const backdrop = el("div",
+      {class: "ui-dialog-backdrop",
+       onClick: function(ev){
+         if (ev.target === backdrop && opts.showCancel !== false) close(false);
+       }},
+      box);
+    document.addEventListener("keydown", onKey, true);
+    document.body.appendChild(backdrop);
+    okBtn.focus();
+  });
+}
+function uiConfirm(message, opts) {
+  opts = opts || {};
+  return uiDialog({
+    message: message, title: opts.title,
+    confirmText: opts.confirmText || "OK",
+    cancelText: opts.cancelText || "Cancel",
+    danger: opts.danger, showCancel: true,
+  });
+}
+function uiAlert(message, opts) {
+  opts = opts || {};
+  return uiDialog({
+    message: message, title: opts.title,
+    confirmText: opts.confirmText || "OK",
+    showCancel: false,
+  });
 }
 
 function fmt(n, suffix) {
@@ -1557,6 +1928,46 @@ function restorePersistedUI() {
   return p;
 }
 
+// Update the small badge next to each tab label with the cached
+// item count, if any. Reads from state.data without re-fetching --
+// safe to call after every data load or tab switch. Hides the badge
+// when no data is cached or the count is zero (avoids a misleading
+// "0" badge before the tab has been visited).
+function updateTabCounts() {
+  function lenOf(resp) {
+    if (!resp || !resp.ok) return null;
+    const d = resp.data || {};
+    if (Array.isArray(d)) return d.length;
+    // Common shapes: {bom:[]}, {components:[]}, {nets:[]}, {rows:[]},
+    // {items:[]}, {libraries:[]}.
+    const list = d.bom || d.components || d.nets || d.rows
+              || d.items || d.libraries;
+    if (Array.isArray(list)) return list.length;
+    return null;
+  }
+  const map = {
+    components: state.data.components,
+    nets:       state.data.nets,
+    libraries:  state.data.libraries,
+    plan:       state.data.plan,
+  };
+  Object.keys(map).forEach(function(key){
+    const span = document.querySelector(
+      'nav.tabs .tab-count[data-count-for="' + key + '"]');
+    if (!span) return;
+    const n = lenOf(map[key]);
+    if (n === null || n === 0) {
+      span.classList.remove("shown");
+      span.textContent = "";
+    } else {
+      span.textContent = n >= 1000
+        ? (Math.floor(n/100)/10).toFixed(1) + "k"
+        : String(n);
+      span.classList.add("shown");
+    }
+  });
+}
+
 function showTab(name) {
   state.activeTab = name;
   savePersistedUI();
@@ -1639,13 +2050,20 @@ function showSub(name) {
 }
 
 async function loadTab(name) {
-  if (name === "drawing")    return loadDrawing();
-  if (name === "project")    return loadProject();
-  if (name === "components") return loadComponents();
-  if (name === "nets")       return loadNets();
-  if (name === "libraries")  return loadLibraries();
-  if (name === "plan")       return loadPlan();
-  if (name === "actions")    return loadActions();
+  let p;
+  if (name === "drawing")    p = loadDrawing();
+  else if (name === "project")    p = loadProject();
+  else if (name === "components") p = loadComponents();
+  else if (name === "nets")       p = loadNets();
+  else if (name === "libraries")  p = loadLibraries();
+  else if (name === "plan")       p = loadPlan();
+  else if (name === "assembly")   p = loadAssembly();
+  else if (name === "actions")    p = loadActions();
+  // Refresh tab-count badges once the load resolves -- data is in
+  // state.data by then.
+  if (p && typeof p.then === "function") p.then(updateTabCounts, function(){});
+  else updateTabCounts();
+  return p;
 }
 
 // Silent counterpart to loadTab. Warms the cache (or fetches the data
@@ -1679,29 +2097,58 @@ async function prefetchTab(name) {
     }
     // Drawing + Actions stay out -- drawing's render is heavy and
     // visual, Actions just lists local tool metadata.
+    updateTabCounts();
   } catch (e) { /* prefetch is best-effort */ }
 }
 
 async function refreshActive() {
-  if (state.activeTab === "drawing") return renderDrawing();
-  if (state.activeTab === "project") {
-    await fetchJSON("/api/refresh/project", {method:"POST"});
-    return loadProject();
-  }
-  if (state.activeTab === "components") {
-    await fetchJSON("/api/refresh/components", {method:"POST"});
-    return loadComponents();
-  }
-  if (state.activeTab === "nets") {
-    await fetchJSON("/api/refresh/nets", {method:"POST"});
-    return loadNets();
-  }
-  if (state.activeTab === "libraries") return loadLibraries();
-  if (state.activeTab === "plan")      return loadPlan();
-  if (state.activeTab === "actions")   return loadActions();
-  if (state.activeTab === "status") {
-    if (state.activeSub === "artifacts") return loadArtifacts();
-    if (state.activeSub === "health")    return runHealth();
+  // Spin the refresh icon while the underlying calls are in flight. CSS
+  // handles the rotation; we just toggle the class. Use a try/finally
+  // so a fetch rejection still removes the class -- otherwise the icon
+  // would spin forever on a single failure.
+  const btn = $("#refresh-tab");
+  if (btn) btn.classList.add("spinning");
+  try {
+    let p;
+    if (state.activeTab === "drawing") {
+      // Drop the cached PCB geometry so the render hits Altium fresh
+      // (no-op for SCH mode). This is what the old per-tab refresh did.
+      try { await fetch("/api/refresh/pcb", {method:"POST"}); } catch (e) {}
+      return await renderDrawing();
+    }
+    if (state.activeTab === "project") {
+      await fetchJSON("/api/refresh/project", {method:"POST"});
+      p = loadProject();
+    } else if (state.activeTab === "components") {
+      await fetchJSON("/api/refresh/components", {method:"POST"});
+      p = loadComponents();
+    } else if (state.activeTab === "nets") {
+      await fetchJSON("/api/refresh/nets", {method:"POST"});
+      p = loadNets();
+    } else if (state.activeTab === "libraries") p = loadLibraries();
+    else if (state.activeTab === "plan")        p = loadPlan();
+    else if (state.activeTab === "assembly") {
+      // Force a fresh pull (invalidate PCB geometry cache) like the old
+      // per-tab refresh did, then reload the sequence.
+      state.loaded.assembly = false;
+      state.data.assembly = null;
+      try { await fetch("/api/refresh/pcb", {method:"POST"}); } catch (e) {}
+      p = loadAssembly();
+    }
+    else if (state.activeTab === "actions")     p = loadActions();
+    else if (state.activeTab === "status") {
+      if (state.activeSub === "artifacts") return await loadArtifacts();
+      if (state.activeSub === "health")    return await runHealth();
+    }
+    if (p && typeof p.then === "function") {
+      // Await so the finally removes the class only after the load
+      // resolves, AND chain updateTabCounts.
+      try { await p; } catch (e) { /* swallowed -- load fns set their own UI */ }
+      updateTabCounts();
+    }
+    return p;
+  } finally {
+    if (btn) btn.classList.remove("spinning");
   }
 }
 
@@ -2251,6 +2698,22 @@ function diffPartner(netName, upperSet) {
   return null;
 }
 
+// Infer a power-rail voltage from the net name (e.g. +3V3 -> 3.3, +5V -> 5,
+// +1V8 -> 1.8, +12V -> 12). Returns null when the name has no voltage in it.
+// Used by the net drawer's insight strip for power nets. (Previously this
+// was CALLED but never defined, so opening any net drawer threw a
+// ReferenceError and the drawer rendered only its header + highlight button.)
+function railVoltage(name) {
+  const s = String(name || "").toUpperCase();
+  // "V" used as a decimal point: 3V3, +1V8, 2V5 ...
+  let m = s.match(/(?:^|[^0-9])[+\-]?(\d+)V(\d+)(?![0-9])/);
+  if (m) return parseFloat(m[1] + "." + m[2]);
+  // Plain volts: +5V, 12V, +3.3V ...
+  m = s.match(/(?:^|[^0-9])[+\-]?(\d+(?:\.\d+)?)V(?![A-Z0-9])/);
+  if (m) return parseFloat(m[1]);
+  return null;
+}
+
 async function openNetDrawer(netName) {
   pushDrawerHistory("net", netName);
   updateDrawerStepButtons("net");
@@ -2569,7 +3032,16 @@ function attachZoomPan(svg) {
   function apply() {
     svg.setAttribute("viewBox",
       state.x + " " + state.y + " " + state.w + " " + state.h);
+    if (typeof svg._onViewChange === "function") {
+      try { svg._onViewChange(); } catch (e) {}
+    }
   }
+  // Expose the ORIGINAL full-board viewBox and a live view getter so an
+  // overlay minimap can draw the board extent + current viewport rect.
+  svg._fullBox = { x: vb0[0], y: vb0[1], w: vb0[2], h: vb0[3] };
+  svg._getViewBox = function() {
+    return { x: state.x, y: state.y, w: state.w, h: state.h };
+  };
   // Programmatic zoom-to-rect, exposed so the global search bar and
   // drawer "locate" buttons can move the view onto a designator or net.
   svg._zoomTo = function(x, y, w, h) {
@@ -5609,21 +6081,46 @@ function updateStatusPill(forced) {
   const pill = $("#status-pill");
   const txt = $("#status-text");
   pill.classList.remove("ok","busy","stale","dead");
+  let kind;
   if (forced === "dead") {
-    pill.classList.add("dead"); txt.textContent = "disconnected"; return;
-  }
-  const now = Date.now();
-  if (state.inFlight) {
-    pill.classList.add("busy"); txt.textContent = "in flight: " + state.inFlight;
-    return;
-  }
-  if (now - lastPing < 4000) {
-    pill.classList.add("ok"); txt.textContent = "idle - live";
-  } else if (now - lastPing < 15000) {
-    pill.classList.add("stale"); txt.textContent = "idle - stale";
-  } else {
     pill.classList.add("dead"); txt.textContent = "disconnected";
+    kind = "dead";
+  } else {
+    const now = Date.now();
+    if (state.inFlight) {
+      pill.classList.add("busy"); txt.textContent = "in flight: " + state.inFlight;
+      kind = "busy";
+    } else if (now - lastPing < 4000) {
+      pill.classList.add("ok"); txt.textContent = "idle - live";
+      kind = "ok";
+    } else if (now - lastPing < 15000) {
+      pill.classList.add("stale"); txt.textContent = "idle - stale";
+      kind = "stale";
+    } else {
+      pill.classList.add("dead"); txt.textContent = "disconnected";
+      kind = "dead";
+    }
   }
+  syncTabTitle(kind);
+}
+
+// Reflect Altium connection state in the browser tab title so the user
+// can glance at the tab strip without focusing the dashboard. The dot
+// vocabulary maps to the same pill colour:
+//   ●  live          (green pill)
+//   ◌  busy          (yellow pill -- request in flight)
+//   ◦  stale         (orange pill -- no ping in 4-15s)
+//   ×  disconnected  (red pill -- no ping in 15s+)
+// Only writes when the value actually changes, so we don't churn the
+// title every poll tick.
+const BASE_TITLE = "EDA Agent — Design Dashboard";
+const TITLE_GLYPH = { ok: "●", busy: "◌", stale: "◦", dead: "×" };
+let lastTitleKind = null;
+function syncTabTitle(kind) {
+  if (kind === lastTitleKind) return;
+  lastTitleKind = kind;
+  const g = TITLE_GLYPH[kind];
+  document.title = g ? (g + " " + BASE_TITLE) : BASE_TITLE;
 }
 
 /* ============================ Sparklines ============================ */
@@ -5715,6 +6212,929 @@ function componentClass(designator) {
 // the Python signature is the single source of truth -- new tools show
 // up here without a dashboard change.
 var toolState = { all: [], filter: "", ns: "all", expanded: {} };
+
+/* ============================ ASSEMBLY TAB ============================
+   Guided hand-assembly view. Sorts the PCB's components into a logical
+   placement order, lets the operator step through one part at a time
+   with the current part highlighted on the PCB SVG. Side-view flip so
+   the SVG matches the physical orientation when the board is flipped.
+
+   Read-only, SVG-based assembly assistant. Progress persists in
+   localStorage keyed by project path so flipping between tabs /
+   refreshing the page doesn't lose tick-offs.
+*/
+
+var assemblyState = {
+  components: [],   // raw BOM rows with designator/value/footprint/side/x/y
+  sequence: [],     // sorted steps (objects with designator + meta)
+  groups: [],       // contiguous (side,category,value,footprint) runs
+  placed: {},       // map designator -> true
+  currentIndex: 0,
+  firstSide: "top", // which side the operator assembles first
+  viewSide: "top",  // which side the SVG shows (bottom = mirror X)
+  projectKey: "",   // for localStorage namespacing
+  svg: null,
+};
+
+function _asmStorageKey() {
+  return "assembly.progress." + (assemblyState.projectKey || "default");
+}
+
+function _asmFirstSideKey() { return "assembly.firstSide"; }
+function _asmViewSideKey()  { return "assembly.viewSide"; }
+
+function _asmLoadFirstSide() {
+  try {
+    const v = localStorage.getItem(_asmFirstSideKey());
+    return v === "bottom" ? "bottom" : "top";
+  } catch (e) { return "top"; }
+}
+
+function _asmSaveFirstSide(side) {
+  try { localStorage.setItem(_asmFirstSideKey(), side); } catch (e) {}
+}
+
+function _asmLoadViewSide() {
+  try {
+    const v = localStorage.getItem(_asmViewSideKey());
+    return v === "bottom" ? "bottom" : "top";
+  } catch (e) { return "top"; }
+}
+
+function _asmSaveViewSide(side) {
+  try { localStorage.setItem(_asmViewSideKey(), side); } catch (e) {}
+}
+
+function _asmLoadProgress() {
+  try {
+    const raw = localStorage.getItem(_asmStorageKey());
+    if (!raw) return null;
+    return JSON.parse(raw);
+  } catch (e) { return null; }
+}
+
+function _asmSaveProgress() {
+  try {
+    const placed = Object.keys(assemblyState.placed)
+      .filter(function(k){ return assemblyState.placed[k]; });
+    localStorage.setItem(_asmStorageKey(), JSON.stringify({
+      placed: placed,
+      cursor: assemblyState.currentIndex,
+      ts: Date.now(),
+    }));
+  } catch (e) {}
+}
+
+// Component-category classifier. Assembly houses place small passives
+// first, then ICs, then connectors. Within a category, sort by value
+// (so 10k resistors come in a run) then
+// footprint then designator.
+var ASM_CATEGORY_PRIORITY = {
+  passive_small:       10,
+  passive_medium:      20,
+  passive_large:       30,
+  diode_transistor:    40,
+  led:                 45,
+  ic_small:            50,
+  ic_medium:           60,
+  ic_large:            70,
+  crystal_oscillator:  72,
+  inductor_power:      75,
+  switch_button:       80,
+  connector:           90,
+  mechanical:          95,
+  other:               100,
+};
+
+var ASM_CATEGORY_LABEL = {
+  passive_small:       "Small passives (0201 / 0402)",
+  passive_medium:      "Medium passives (0603 / 0805)",
+  passive_large:       "Large passives (1206+)",
+  diode_transistor:    "Diodes / transistors",
+  led:                 "LEDs",
+  ic_small:            "Small ICs (SOIC-8 / SOT)",
+  ic_medium:           "Medium ICs (SOIC-16+ / QFN / TQFP)",
+  ic_large:            "Large ICs (BGA / large QFN)",
+  crystal_oscillator:  "Crystals / oscillators",
+  inductor_power:      "Power inductors",
+  switch_button:       "Switches / buttons",
+  connector:           "Connectors / headers",
+  mechanical:          "Mechanical / fiducials",
+  other:               "Other",
+};
+
+function _asmPassiveSize(fp) {
+  const m = fp.match(/(?:^|[^0-9])(0201|0402|0603|0805|1206|1210|1218|1812|2010|2512)(?:[^0-9]|$)/i);
+  return m ? m[1] : null;
+}
+
+function _asmClassify(c) {
+  const fp = (c.footprint || "").toUpperCase();
+  const val = (c.value || c.comment || "").toUpperCase();
+  const ref = (c.designator || "").toUpperCase();
+  if (/MOUNT|STANDOFF|HOLE|SHIELD|BRACKET|FIDUCIAL/.test(fp)
+      || /^(MH|MP|FID)\d/.test(ref)) return "mechanical";
+  if (/CONN|HDR|HEADER|USB|JST|MOLEX|SMA|RJ45|RJ-45|MICROFIT|MINIFIT|TERMINAL|SOCKET|SCREW.?TERM|MICROSD|SD.?CARD|PCIE/.test(fp)
+      || /^(J|P|CN|X|CONN)\d/.test(ref)) return "connector";
+  if (/SWITCH|BUTTON|TACTILE|TACT|ROTARY|ENCODER|DIP.?SW/.test(fp)
+      || /^(SW|S|BTN)\d/.test(ref)) return "switch_button";
+  if (/^(D|LED)\d/.test(ref) && (/LED/.test(fp) || /LED/.test(val))) return "led";
+  if (/LED|LIGHTPIPE/.test(fp)) return "led";
+  if (/CRYSTAL|OSC|XTAL|RESONATOR|TCXO|MHZ/.test(fp)
+      || /^(Y|X)\d/.test(ref)) return "crystal_oscillator";
+  if (/^L\d/.test(ref) && !_asmPassiveSize(fp)) return "inductor_power";
+  if (/SOT-?23|SOT-?323|SOT-?523|SOT-?89|SOT-?223|SOD-?123|SOD-?323|SOD-?523|DFN-?6|SC-?70/.test(fp)
+      || /^(Q|D)\d/.test(ref)) return "diode_transistor";
+  if (/BGA|LGA|MODULE|WLCSP|CSP/.test(fp)
+      || /QFN-?(48|56|64|72|88|100)|QFP-?(64|100|144|176|208|240)|LQFP-?(100|144|176|208)|TQFP-?(100|144|176|208)/.test(fp))
+    return "ic_large";
+  if (/SOIC-?(14|16|18|20|24|28)|TSSOP|SSOP|QFN-?(16|20|24|28|32|40|44)|TQFP|LQFP|QFP|MSOP-?10/.test(fp))
+    return "ic_medium";
+  if (/SOIC-?8|SOIC-?N|SOIC8|MSOP-?8|DFN-?(8|10)|SON-?(8|10)|VSON|QFN-?(8|10|12|14)/.test(fp))
+    return "ic_small";
+  const size = _asmPassiveSize(fp);
+  if (size) {
+    if (size === "0201" || size === "0402") return "passive_small";
+    if (size === "0603" || size === "0805") return "passive_medium";
+    return "passive_large";
+  }
+  if (/^[RC]\d/.test(ref)) return "passive_medium";
+  return "other";
+}
+
+// Natural-numerical compare so R2 sorts before R10.
+function _asmNaturalCompare(a, b) {
+  const ax = []; const bx = [];
+  String(a).replace(/(\d+)|(\D+)/g, function(_, d, s){
+    ax.push(d ? parseInt(d, 10) : s); return "";
+  });
+  String(b).replace(/(\d+)|(\D+)/g, function(_, d, s){
+    bx.push(d ? parseInt(d, 10) : s); return "";
+  });
+  const n = Math.min(ax.length, bx.length);
+  for (let i = 0; i < n; i++) {
+    const av = ax[i], bv = bx[i];
+    if (typeof av === "number" && typeof bv === "number") {
+      if (av !== bv) return av - bv;
+    } else {
+      const as = String(av), bs = String(bv);
+      if (as !== bs) return as < bs ? -1 : 1;
+    }
+  }
+  return ax.length - bx.length;
+}
+
+function _asmComponentSide(c) {
+  const l = String(c.layer || c.side || "").toLowerCase();
+  if (l.indexOf("bottom") >= 0) return "bottom";
+  return "top";
+}
+
+// Build a sorted assembly sequence + group boundaries from a flat
+// component list. Pure; safe to call repeatedly.
+function buildAssemblySequence(components, firstSide) {
+  const tagged = components.map(function(c){
+    return {
+      component: c,
+      side: _asmComponentSide(c),
+      category: _asmClassify(c),
+    };
+  });
+  const sideRank = function(side){ return side === firstSide ? 0 : 1; };
+  tagged.sort(function(a, b){
+    const ds = sideRank(a.side) - sideRank(b.side);
+    if (ds !== 0) return ds;
+    const dc = (ASM_CATEGORY_PRIORITY[a.category] || 100)
+             - (ASM_CATEGORY_PRIORITY[b.category] || 100);
+    if (dc !== 0) return dc;
+    const av = String(a.component.value || a.component.comment || "").trim();
+    const bv = String(b.component.value || b.component.comment || "").trim();
+    if (av !== bv) return av.localeCompare(bv, undefined,
+      { numeric: true, sensitivity: "base" });
+    const af = String(a.component.footprint || "").trim();
+    const bf = String(b.component.footprint || "").trim();
+    if (af !== bf) return af.localeCompare(bf);
+    return _asmNaturalCompare(
+      String(a.component.designator || ""),
+      String(b.component.designator || ""));
+  });
+  const steps = tagged.map(function(t, i){
+    return {
+      designator: String(t.component.designator || ""),
+      value: String(t.component.value || t.component.comment || ""),
+      footprint: String(t.component.footprint || ""),
+      mpn: String(t.component.mpn || ""),
+      lib_ref: String(t.component.lib_ref || ""),
+      side: t.side,
+      category: t.category,
+      x: Number(t.component.x_mils || t.component.x || 0),
+      y: Number(t.component.y_mils || t.component.y || 0),
+      rotation: Number(t.component.rotation || 0),
+      index: i,
+    };
+  });
+  // Group runs of identical (side, category, value, footprint).
+  const groups = [];
+  let runStart = 0;
+  for (let i = 1; i <= steps.length; i++) {
+    const cur = steps[i];
+    const prev = steps[i - 1];
+    const sameRun = cur
+      && cur.side === prev.side
+      && cur.category === prev.category
+      && cur.value === prev.value
+      && cur.footprint === prev.footprint;
+    if (!sameRun) {
+      groups.push({
+        startIndex: runStart, endIndex: i,
+        side: prev.side, category: prev.category,
+        value: prev.value, footprint: prev.footprint,
+        count: i - runStart,
+      });
+      runStart = i;
+    }
+  }
+  return { steps: steps, groups: groups };
+}
+
+// Pull PCB component positions (designator/x/y/side/footprint/rotation)
+// from /api/pcb/components. The SCH-side BOM at /api/project/components
+// gives us value/comment, so we merge by designator -- the assembly
+// sequence needs both spatial AND parametric info.
+async function _asmFetchComponents() {
+  const [pcbR, bomR] = await Promise.all([
+    fetchJSON("/api/pcb/components"),
+    fetchJSON("/api/project/components"),
+  ]);
+  const pcb = (pcbR && pcbR.ok && pcbR.data && pcbR.data.components) || [];
+  const bom = (bomR && bomR.ok && bomR.data
+               && (bomR.data.bom || bomR.data.components || bomR.data.rows))
+               || [];
+  // Build designator -> {value, footprint, part#} map from the BOM. The
+  // BOM (SCH side) is the richest source: the PCB geometry payload omits
+  // value AND footprint, so without this enrich every part shows
+  // "(no value)" and a fallback size.
+  const valMap = {};
+  bom.forEach(function(b){
+    const d = String(b.designator || "");
+    if (!d) return;
+    valMap[d] = {
+      // Altium convention: a passive's value lives in the Comment field;
+      // some libraries put it in a Value parameter instead. Take whichever
+      // the BOM resolved, plus a couple of common parameter spellings.
+      value: String(b.value || b.comment || b.Value || b.Comment || "").trim(),
+      footprint: String(b.footprint || b.Footprint || b.pattern || "").trim(),
+      lib_ref: String(b.lib_ref || "").trim(),
+      mpn: String(b.mpn || b.manufacturer_part_number || b.MPN || "").trim(),
+    };
+  });
+  // Project PCB rows + enrich with BOM metadata.
+  return pcb.map(function(p){
+    const enrich = valMap[String(p.designator || "")] || {};
+    return {
+      designator: String(p.designator || ""),
+      value: enrich.value || String(p.comment || "").trim(),
+      comment: String(p.comment || ""),
+      // Prefer the case code MEASURED from the actual pad geometry
+      // (server-side) over the unreliable footprint string -- this is
+      // what fixes "0402 shows as 0603/0805". Falls back to the BOM/PCB
+      // footprint name for ICs/multi-pad parts (no case code).
+      footprint: String(p.case_code || "")
+                 || enrich.footprint || String(p.footprint || ""),
+      case_code: String(p.case_code || ""),
+      fp_length_mils: Number(p.fp_length_mils || 0),
+      lib_ref: enrich.lib_ref || "",
+      mpn: enrich.mpn || "",
+      layer: String(p.layer || ""),
+      side: String(p.side || "Top"),
+      x_mils: Number(p.x || 0),
+      y_mils: Number(p.y || 0),
+      rotation: Number(p.rotation || 0),
+    };
+  });
+}
+
+async function _asmFetchPcbSvg() {
+  // Always fetch the TOP render. The bottom-side view is produced by a
+  // client-side CSS X-mirror (.assembly-flip), which is instant and needs
+  // no server round-trip or dashboard restart -- the prior ?view=bottom
+  // refetch silently no-op'd whenever the dashboard endpoint was stale,
+  // so the board never appeared to flip.
+  const resp = await fetch(
+    "/api/drawing/pcb?nolegend=1&view=top",
+    { cache: "no-store" });
+  if (!resp.ok) return "";
+  const ct = resp.headers.get("Content-Type") || "";
+  if (ct.indexOf("svg") < 0) return "";
+  return await resp.text();
+}
+
+// Click-on-PCB-component handler. Walks up from ev.target looking for
+// a data-designator attribute, then jumps the assembly cursor to that
+// step. Mirrors the Drawing tab's attachSvgInteractivity pattern but
+// scoped to assembly's index lookup. Only left-click; right/middle
+// stay free for pan via attachZoomPan.
+function _asmAttachSvgClick(svg) {
+  // Build a designator -> step index lookup so click resolution is O(1).
+  const indexByDes = {};
+  assemblyState.sequence.forEach(function(s, i){
+    indexByDes[s.designator] = i;
+  });
+  svg.addEventListener("click", function(ev){
+    if (ev.button !== 0) return;
+    let el = ev.target;
+    while (el && el !== svg) {
+      const des = el.getAttribute && el.getAttribute("data-designator");
+      if (des) {
+        const idx = indexByDes[des];
+        if (typeof idx === "number") {
+          _asmSelect(idx);
+          ev.preventDefault();
+          ev.stopPropagation();
+        }
+        return;
+      }
+      el = el.parentNode;
+    }
+  });
+}
+
+async function loadAssembly() {
+  const host = $("#assembly-host");
+  const status = $("#assembly-status");
+  if (!host) return;
+  status.textContent = "loading components...";
+
+  // Pull project key for storage namespacing.
+  try {
+    const pr = state.data.project || await fetchJSON("/api/project/info");
+    state.data.project = pr;
+    const data = pr && pr.data || {};
+    assemblyState.projectKey = String(
+      data.project_path || data.path || data.name || "default");
+  } catch (e) {
+    assemblyState.projectKey = "default";
+  }
+  assemblyState.firstSide = _asmLoadFirstSide();
+  assemblyState.viewSide = _asmLoadViewSide();
+  // Sync the toolbar toggle buttons to the hydrated state so the
+  // "active" class reflects what's in storage.
+  $$("[data-asm-firstside]").forEach(function(b){
+    b.classList.toggle("active",
+      b.dataset.asmFirstside === assemblyState.firstSide);
+  });
+  $$("[data-asm-view]").forEach(function(b){
+    b.classList.toggle("active",
+      b.dataset.asmView === assemblyState.viewSide);
+  });
+
+  const components = await _asmFetchComponents();
+  assemblyState.components = components;
+  if (!components.length) {
+    host.innerHTML = "<div class='empty' style='padding:24px;'>"
+      + "No components in the focused project's BOM. Open a PCB and "
+      + "refresh.</div>";
+    status.textContent = "0 components";
+    _asmRenderSidebar();
+    return;
+  }
+  const seq = buildAssemblySequence(components, assemblyState.firstSide);
+  assemblyState.sequence = seq.steps;
+  assemblyState.groups = seq.groups;
+  // Re-hydrate progress from storage.
+  const stored = _asmLoadProgress();
+  assemblyState.placed = {};
+  if (stored && Array.isArray(stored.placed)) {
+    stored.placed.forEach(function(d){ assemblyState.placed[d] = true; });
+    assemblyState.currentIndex = Math.max(0,
+      Math.min(seq.steps.length - 1, stored.cursor || 0));
+  } else {
+    assemblyState.currentIndex = 0;
+  }
+  status.textContent = seq.steps.length + " components";
+
+  // Open the board view on the CURRENT part's side so the first render is
+  // already correctly oriented (the rest auto-follows via _asmSelect).
+  const cur0 = assemblyState.sequence[assemblyState.currentIndex];
+  if (cur0 && (cur0.side === "top" || cur0.side === "bottom")) {
+    assemblyState.viewSide = cur0.side;
+    _asmSaveViewSide(cur0.side);
+    $$("[data-asm-view]").forEach(function(b){
+      b.classList.toggle("active", b.dataset.asmView === cur0.side);
+    });
+  }
+
+  // Render the SVG.
+  status.textContent = "rendering PCB...";
+  const svgText = await _asmFetchPcbSvg();
+  host.innerHTML = svgText || "<div class='empty' style='padding:24px;'>"
+    + "PCB render unavailable -- is a PCB document open?</div>";
+  assemblyState.svg = host.querySelector("svg");
+  if (assemblyState.svg) {
+    assemblyState.svg.setAttribute("width", "100%");
+    assemblyState.svg.setAttribute("height", "100%");
+    if (typeof attachZoomPan === "function") attachZoomPan(assemblyState.svg);
+    _asmAttachSvgClick(assemblyState.svg);
+  }
+  status.textContent = seq.steps.length + " components";
+
+  _asmApplyViewFlip();
+  _asmRenderSidebar();
+  _asmHighlightCurrent();
+  _asmUpdateProgress();
+}
+
+// Passive = identified by its VALUE (10k / 100nF / 4.7uH), not a part
+// number. Keyed off the reference-designator prefix (R/C/L/FB/networks).
+function _asmIsPassive(des) {
+  return /^(R|C|L|FB|RN|CN|RV|VR)\d/i.test((des || "").trim());
+}
+// Best "what is this part" label, robust to libraries that carry no value
+// parameter at all (see the value-sourcing strategy): use the resolved
+// value first; if it's missing/placeholder, fall back to the footprint
+// for a passive (so you at least see 0402 / 0805) or the part number for
+// an active. Never returns a raw "=Value" macro or "*".
+function _asmValueLabel(step) {
+  const v = (step.value || "").trim();
+  if (v && v !== "*" && v.toLowerCase() !== "=value") return v;
+  if (_asmIsPassive(step.designator))
+    return (step.footprint || "").trim() || "(no value)";
+  return (step.mpn || step.lib_ref || "").trim() || "(no value)";
+}
+// Part number for the secondary line (MPN preferred, else library ref).
+function _asmPartNumber(step) {
+  return (step.mpn || step.lib_ref || "").trim();
+}
+
+function _asmRenderSidebar() {
+  const list = $("#assembly-list");
+  if (!list) return;
+  list.innerHTML = "";
+  if (!assemblyState.sequence.length) {
+    list.innerHTML = "<div class='empty' style='padding:24px;'>no parts</div>";
+    return;
+  }
+  const seq = assemblyState.sequence;
+  const groups = assemblyState.groups;
+  // Group header keyed by group-start; row keyed by step index.
+  let gi = 0;
+  for (let i = 0; i < seq.length; i++) {
+    if (groups[gi] && i === groups[gi].startIndex) {
+      const g = groups[gi];
+      const lbl = (g.side === "top" ? "TOP · " : "BOT · ")
+        + (ASM_CATEGORY_LABEL[g.category] || g.category)
+        + " · " + (g.value || "(no value)")
+        + " · " + (g.footprint || "(no fp)")
+        + "  ×" + g.count;
+      const h = el("div", {class: "assembly-group-header"}, lbl);
+      list.appendChild(h);
+      gi++;
+    }
+    const step = seq[i];
+    const isPlaced = !!assemblyState.placed[step.designator];
+    const isCurrent = i === assemblyState.currentIndex;
+    const row = el("div",
+      {class: "assembly-row"
+        + (isCurrent ? " current" : "")
+        + (isPlaced ? " placed" : ""),
+       "data-step-index": String(i)},
+      el("span", {class: "check"}, isPlaced ? "✓" : ""),
+      el("span", {class: "des"}, step.designator),
+      el("span", {class: "val"},
+        _asmValueLabel(step),
+        step.footprint ? " · " + step.footprint : ""),
+      el("span", {class: "side " + step.side}, step.side === "top" ? "T" : "B"));
+    row.addEventListener("click", function(ev){
+      // Click on the check cell toggles placed; anywhere else selects.
+      if (ev.target && ev.target.classList
+          && ev.target.classList.contains("check")) {
+        _asmTogglePlaced(i);
+      } else {
+        _asmSelect(i);
+      }
+    });
+    list.appendChild(row);
+  }
+  _asmRenderCurrentPanel();
+  _asmScrollCurrentIntoView();
+}
+
+function _asmRenderCurrentPanel() {
+  const host = $("#assembly-current");
+  if (!host) return;
+  const step = assemblyState.sequence[assemblyState.currentIndex];
+  if (!step) {
+    host.innerHTML = "<div class='empty' style='font-size:11px;'>no part selected</div>";
+    return;
+  }
+  const total = assemblyState.sequence.length;
+  const placed = !!assemblyState.placed[step.designator];
+  host.innerHTML = "";
+  const header = el("div", {style:"display:flex; align-items:baseline; gap:8px;"},
+    el("strong", {class:"mono",
+      style:"font-size:16px; color:" + (placed ? "var(--text-mute)" : "var(--ok)") + ";"},
+      step.designator),
+    el("span", {style:"font-size:13px; font-weight:600;"},
+      _asmValueLabel(step)),
+    el("span", {class:"hint", style:"margin-left:auto;"},
+      (assemblyState.currentIndex + 1) + " of " + total));
+  host.appendChild(header);
+  const meta = el("div", {style:"margin-top:4px; font-size:11px; color:var(--text-mute);"},
+    (step.footprint || "(no footprint)")
+    + " · " + (ASM_CATEGORY_LABEL[step.category] || step.category)
+    + " · " + step.side);
+  host.appendChild(meta);
+  // Part number on its own line so passives show BOTH value (above) and
+  // their MPN/library ref here. Omitted when there's no part number.
+  const pn = _asmPartNumber(step);
+  if (pn) {
+    host.appendChild(el("div", {class:"mono",
+      style:"margin-top:2px; font-size:11px; color:var(--text-mute);"},
+      "PN: " + pn));
+  }
+  const coords = el("div", {class:"mono", style:"margin-top:2px; font-size:10px; color:var(--text-mute);"},
+    "x=" + step.x.toFixed(1) + " mils  y=" + step.y.toFixed(1) + " mils"
+    + "  rot=" + Math.round(step.rotation) + "°");
+  host.appendChild(coords);
+}
+
+function _asmScrollCurrentIntoView() {
+  const list = $("#assembly-list");
+  if (!list) return;
+  const row = list.querySelector(".assembly-row.current");
+  if (row) row.scrollIntoView({ block: "nearest" });
+}
+
+function _asmSelect(i) {
+  if (i < 0 || i >= assemblyState.sequence.length) return;
+  assemblyState.currentIndex = i;
+  _asmSaveProgress();
+  _asmRenderSidebar();
+  _asmUpdateProgress();
+  // Auto-follow the board view to the part's side: a bottom-side part is
+  // shown from the BOTTOM (server re-renders with the X-mirror + reversed
+  // layer draw order, so the board reads as if flipped on the bench).
+  // _asmSetViewSide no-ops when already on that side; when it flips it
+  // refetches the SVG and re-highlights at the end. Otherwise highlight
+  // synchronously here.
+  const step = assemblyState.sequence[i];
+  if (step && (step.side === "top" || step.side === "bottom")
+      && step.side !== assemblyState.viewSide) {
+    _asmSetViewSide(step.side);
+  } else {
+    _asmHighlightCurrent();
+  }
+}
+
+function _asmTogglePlaced(i) {
+  const step = assemblyState.sequence[i];
+  if (!step) return;
+  if (assemblyState.placed[step.designator]) {
+    delete assemblyState.placed[step.designator];
+  } else {
+    assemblyState.placed[step.designator] = true;
+  }
+  _asmSaveProgress();
+  _asmRenderSidebar();
+  _asmUpdateProgress();
+}
+
+function _asmMarkPlacedAndNext() {
+  const step = assemblyState.sequence[assemblyState.currentIndex];
+  if (step) assemblyState.placed[step.designator] = true;
+  assemblyState.currentIndex = Math.min(
+    assemblyState.currentIndex + 1, assemblyState.sequence.length - 1);
+  _asmSaveProgress();
+  _asmRenderSidebar();
+  _asmHighlightCurrent();
+  _asmUpdateProgress();
+}
+
+function _asmNext() { _asmSelect(assemblyState.currentIndex + 1); }
+function _asmPrev() { _asmSelect(assemblyState.currentIndex - 1); }
+
+function _asmSkipGroup() {
+  const ci = assemblyState.currentIndex;
+  const g = assemblyState.groups.find(function(g){
+    return ci >= g.startIndex && ci < g.endIndex;
+  });
+  if (!g) return;
+  const next = assemblyState.groups.find(function(x){
+    return x.startIndex >= g.endIndex;
+  });
+  _asmSelect(next ? next.startIndex : assemblyState.sequence.length - 1);
+}
+
+function _asmReset() {
+  assemblyState.placed = {};
+  assemblyState.currentIndex = 0;
+  try { localStorage.removeItem(_asmStorageKey()); } catch (e) {}
+  _asmRenderSidebar();
+  _asmHighlightCurrent();
+  _asmUpdateProgress();
+}
+
+function _asmUpdateProgress() {
+  const total = assemblyState.sequence.length;
+  let placed = 0;
+  for (let i = 0; i < total; i++) {
+    if (assemblyState.placed[assemblyState.sequence[i].designator]) placed++;
+  }
+  const pct = total > 0 ? (placed / total) * 100 : 0;
+  const text = $("#assembly-progress-text");
+  const fill = $("#assembly-progress-fill");
+  const pctEl = $("#assembly-progress-pct");
+  if (text) text.textContent = "placing "
+    + (Math.min(assemblyState.currentIndex + 1, total)) + " / " + total;
+  if (fill) fill.style.width = pct + "%";
+  if (pctEl) pctEl.textContent = placed + " / " + total
+    + " (" + pct.toFixed(1) + "%)";
+  // Update next/prev button states.
+  const prevBtn = $("#assembly-prev");
+  const nextBtn = $("#assembly-next");
+  if (prevBtn) prevBtn.disabled = assemblyState.currentIndex <= 0;
+  if (nextBtn) nextBtn.disabled = assemblyState.currentIndex >= total - 1;
+}
+
+// Rough footprint span in mils (component body, NOT text label). Drives
+// the highlight box size + zoom window so the operator sees the real
+// part outline, not the designator text. Returns half-width / half-height
+// so a centred rect can be built directly.
+function _asmFootprintSpanMils(footprint) {
+  const fp = (footprint || "").toUpperCase();
+  // Imperial passive case codes. mil units to match the PCB viewBox.
+  if (/(?:^|[^0-9])0201(?:[^0-9]|$)/.test(fp)) return { hw: 25, hh: 15 };
+  if (/(?:^|[^0-9])0402(?:[^0-9]|$)/.test(fp)) return { hw: 40, hh: 25 };
+  if (/(?:^|[^0-9])0603(?:[^0-9]|$)/.test(fp)) return { hw: 65, hh: 35 };
+  if (/(?:^|[^0-9])0805(?:[^0-9]|$)/.test(fp)) return { hw: 80, hh: 55 };
+  if (/(?:^|[^0-9])1206(?:[^0-9]|$)/.test(fp)) return { hw: 130, hh: 70 };
+  if (/(?:^|[^0-9])1210(?:[^0-9]|$)/.test(fp)) return { hw: 130, hh: 110 };
+  if (/(?:^|[^0-9])1812(?:[^0-9]|$)/.test(fp)) return { hw: 180, hh: 130 };
+  if (/(?:^|[^0-9])2010(?:[^0-9]|$)/.test(fp)) return { hw: 200, hh: 110 };
+  if (/(?:^|[^0-9])2512(?:[^0-9]|$)/.test(fp)) return { hw: 250, hh: 130 };
+  if (/SOT-?23/.test(fp))  return { hw: 115, hh: 60 };
+  if (/SOT-?223/.test(fp)) return { hw: 250, hh: 140 };
+  // SOIC: 1.27 mm pitch, body ~N*65 mil + ~80 mil.
+  const soic = fp.match(/SOIC-?(\d+)/);
+  if (soic) {
+    const n = parseInt(soic[1], 10);
+    return { hw: Math.max(80, n * 35), hh: 80 };
+  }
+  // QFP/QFN: side ~ sqrt(pinCount)*30 + 80 mil.
+  const qfp = fp.match(/(?:QFP|QFN|LQFP|TQFP|TQFN)-?(\d+)/);
+  if (qfp) {
+    const n = parseInt(qfp[1], 10);
+    const side = Math.max(80, Math.sqrt(n) * 30 + 80);
+    return { hw: side, hh: side };
+  }
+  // BGA: harder, just give a big box.
+  if (/BGA|LGA|MODULE/.test(fp)) return { hw: 250, hh: 250 };
+  if (/CONN|HDR|HEADER|USB|JST|SMA|RJ45/.test(fp)) return { hw: 320, hh: 160 };
+  if (/CRYSTAL|OSC|XTAL/.test(fp)) return { hw: 200, hh: 125 };
+  // Fallback: ~5 mm body so the highlight is always visible.
+  return { hw: 100, hh: 100 };
+}
+
+function _asmHighlightCurrent() {
+  const svg = assemblyState.svg;
+  if (!svg) return;
+  const NS = "http://www.w3.org/2000/svg";
+  // Drop the previous coloured-part overlay (and any legacy spotlight
+  // nodes from older builds).
+  svg.querySelectorAll(
+    ".asm-color-part, .assembly-highlight, .assembly-spotlight, .assembly-spotlight-defs"
+  ).forEach(function(n){ n.remove(); });
+  const step = assemblyState.sequence[assemblyState.currentIndex];
+  if (!step) { svg.classList.remove("asm-focus"); return; }
+
+  // Desaturate the whole board (CSS .asm-focus -> grayscale) and re-draw
+  // ONLY the current part's footprint in full colour. The renderer tags
+  // every pad <g> and the designator label with data-designator = the
+  // part's refdes; we clone those into an un-filtered overlay group
+  // placed in the SAME coordinate parent as the layers, so it inherits
+  // the flip-Y / bottom-view X-mirror transforms automatically and lands
+  // exactly over the original (now-gray) primitives. Result: the part
+  // being placed reads in colour against a gray board -- unambiguous even
+  // when small parts sit shoulder to shoulder.
+  const des = step.designator;
+  const anyLayer = svg.querySelector("g.layer");
+  const parent = anyLayer ? anyLayer.parentNode : svg;
+  let found = 0;
+  if (des) {
+    const colorG = document.createElementNS(NS, "g");
+    colorG.setAttribute("class", "asm-color-part");
+    // Query BEFORE inserting colorG so we only clone originals, never a
+    // prior clone.
+    svg.querySelectorAll('[data-designator="' + cssEscape(des) + '"]')
+      .forEach(function(n){ colorG.appendChild(n.cloneNode(true)); found++; });
+    if (found) parent.appendChild(colorG);
+  }
+  svg.classList.toggle("asm-focus", found > 0);
+
+  // Centre the view on the part at a MODERATE, consistent zoom -- enough
+  // to read the part (it's the only thing in colour) while keeping enough
+  // board around it to stay oriented. Window = ~28% of the board's larger
+  // dimension, clamped. Coordinates are DISPLAY-space: the renderer flips
+  // Y (scale(1,-1)) so we negate step.y; bottom view also mirrors X around
+  // the board centre. (Do NOT use the clone's getBBox here -- it reports
+  // pre-flip world coords and pans the board off-screen.)
+  if (typeof svg._zoomTo === "function" && (step.x || step.y)) {
+    const fb = svg._fullBox || { x: 0, w: 4000, h: 4000 };
+    // The bottom-view mirror is a CSS scaleX on the whole SVG, so the
+    // viewBox stays in un-mirrored coords -- centre on the part directly
+    // (the CSS mirrors around the SVG centre, keeping it centred).
+    const zx = step.x;
+    const zy = -step.y;
+    const boardMax = Math.max(fb.w, fb.h);
+    const side = Math.min(boardMax, Math.max(900, boardMax * 0.28));
+    if (isFinite(zx) && isFinite(zy) && isFinite(side) && side > 0) {
+      svg._zoomTo(zx - side / 2, zy - side / 2, side, side);
+    }
+  }
+  try { _asmUpdateMinimap(); } catch (e) {}
+}
+
+// Overlay minimap (top-right of the board view): the whole board at a
+// glance, the current viewport rectangle, and a dot at the current part,
+// so you always know WHERE on the board the zoomed-in part sits. Rebuilt
+// on each step; the viewport rect also tracks live pan/zoom via the
+// svg._onViewChange hook.
+function _mmRect(cls, x, y, w, h) {
+  const r = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+  r.setAttribute("class", cls);
+  r.setAttribute("x", x); r.setAttribute("y", y);
+  r.setAttribute("width", w); r.setAttribute("height", h);
+  return r;
+}
+function _asmUpdateMinimap() {
+  // Mount the minimap in the STAGE wrapper, NOT inside #assembly-host:
+  // host.querySelector("svg") is used to grab the board SVG, and a second
+  // <svg> (the minimap) inside host can shadow it, leaving the board SVG
+  // unsized (symptom: only the minimap renders). The stage is the
+  // position:relative parent that #assembly-host fills, so an absolute
+  // overlay anchored to it sits in the same spot.
+  const mount = $("#assembly-stage") || $("#assembly-host");
+  const svg = assemblyState.svg;
+  if (!mount || !svg || !svg._fullBox) return;
+  const NS = "http://www.w3.org/2000/svg";
+  const fb = svg._fullBox;
+  if (!isFinite(fb.w) || !isFinite(fb.h) || fb.w <= 0 || fb.h <= 0) return;
+  let mm = mount.querySelector(".asm-minimap");
+  if (!mm) {
+    mm = document.createElementNS(NS, "svg");
+    mm.setAttribute("class", "asm-minimap");
+    mm.setAttribute("preserveAspectRatio", "xMidYMid meet");
+    mount.appendChild(mm);
+  }
+  mm.setAttribute("viewBox", fb.x + " " + fb.y + " " + fb.w + " " + fb.h);
+  const aspect = fb.h / fb.w;
+  mm.setAttribute("width", 150);
+  mm.setAttribute("height", Math.max(70, Math.min(200, Math.round(150 * aspect))));
+  // Mirror the minimap in bottom view so it matches the (CSS-mirrored)
+  // main board -- otherwise the dot sits on the opposite side from where
+  // the part actually appears. Dot/clone use un-mirrored coords; the CSS
+  // mirror flips them together, keeping the dot on the part.
+  mm.classList.toggle("mm-flip", assemblyState.viewSide === "bottom");
+  // Clone the actual board into the minimap ONCE per source SVG (cheap on
+  // step changes -- only the dot/viewport move). Keep the board's flip-Y
+  // wrapper so the thumbnail shares the minimap's coordinate space, and
+  // strip the embedded <style>/legend/scripts -- the primitives carry
+  // inline colours, so the thumbnail renders fine without them. The bg
+  // rect inside the wrapper gives the minimap its dark backdrop.
+  if (mm._srcSvg !== svg) {
+    mm._srcSvg = svg;
+    while (mm.firstChild) mm.removeChild(mm.firstChild);
+    const wrapper = svg.querySelector("g");
+    if (wrapper) {
+      const clone = wrapper.cloneNode(true);
+      clone.querySelectorAll("style, foreignObject, script")
+        .forEach(function(n){ n.remove(); });
+      clone.setAttribute("class", "mm-content");
+      mm.appendChild(clone);
+    }
+    mm.appendChild(_mmRect("mm-view", fb.x, fb.y, fb.w, fb.h));
+    const dot = document.createElementNS(NS, "circle");
+    dot.setAttribute("class", "mm-dot");
+    dot.setAttribute("r", Math.max(fb.w, fb.h) * 0.02);
+    mm.appendChild(dot);
+  }
+  // Per-step: move the viewport rectangle + part dot.
+  const vb = svg._getViewBox ? svg._getViewBox() : fb;
+  const vrect = mm.querySelector(".mm-view");
+  if (vrect) {
+    vrect.setAttribute("x", vb.x); vrect.setAttribute("y", vb.y);
+    vrect.setAttribute("width", vb.w); vrect.setAttribute("height", vb.h);
+  }
+  const step = assemblyState.sequence[assemblyState.currentIndex];
+  const dot = mm.querySelector(".mm-dot");
+  if (dot) {
+    if (step && (step.x || step.y)) {
+      // Minimap stays top-view (it isn't CSS-mirrored), so the dot uses
+      // un-mirrored coords -- same space as the cloned thumbnail.
+      dot.setAttribute("cx", step.x);
+      dot.setAttribute("cy", -step.y);
+      dot.removeAttribute("display");
+    } else {
+      dot.setAttribute("display", "none");
+    }
+  }
+  // Keep the viewport rectangle in sync with live pan/zoom of the board.
+  svg._onViewChange = function() {
+    const r = mm.querySelector(".mm-view");
+    if (!r || !svg._getViewBox) return;
+    const v = svg._getViewBox();
+    r.setAttribute("x", v.x); r.setAttribute("y", v.y);
+    r.setAttribute("width", v.w); r.setAttribute("height", v.h);
+  };
+}
+
+function _asmApplyViewFlip() {
+  const host = $("#assembly-host");
+  if (!host) return;
+  const bottom = assemblyState.viewSide === "bottom";
+  host.classList.toggle("assembly-flip", bottom);
+  if (assemblyState.svg) _asmApplyLayerSide(assemblyState.svg, bottom);
+  // Force the minimap to re-clone the now-reordered board next update.
+  const stage = $("#assembly-stage");
+  const mm = stage && stage.querySelector(".asm-minimap");
+  if (mm) mm._srcSvg = null;
+}
+
+// Bottom-view layer SEQUENCE, applied client-side so it needs no server
+// re-render: fade the top-side copper, make the bottom-side copper full,
+// and paint the copper layers in REVERSE so the bottom side sits on top --
+// the same thing the server's view=bottom render does, but without the
+// (stale-prone) round-trip. Fully reversible for the top view.
+function _asmApplyLayerSide(svg, bottom) {
+  const first = svg.querySelector("g.layer[data-layer]");
+  if (!first) return;
+  const parent = first.parentNode;
+  const layers = Array.prototype.filter.call(parent.children, function(n){
+    if (!n.classList || !n.classList.contains("layer")) return false;
+    const lay = n.getAttribute("data-layer") || "";
+    return lay && lay !== "Outline" && lay !== "Designators";
+  });
+  if (!layers.length) return;
+  // Stash original sequence, anchor, and opacities once per SVG.
+  if (!parent._origLayerSeq) {
+    parent._origLayerSeq = layers.slice();
+    parent._layerAnchor = layers[layers.length - 1].nextSibling;
+    layers.forEach(function(g){ g._origOp = g.getAttribute("opacity") || ""; });
+  }
+  const seq = parent._origLayerSeq;
+  seq.forEach(function(g){
+    const lay = g.getAttribute("data-layer") || "";
+    if (bottom) {
+      if (/^Top/.test(lay)) g.setAttribute("opacity", "0.4");
+      else if (/^Bottom/.test(lay)) g.setAttribute("opacity", "1");
+    } else if (g._origOp) {
+      g.setAttribute("opacity", g._origOp);
+    } else {
+      g.removeAttribute("opacity");
+    }
+  });
+  const ordered = bottom ? seq.slice().reverse() : seq.slice();
+  ordered.forEach(function(g){ parent.insertBefore(g, parent._layerAnchor); });
+}
+
+function _asmSetFirstSide(side) {
+  if (side !== "top" && side !== "bottom") return;
+  if (assemblyState.firstSide === side) return;
+  assemblyState.firstSide = side;
+  _asmSaveFirstSide(side);
+  // Re-sort with new first-side; placed map is keyed by designator so
+  // tick-offs survive.
+  if (assemblyState.components.length) {
+    const seq = buildAssemblySequence(
+      assemblyState.components, assemblyState.firstSide);
+    assemblyState.sequence = seq.steps;
+    assemblyState.groups = seq.groups;
+    assemblyState.currentIndex = 0;
+  }
+  // Update toggle buttons.
+  $$("#assembly-side-row .drawing-mode").forEach(function(b){
+    b.classList.toggle("active", b.dataset.asmFirstside === side);
+  });
+  _asmSaveProgress();
+  _asmRenderSidebar();
+  _asmHighlightCurrent();
+  _asmUpdateProgress();
+}
+
+function _asmSetViewSide(side) {
+  if (side !== "top" && side !== "bottom") return;
+  if (assemblyState.viewSide === side) return;
+  assemblyState.viewSide = side;
+  _asmSaveViewSide(side);
+  $$("[data-asm-view]").forEach(function(b){
+    b.classList.toggle("active", b.dataset.asmView === side);
+  });
+  // Flip is a pure CSS X-mirror on the board (.assembly-flip) -- no
+  // refetch needed, so it's instant and can't be defeated by a stale
+  // dashboard. Re-highlight to re-centre the zoom on the current part.
+  _asmApplyViewFlip();
+  _asmHighlightCurrent();
+}
 
 async function loadActions() {
   if (state.loaded.actions) return;
@@ -6574,6 +7994,23 @@ window.addEventListener("DOMContentLoaded", function(){
   $("#drawer-next").addEventListener("click", function(){
     drawerStepComponent(+1);
   });
+  // Copy the drawer's current designator / net name to clipboard. Common
+  // flow: open a component, copy the designator, paste it into an agent
+  // prompt or chat. Shift+C also fires this when the drawer is open.
+  function copyDrawerName() {
+    const name = ($("#drawer-cmd").textContent || "").trim();
+    if (!name || name === "-") return;
+    if (!navigator.clipboard) {
+      showToast("clipboard unavailable", "err");
+      return;
+    }
+    navigator.clipboard.writeText(name).then(function(){
+      showToast("copied: " + name, "ok");
+    }).catch(function(e){
+      showToast("clipboard failed: " + e.message, "err");
+    });
+  }
+  $("#drawer-copy").addEventListener("click", copyDrawerName);
   // Alt+Left also walks back through the drawer history. Skip when
   // a text input owns focus so it doesn't fight with browser undo.
   document.addEventListener("keydown", function(ev) {
@@ -6586,7 +8023,398 @@ window.addEventListener("DOMContentLoaded", function(){
       }
     }
   });
+
   $("#health-run").addEventListener("click", runHealth);
+
+  // Lint sweep wiring. Calls /api/lint (which proxies all audit.* checks
+  // via the bridge in one pass) and surfaces per-section violation counts
+  // with click-to-expand item drill-down. Mirrors the design_lint_report
+  // MCP tool surface, but consumable in the browser without spawning the
+  // agent.
+  const lintRunBtn = $("#lint-run");
+  if (lintRunBtn) lintRunBtn.addEventListener("click", runLint);
+  // "Show only violations" toggle: pure CSS class flip, applies to the
+  // current render and survives subsequent re-runs (the label stays
+  // visible after the first lint completes).
+  const violOnly = $("#lint-violations-only");
+  if (violOnly) violOnly.addEventListener("change", function(){
+    const lintBody = $("#lint-body");
+    if (lintBody) lintBody.classList.toggle("lint-hide-clean", violOnly.checked);
+  });
+
+  // ---- Assembly tab wiring ----
+  // Side toggle (first-side preference): which side gets placed first.
+  $$("[data-asm-firstside]").forEach(function(b){
+    b.addEventListener("click", function(){
+      _asmSetFirstSide(b.dataset.asmFirstside);
+    });
+  });
+  // View toggle (board-flip): mirror SVG X when showing bottom.
+  $$("[data-asm-view]").forEach(function(b){
+    b.addEventListener("click", function(){
+      _asmSetViewSide(b.dataset.asmView);
+    });
+  });
+  // (Per-tab assembly refresh removed -- the global nav refresh button /
+  // the R shortcut now invalidates the PCB cache and reloads the
+  // sequence, so there's a single refresh control.)
+  const asmReset = $("#assembly-reset");
+  if (asmReset) asmReset.addEventListener("click", function(){
+    uiConfirm("Reset all placement progress for this board?",
+      {danger: true, confirmText: "Reset", title: "Reset progress"})
+      .then(function(ok){ if (ok) _asmReset(); });
+  });
+  const asmPrev = $("#assembly-prev");
+  if (asmPrev) asmPrev.addEventListener("click", _asmPrev);
+  const asmNext = $("#assembly-next");
+  if (asmNext) asmNext.addEventListener("click", _asmNext);
+  const asmMark = $("#assembly-mark");
+  if (asmMark) asmMark.addEventListener("click", _asmMarkPlacedAndNext);
+  const asmSkip = $("#assembly-skip");
+  if (asmSkip) asmSkip.addEventListener("click", _asmSkipGroup);
+
+  // Keyboard shortcuts -- only active when the Assembly tab is current.
+  document.addEventListener("keydown", function(ev){
+    if (state.activeTab !== "assembly") return;
+    const t = ev.target;
+    if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA"
+              || t.tagName === "SELECT" || t.isContentEditable)) return;
+    if (ev.ctrlKey || ev.altKey || ev.metaKey) return;
+    if (ev.key === "ArrowDown" || ev.key === "ArrowRight"
+        || ev.key === "j" || ev.key === "J") {
+      ev.preventDefault(); _asmNext();
+    } else if (ev.key === "ArrowUp" || ev.key === "ArrowLeft"
+               || ev.key === "k" || ev.key === "K") {
+      ev.preventDefault(); _asmPrev();
+    } else if (ev.key === " ") {
+      ev.preventDefault(); _asmMarkPlacedAndNext();
+    } else if (ev.key === "PageDown") {
+      ev.preventDefault(); _asmSkipGroup();
+    } else if (ev.key === "f" || ev.key === "F") {
+      // F flips the board view (top ↔ bottom).
+      ev.preventDefault();
+      _asmSetViewSide(assemblyState.viewSide === "top" ? "bottom" : "top");
+    }
+  });
+});
+
+async function runLint() {
+  const body = $("#lint-body");
+  const status = $("#lint-status");
+  if (!body) return;
+  body.innerHTML = "<div class='empty'>running checks (this can take a few seconds)...</div>";
+  if (status) status.textContent = "";
+  // Reveal the "Show only violations" toggle now that we have results.
+  // Keeps it hidden on first page-load when there's nothing to filter.
+  const violLabel = $("#lint-violations-only-label");
+  if (violLabel) violLabel.style.display = "inline-flex";
+  let resp;
+  try {
+    resp = await fetchJSON("/api/lint");
+  } catch (e) {
+    body.innerHTML = "";
+    body.appendChild(emptyBox(String(e)));
+    return;
+  }
+  if (!resp || typeof resp !== "object") {
+    body.innerHTML = "";
+    body.appendChild(emptyBox("no lint response"));
+    return;
+  }
+  const summary = resp.summary || {};
+  const sections = resp.sections || {};
+  const totals = resp.totals || {};
+  const failed = resp._failed || [];
+
+  body.innerHTML = "";
+
+  // Top-of-panel totals strip.
+  const totalsRow = el("div", {class: "row-actions", style: "margin-bottom:12px;"});
+  totalsRow.appendChild(el("span",
+    {class: "tag " + ((totals.violations || 0) > 0 ? "err" : "ok")},
+    (totals.violations || 0) + " violations"));
+  // Severity breakdown: critical / warning / info -- agent should
+  // sort review writeup that way too.
+  const sev = totals.violations_by_severity || {};
+  if (sev.critical) totalsRow.appendChild(el("span",
+    {class: "tag err"}, sev.critical + " critical"));
+  if (sev.warning) totalsRow.appendChild(el("span",
+    {class: "tag warn"}, sev.warning + " warning"));
+  if (sev.info) totalsRow.appendChild(el("span",
+    {class: "tag"}, sev.info + " info"));
+  totalsRow.appendChild(el("span", {class: "hint"},
+    (totals.checks_run || 0) + " checks run"));
+  if (totals.checks_failed) totalsRow.appendChild(el("span",
+    {class: "tag warn"}, totals.checks_failed + " checks failed"));
+  body.appendChild(totalsRow);
+
+  // Per-section row. Grouped into Schematic / PCB / Other so 15+ checks
+  // don't read as a flat alphabetical wall. Each row is click-to-expand
+  // and severity-coloured (err if violations > 0, ok otherwise, warn if
+  // the check failed altogether). Display labels are human-friendly;
+  // raw section keys are kept on the title attribute for grep / cross-ref.
+  const SECTION_META = {
+    component_param_visibility: {
+      group: "sch",
+      label: "Component parameters (C/L/R value, IC MPN, voltage)",
+    },
+    power_port_orientation: {
+      group: "sch",
+      label: "Power-port orientation (GND down, rails up)",
+    },
+    find_floating_ports: {
+      group: "sch",
+      label: "Floating ports (no pin or sheet-entry on net)",
+    },
+    find_unmatched_ports: {
+      group: "sch",
+      label: "Port direction (multi-output / no-driver nets)",
+    },
+    find_designator_collisions: {
+      group: "sch",
+      label: "Duplicate designators across sheets",
+    },
+    find_off_grid_components: {
+      group: "sch",
+      label: "Off-grid components (100mil snap)",
+    },
+    find_unconnected_ic_pins: {
+      group: "sch",
+      label: "Unconnected IC pins (excl. NC/DNC by name)",
+    },
+    find_pin_net_name_mismatches: {
+      group: "sch",
+      label: "Pin / net naming mismatches (VCC pin on non-power net etc)",
+    },
+    find_missing_decoupling: {
+      group: "sch",
+      label: "ICs missing local decoupling caps",
+    },
+    find_missing_datasheets: {
+      group: "sch",
+      label: "ICs without a datasheet URL parameter",
+    },
+    find_mpn_inconsistencies: {
+      group: "sch",
+      label: "Same lib_ref + value but different MPNs",
+    },
+    find_single_pin_nets: {
+      group: "sch",
+      label: "Named nets with only one pin (broken connections)",
+    },
+    find_non_embedded_images: {
+      group: "sch",
+      label: "Non-embedded images (break on other machines)",
+    },
+    find_mixed_designator_rotation: {
+      group: "pcb",
+      label: "Mixed designator rotation on silkscreen (0+180 / 90+270)",
+    },
+    find_unlocked_component_primitives: {
+      group: "pcb",
+      label: "Components with unlocked primitives (drift risk)",
+    },
+    find_mirrored_pcb_text: {
+      group: "pcb",
+      label: "PCB text mirrored on wrong overlay",
+    },
+    find_visible_supplier_pn: {
+      group: "sch",
+      label: "Visible supplier PN on schematic (use MPN instead)",
+    },
+    find_orphan_net_labels: {
+      group: "sch",
+      label: "Net labels not on any wire (silent phantom net)",
+    },
+    find_orphan_power_objects: {
+      group: "sch",
+      label: "Power port markers not on any wire (phantom power)",
+    },
+    find_placeholder_values: {
+      group: "sch",
+      label: "Placeholder strings (TBD / TODO / ? / ...) escaped to release",
+    },
+    find_acute_angles: {
+      group: "pcb",
+      label: "Tracks meeting at < 90° (acid-trap risk at fab)",
+    },
+    find_inconsistent_track_widths: {
+      group: "pcb",
+      label: "Net mixes thin + wide tracks (>2× ratio, hotspot risk)",
+    },
+    variant_not_fitted: {
+      group: "pcb",
+      label: "DNP components in current variant",
+    },
+    tented_via_ratio: {
+      group: "pcb",
+      label: "Tented-via ratio (corrosion exposure)",
+    },
+    find_bad_connections: {
+      group: "pcb",
+      label: "Near-miss track/arc endpoints",
+    },
+    find_signal_vias_without_return: {
+      group: "pcb",
+      label: "Signal vias without nearby return via",
+    },
+    find_via_antennas: {
+      group: "pcb",
+      label: "Via stubs (connected on one layer only)",
+    },
+    find_removed_pad_shapes: {
+      group: "pcb",
+      label: "Pad/via copper removed on connected layer",
+    },
+    find_pads_center_not_connected: {
+      group: "pcb",
+      label: "Pad edge-only contact (centre not reached by any track)",
+    },
+    find_components_outside_board_outline: {
+      group: "pcb",
+      label: "Components outside the board outline",
+    },
+    find_pads_near_board_edge: {
+      group: "pcb",
+      label: "Pads/vias too close to board edge",
+    },
+    find_invalid_regions: {
+      group: "pcb",
+      label: "Invalid (zero-area) polygon regions",
+    },
+    drc: { group: "pcb", label: "Altium DRC (full project)" },
+  };
+
+  // Severity tag colour map: critical→err, warning→warn, info→muted tag.
+  // Matches the design_lint_report classification shipped server-side.
+  function sevTag(sev) {
+    if (sev === "critical") return "err";
+    if (sev === "warning") return "warn";
+    return "";  // info / undefined renders as default muted tag
+  }
+  // Sort key: critical first, then warning, then info / unknown. Within
+  // a severity, violations > 0 ranks above 0 (catch-the-eye items first).
+  function sortKey(name) {
+    const s = summary[name] || {};
+    const sev = s.severity || "info";
+    const sevRank = sev === "critical" ? 0 : sev === "warning" ? 1 : 2;
+    const hasViol = (s.violations || 0) > 0 ? 0 : 1;
+    return sevRank * 10 + hasViol;
+  }
+
+  function renderSection(parent, name) {
+    const s = summary[name] || {};
+    const sec = sections[name] || {};
+    const items = Array.isArray(sec.items) ? sec.items : [];
+    const v = s.violations || 0;
+    let cls;
+    if (sec.error) cls = "warn";
+    else if (v > 0) cls = "err";
+    else cls = "ok";
+    // Tag clean rows + their detail blocks for CSS-driven hiding when
+    // "Show only violations" is checked. Failed checks count as
+    // "not clean" so the user notices configuration issues.
+    const isClean = v === 0 && !sec.error;
+    const cleanClass = isClean ? " lint-row-clean" : "";
+    const row = el("div", {class: "row-actions" + cleanClass,
+      style: "margin-top:4px; cursor:pointer; align-items:center;",
+      title: "audit." + name + " (severity: " + (s.severity || "info") + ")"});
+    row.appendChild(el("span", {class: "tag " + cls},
+      v + " / " + (s.checked || 0)));
+    // Severity pip -- only shown when there's an actual violation;
+    // for clean checks the count tag already telegraphs "ok".
+    if (v > 0 && s.severity) {
+      row.appendChild(el("span",
+        {class: "tag " + sevTag(s.severity),
+         style: "font-size:10px;"},
+        s.severity));
+    }
+    const meta = SECTION_META[name];
+    row.appendChild(el("strong",
+      {style: "font-size:12px;"},
+      meta ? meta.label : name));
+    if (sec.error)
+      row.appendChild(el("span", {class: "hint",
+        style: "color:var(--err);"}, sec.error));
+    const detail = el("div", {hidden: true,
+      class: isClean ? "lint-row-clean" : "",
+      style: "margin:4px 0 8px 36px; padding:8px; "
+           + "background:var(--bg-elev); border-radius:4px; "
+           + "font-family:ui-monospace,monospace; font-size:11px; "
+           + "max-height:240px; overflow-y:auto;"});
+    if (items.length) {
+      items.slice(0, 200).forEach(function(it){
+        const line = Object.keys(it)
+          .map(function(k){ return k + "=" + JSON.stringify(it[k]); })
+          .join("  ");
+        detail.appendChild(el("div", {}, line));
+      });
+      if (items.length > 200)
+        detail.appendChild(el("div", {class: "hint"},
+          "(... " + (items.length - 200) + " more)"));
+    } else if (!sec.error) {
+      detail.appendChild(el("div", {class: "hint"},
+        "no violations on this check"));
+    }
+    row.addEventListener("click", function(){
+      detail.hidden = !detail.hidden;
+    });
+    parent.appendChild(row);
+    parent.appendChild(detail);
+  }
+
+  function renderGroup(title, names) {
+    if (names.length === 0) return;
+    const groupViolations = names.reduce(function(acc, n){
+      return acc + ((summary[n] && summary[n].violations) || 0);
+    }, 0);
+    const h = el("div", {style: "margin-top:14px; margin-bottom:4px; "
+      + "padding-bottom:4px; border-bottom:1px solid var(--border); "
+      + "display:flex; align-items:center; gap:8px;"});
+    h.appendChild(el("strong", {style: "font-size:13px;"}, title));
+    h.appendChild(el("span",
+      {class: "tag " + (groupViolations > 0 ? "err" : "ok"),
+       style: "font-size:10px;"},
+      groupViolations + " violations"));
+    body.appendChild(h);
+    // Sort within the group: critical violations first (the
+    // catch-the-eye items), then warnings, then info, then clean
+    // checks. Alphabetical as final tiebreak for stable ordering.
+    const sorted = names.slice().sort(function(a, b){
+      const ka = sortKey(a), kb = sortKey(b);
+      if (ka !== kb) return ka - kb;
+      return a.localeCompare(b);
+    });
+    sorted.forEach(function(n){ renderSection(body, n); });
+  }
+
+  const allNames = Object.keys(summary).sort();
+  const groupOf = function(n) {
+    return (SECTION_META[n] && SECTION_META[n].group) || "other";
+  };
+  const schGroup = allNames.filter(function(n){ return groupOf(n) === "sch"; });
+  const pcbGroup = allNames.filter(function(n){ return groupOf(n) === "pcb"; });
+  const otherGroup = allNames.filter(function(n){
+    return groupOf(n) === "other";
+  });
+  renderGroup("Schematic", schGroup);
+  renderGroup("PCB", pcbGroup);
+  if (otherGroup.length) renderGroup("Other", otherGroup);
+
+  if (failed.length) {
+    const f = el("div", {style: "margin-top:12px;"});
+    f.appendChild(el("h3", {}, "Failed checks"));
+    failed.forEach(function(msg){
+      f.appendChild(el("div", {class: "hint",
+        style: "font-family:ui-monospace,monospace;"}, msg));
+    });
+    body.appendChild(f);
+  }
+}
+
+// Close the DOMContentLoaded callback opened earlier (re-opened above for
+// runLint binding); keep file structure unchanged.
+window.addEventListener("DOMContentLoaded", function dlPlaceholder(){
 
   // Theme: sync the toggle button label to whatever the no-flash
   // bootstrap script already applied, then wire the click.
@@ -6689,8 +8517,33 @@ window.addEventListener("DOMContentLoaded", function(){
     if (ev.key === "4") showTab("nets");
     if (ev.key === "5") showTab("libraries");
     if (ev.key === "6") showTab("plan");
-    if (ev.key === "7") showTab("actions");
+    if (ev.key === "7") showTab("assembly");
+    if (ev.key === "8") showTab("actions");
+    if (ev.key === "9") showTab("status");
     if (ev.key === "0") showTab("status");
+    // Shift+C while drawer is open → copy current designator / net name
+    // to clipboard. Mirrors the iconbtn click handler.
+    if (ev.key === "C" && ev.shiftKey
+        && $("#drawer").classList.contains("open")) {
+      ev.preventDefault();
+      const btn = $("#drawer-copy");
+      if (btn) btn.click();
+      return;
+    }
+    // Shift+L from any tab → Status → Health subtab → kick a lint sweep.
+    // Uppercase only so the bare "L" stays available for future use.
+    if (ev.key === "L" && ev.shiftKey) {
+      ev.preventDefault();
+      showTab("status");
+      // Sub-tab activation can be async on first switch; defer the
+      // sub-pane select + lint trigger to the next animation frame so
+      // the Status section is in the DOM.
+      requestAnimationFrame(function(){
+        const healthTab = document.querySelector('[data-subtab="health"]');
+        if (healthTab) healthTab.click();
+        requestAnimationFrame(runLint);
+      });
+    }
   });
 
   // Drawing tab controls.
@@ -6701,7 +8554,8 @@ window.addEventListener("DOMContentLoaded", function(){
     drawingState.sheet = this.value;
     renderDrawing();
   });
-  $("#drawing-refresh").addEventListener("click", renderDrawing);
+  // (Per-tab drawing refresh removed -- the global nav refresh button /
+  // the R shortcut now invalidates the PCB cache before re-rendering.)
   $("#drawing-open").addEventListener("click", openDrawingInTab);
   $("#drawing-selbar-clear").addEventListener("click", svgClearSelection);
   $("#drawing-selbar-drawer").addEventListener("click", function(){
@@ -6795,6 +8649,31 @@ window.addEventListener("DOMContentLoaded", function(){
   // Fallback: on a slow / dynamic page we keep the values fresh with
   // a cheap interval. Reads only, no layout thrash.
   setInterval(syncStickyOffsets, 2000);
+
+  // Floating "back to top" button. Appears once the user has scrolled
+  // past 1.5 viewport heights -- on Components / Nets tables that's
+  // roughly the point where the table headers have left the screen
+  // and clicking a row near the bottom otherwise means a long manual
+  // scroll back. Uses smooth scroll; falls back to instant where
+  // the browser doesn't support the option object.
+  const backToTop = $("#back-to-top");
+  if (backToTop) {
+    function syncBackToTop() {
+      const threshold = window.innerHeight * 1.5;
+      const shouldShow = (window.scrollY || document.documentElement.scrollTop) > threshold;
+      backToTop.hidden = false;
+      backToTop.classList.toggle("visible", shouldShow);
+    }
+    backToTop.addEventListener("click", function(){
+      try {
+        window.scrollTo({ top: 0, behavior: "smooth" });
+      } catch (e) {
+        window.scrollTo(0, 0);
+      }
+    });
+    window.addEventListener("scroll", syncBackToTop, { passive: true });
+    syncBackToTop();
+  }
 });
 </script>
 </body>

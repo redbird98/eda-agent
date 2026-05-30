@@ -122,10 +122,13 @@ Var
     Name, DesignatorPrefix, Description : String;
     SchLib : ISch_Lib;
     Component : ISch_Component;
+    PartCount : Integer;
 Begin
     Name := ExtractJsonValue(Params, 'name');
     DesignatorPrefix := ExtractJsonValue(Params, 'designator_prefix');
     Description := ExtractJsonValue(Params, 'description');
+    PartCount := StrToIntDef(ExtractJsonValue(Params, 'part_count'), 1);
+    If PartCount < 1 Then PartCount := 1;
 
     If DesignatorPrefix = '' Then DesignatorPrefix := 'U';
 
@@ -153,6 +156,10 @@ Begin
     Begin
         Component.CurrentPartID := 1;
         Component.DisplayMode := 0;
+        { Multi-part symbols (quad op-amp, dual gate, etc) need PartCount  }
+        { set BEFORE pin / primitive add so each primitive's OwnerPartId    }
+        { can address a real sub-part.                                      }
+        Try Component.PartCount := PartCount; Except End;
         Component.LibReference := Name;
         Component.Designator.Text := DesignatorPrefix + '?';
         Component.ComponentDescription := Description;
@@ -184,7 +191,12 @@ Begin
         Try SchLib.GraphicallyInvalidate; Except End;
 
         MarkLibDirty(SchLib);
-        Result := BuildSuccessResponse(RequestId, '{"success":true,"name":"' + EscapeJsonString(Name) + '"}');
+        Result := BuildSuccessResponse(RequestId,
+            JsonObj(
+                JsonBool('success', True) + ',' +
+                JsonStr('name', Name) + ',' +
+                JsonInt('part_count', PartCount)
+            ));
     End
     Else
         Result := BuildErrorResponse(RequestId, 'CREATE_FAILED', 'Failed to create symbol');
@@ -657,10 +669,9 @@ End;
 {                                                                              }
 { Trap baked into this handler: in a PcbLib, Footprint.AddPCBObject on its    }
 { own does not register the new primitive properly with the placement editor }
-{ -- the text shows up only after a save+reload. The reference DelphiScript  }
-{ (PcbLib/FootPrintText_2.pas) shows the working pattern: add to BOTH the    }
-{ footprint AND the underlying Board, then broadcast PCBM_BoardRegisteration }
-{ to both. We replicate that exactly.                                          }
+{ -- the text shows up only after a save+reload. The working pattern is to  }
+{ add to BOTH the footprint AND the underlying Board, then broadcast        }
+{ PCBM_BoardRegisteration to both. We replicate that exactly.               }
 {                                                                              }
 { Params:                                                                      }
 {   text        (required) - the string to place                              }
@@ -786,7 +797,7 @@ Begin
         Text.Width := MilsToCoord(Width);
         Try Text.Rotation := Rotation; Except End;
 
-        { The reference's working pattern: add to footprint AND to its      }
+        { The working pattern: add to footprint AND to its                  }
         { underlying Board, then broadcast registration to both. Footprint  }
         { alone is not enough -- the placement editor will not see the new }
         { primitive until a save+reload.                                    }
@@ -812,7 +823,7 @@ End;
 
 { Lib_GetFootprints - Enumerate every footprint in the active (or named)     }
 { PcbLib. Mirror of lib_get_components (SchLib) for PCB libraries. Uses the }
-{ documented IPCB_LibraryIterator pattern from the reference scripts.        }
+{ documented IPCB_LibraryIterator pattern.                                   }
 {                                                                              }
 { Params:                                                                      }
 {   library_path - optional .PcbLib to focus first; defaults to focused doc. }
@@ -987,10 +998,10 @@ Var
     Workspace : IWorkspace;
     Doc : IDocument;
     LibPath, Data, CompName, ParamList, WithParamsStr : String;
-    ParamLower, ParamText : String;
+    ParamLower, ParamText, WithDesigStr, DefDesig : String;
     Mpn, Manufacturer, Datasheet, FootprintName : String;
     CompNum, I : Integer;
-    First, WithParams : Boolean;
+    First, WithParams, WithDesignator : Boolean;
 Begin
     // Get library path from parameter or active document
     LibPath := ExtractJsonValue(Params, 'library_path');
@@ -1003,6 +1014,15 @@ Begin
     // need parameters for a specific symbol should use lib_get_component_details.
     WithParamsStr := ExtractJsonValue(Params, 'with_parameters');
     WithParams := (WithParamsStr = 'true') Or (WithParamsStr = 'True') Or (WithParamsStr = '1');
+
+    // Optional lean flag: emit each component's DEFAULT designator
+    // (Component.Designator.Text, e.g. "U?" / "R?" / "IC?"). Like
+    // with_parameters it must load the live symbol via
+    // GetState_SchComponentByLibRef (the CompInfoReader fast path does NOT
+    // expose the designator), but it skips parameter iteration so the
+    // payload stays small -- intended for library-wide designator audits.
+    WithDesigStr := ExtractJsonValue(Params, 'with_designator');
+    WithDesignator := (WithDesigStr = 'true') Or (WithDesigStr = 'True') Or (WithDesigStr = '1');
 
     If LibPath = '' Then
     Begin
@@ -1045,7 +1065,7 @@ Begin
     // Only navigate to live components when the caller asked for parameters,
     // otherwise we skip GetState_SchComponentByLibRef entirely.
     SchLib := Nil;
-    If WithParams Then
+    If WithParams Or WithDesignator Then
         SchLib := SchServer.GetCurrentSchDocument;
 
     Data := '[';
@@ -1067,17 +1087,20 @@ Begin
         // component load, harvest mpn / manufacturer / datasheet from the
         // parameter set plus the current implementation's footprint model
         // name so the planner can populate Part directly from inventory.
-        If WithParams Then
+        If WithParams Or WithDesignator Then
         Begin
             ParamList := '';
             Mpn := '';
             Manufacturer := '';
             Datasheet := '';
             FootprintName := '';
+            DefDesig := '';
             If (SchLib <> Nil) And (SchLib.ObjectId = eSchLib) Then
             Begin
                 Component := SchLib.GetState_SchComponentByLibRef(CompName);
-                If Component <> Nil Then
+                If (Component <> Nil) And WithDesignator Then
+                    Try DefDesig := Component.Designator.Text; Except End;
+                If (Component <> Nil) And WithParams Then
                 Begin
                     ParamIterator := Component.SchIterator_Create;
                     ParamIterator.AddFilter_ObjectSet(MkSet(eParameter));
@@ -1118,11 +1141,16 @@ Begin
                         Try FootprintName := Impl.ModelName; Except End;
                 End;
             End;
-            Data := Data + ',"parameters":{' + ParamList + '}';
-            Data := Data + ',"mpn":"' + EscapeJsonString(Mpn) + '"';
-            Data := Data + ',"manufacturer":"' + EscapeJsonString(Manufacturer) + '"';
-            Data := Data + ',"datasheet":"' + EscapeJsonString(Datasheet) + '"';
-            Data := Data + ',"footprint":"' + EscapeJsonString(FootprintName) + '"';
+            If WithDesignator Then
+                Data := Data + ',"designator":"' + EscapeJsonString(DefDesig) + '"';
+            If WithParams Then
+            Begin
+                Data := Data + ',"parameters":{' + ParamList + '}';
+                Data := Data + ',"mpn":"' + EscapeJsonString(Mpn) + '"';
+                Data := Data + ',"manufacturer":"' + EscapeJsonString(Manufacturer) + '"';
+                Data := Data + ',"datasheet":"' + EscapeJsonString(Datasheet) + '"';
+                Data := Data + ',"footprint":"' + EscapeJsonString(FootprintName) + '"';
+            End;
         End;
         Data := Data + '}';
     End;
@@ -1751,6 +1779,26 @@ Begin
                 Begin
                     Component.ComponentDescription := ParamValue;
                     Inc(Updated);
+                    Continue;
+                End;
+
+                // Special case: Designator is the component's DEFAULT
+                // designator (Component.Designator.Text, a property on the
+                // designator label sub-object) -- NOT a parameter. Mirrors
+                // the Description case. Lets library designator audits
+                // normalize defaults (e.g. "IC?" / "U3" -> "U?") through the
+                // existing batch tool without a dedicated handler.
+                If ParamName = 'Designator' Then
+                Begin
+                    If Component.Designator <> Nil Then
+                    Begin
+                        SchBeginModify(Component.Designator);
+                        Component.Designator.Text := ParamValue;
+                        SchEndModify(Component.Designator);
+                        Inc(Updated);
+                    End
+                    Else
+                        Inc(Failed);
                     Continue;
                 End;
 
@@ -2480,9 +2528,9 @@ Function Lib_AddPins(Params : String; RequestId : String) : String;
 Var
     PinsStr, Op, Remaining : String;
     OpCount, Added, Failed : Integer;
-    Designator, Name, ElecType, HiddenStr : String;
-    X, Y, Length, Rotation : Integer;
-    Hidden : Boolean;
+    Designator, Name, ElecType, HiddenStr, OwnerStr : String;
+    X, Y, Length, Rotation, OwnerPartId : Integer;
+    Hidden, OwnerExplicit : Boolean;
     SchLib : ISch_Lib;
     Component : ISch_Component;
     Pin : ISch_Pin;
@@ -2530,6 +2578,13 @@ Begin
             ElecType := GetBatchField(Op, 'electrical_type');
             HiddenStr := GetBatchField(Op, 'hidden');
             Hidden := (HiddenStr = 'true') Or (HiddenStr = '1');
+            { Multi-part support: owner_part_id selects which sub-part      }
+            { owns the pin. 0 = shared across ALL parts (e.g. the power     }
+            { pins on a quad op-amp). Omit / empty = "current part" via   }
+            { SetOwnerPart (single-part behaviour, original default).      }
+            OwnerStr := GetBatchField(Op, 'owner_part_id');
+            OwnerExplicit := OwnerStr <> '';
+            OwnerPartId := StrToIntDef(OwnerStr, 0);
 
             Pin := SchServer.SchObjectFactory(ePin, eCreate_Default);
             If Pin = Nil Then
@@ -2549,17 +2604,16 @@ Begin
             Pin.Orientation := Rotation Div 90;
             Pin.IsHidden := Hidden;
 
-            If ElecType = 'input' Then Pin.Electrical := eElectricInput
-            Else If ElecType = 'output' Then Pin.Electrical := eElectricOutput
-            Else If ElecType = 'bidirectional' Then Pin.Electrical := eElectricIO
-            Else If ElecType = 'io' Then Pin.Electrical := eElectricIO
-            Else If ElecType = 'power' Then Pin.Electrical := eElectricPower
-            Else If ElecType = 'open_collector' Then Pin.Electrical := eElectricOpenCollector
-            Else If ElecType = 'open_emitter' Then Pin.Electrical := eElectricOpenEmitter
-            Else If ElecType = 'hiz' Then Pin.Electrical := eElectricHiZ
-            Else Pin.Electrical := eElectricPassive;
+            Pin.Electrical := StrToPinElectrical(ElecType);
 
-            SetOwnerPart(Pin, Component);
+            If OwnerExplicit Then
+            Begin
+                { Explicit owner_part_id from caller (multi-part symbol).  }
+                Try Pin.OwnerPartId := OwnerPartId; Except End;
+                Try Pin.OwnerPartDisplayMode := 0; Except End;
+            End
+            Else
+                SetOwnerPart(Pin, Component);
 
             Component.AddSchObject(Pin);
             SchRegisterObject(Component, Pin);
@@ -3602,6 +3656,110 @@ Begin
     Result := BuildSuccessResponse(RequestId, RespJson);
 End;
 
+{ Lib_UpdateFootprintHeightsFrom3D                                            }
+{                                                                              }
+{ Walk every footprint in the active PCB Library and propagate the maximum   }
+{ 3D-body OverallHeight up to the footprint's Height field. Footprint.Height }
+{ drives the placement-collision DRC rule that prevents tall components       }
+{ from getting placed under shorter ones or under an enclosure overhang --   }
+{ but libraries shipped without explicit heights default to 0, which         }
+{ effectively disables that check.                                            }
+{                                                                              }
+{ Updates only when the 3D model is TALLER than the current Footprint.Height }
+{ -- this matches the common convention and protects against a               }
+{ manually-set "I know this part is 5mm despite the model being 3mm" value.  }
+Function Lib_UpdateFootprintHeightsFrom3D(Params : String; RequestId : String) : String;
+Var
+    CurLib : IPCB_Library;
+    LibIter : IPCB_LibraryIterator;
+    Footprint, SavedCurrent : IPCB_LibComponent;
+    GrIter : IPCB_GroupIterator;
+    Body : IPCB_ComponentBody;
+    Updated, Inspected : Integer;
+    Items, FpName : String;
+    First : Boolean;
+    OldH, NewH : TCoord;
+Begin
+    CurLib := PCBServer.GetCurrentPCBLibrary;
+    If CurLib = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCBLIB',
+            'No PCB Library document focused');
+        Exit;
+    End;
+
+    SavedCurrent := CurLib.CurrentComponent;
+    Updated := 0;
+    Inspected := 0;
+    Items := '';
+    First := True;
+
+    LibIter := CurLib.LibraryIterator_Create;
+    Try
+        LibIter.SetState_FilterAll;
+        Footprint := LibIter.FirstPCBObject;
+        While Footprint <> Nil Do
+        Begin
+            Try
+                Inc(Inspected);
+                NewH := 0;
+                GrIter := Footprint.GroupIterator_Create;
+                Try
+                    GrIter.AddFilter_ObjectSet(MkSet(eComponentBodyObject));
+                    Body := GrIter.FirstPCBObject;
+                    While Body <> Nil Do
+                    Begin
+                        Try
+                            If Body.OverallHeight > NewH Then NewH := Body.OverallHeight;
+                        Except End;
+                        Body := GrIter.NextPCBObject;
+                    End;
+                Finally
+                    Footprint.GroupIterator_Destroy(GrIter);
+                End;
+
+                OldH := Footprint.Height;
+                If (NewH > 0) And (NewH > OldH) Then
+                Begin
+                    Footprint.Height := NewH;
+                    Inc(Updated);
+                    FpName := '';
+                    Try FpName := Footprint.Name; Except End;
+                    If Not First Then Items := Items + ',';
+                    First := False;
+                    Items := Items + JsonObj(
+                        JsonStr('name', FpName) + ',' +
+                        JsonFloat('old_height_mm', CoordToMms(OldH)) + ',' +
+                        JsonFloat('new_height_mm', CoordToMms(NewH))
+                    );
+                End;
+            Except End;
+            Footprint := LibIter.NextPCBObject;
+        End;
+    Finally
+        CurLib.LibraryIterator_Destroy(LibIter);
+    End;
+
+    { Restore the originally-focused footprint and mark the lib dirty. }
+    If SavedCurrent <> Nil Then CurLib.CurrentComponent := SavedCurrent;
+    If Updated > 0 Then
+    Begin
+        Try
+            CurLib.Board.ViewManager_FullUpdate;
+            { No SaveDoc here -- libraries should be reviewed by hand    }
+            { before saving since this rewrites height data project-wide.}
+        Except End;
+    End;
+
+    Result := BuildSuccessResponse(RequestId,
+        JsonObj(
+            JsonInt('inspected', Inspected) + ',' +
+            JsonInt('updated', Updated) + ',' +
+            JsonRaw('items', '[' + Items + ']')
+        ));
+End;
+
+
 {..............................................................................}
 { Command Handler - must be at end                                             }
 {..............................................................................}
@@ -3639,6 +3797,7 @@ Begin
         'set_label_format':   Result := Lib_SetLabelFormat(Params, RequestId);
         'set_label_formats':  Result := Lib_SetLabelFormats(Params, RequestId);
         'set_current_component': Result := Lib_SetCurrentComponent(Params, RequestId);
+        'update_footprint_heights_from_3d': Result := Lib_UpdateFootprintHeightsFrom3D(Params, RequestId);
     Else
         Result := BuildErrorResponse(RequestId, 'UNKNOWN_ACTION', 'Unknown library action: ' + Action);
     End;

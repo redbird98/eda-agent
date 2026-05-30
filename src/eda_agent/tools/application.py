@@ -452,7 +452,17 @@ def register_application_tools(mcp):
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             if text:
-                path.write_text(text, encoding="utf-8")
+                # Atomic write (temp + os.replace) so the Altium polling
+                # loop only ever opens a complete, CLOSED file. A plain
+                # write_text holds intent.txt open for write; if the loop
+                # reads it in that window it hits a sharing violation that
+                # the script engine surfaces as a modal. Invariant: every
+                # workspace file the Pascal side reads MUST be written this
+                # way (see request files, dashboard.heartbeat).
+                import os as _os
+                tmp = path.with_suffix(".txt.tmp")
+                tmp.write_text(text, encoding="utf-8")
+                _os.replace(tmp, path)
             elif path.exists():
                 path.unlink()
         except OSError as e:
