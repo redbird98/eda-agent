@@ -331,7 +331,7 @@ Symbol and footprint creation, linking, batch editing, comparison.
 | `lib_diff_libraries` | Compare two libraries |
 | `lib_update_footprint_heights_from_3d` | Propagate `IPCB_ComponentBody.OverallHeight` up to `Footprint.Height` so placement-collision DRC actually fires (libraries from vendors often ship Height=0) |
 
-### Schematic and general (62 tools)
+### Schematic and general (65 tools)
 
 Schematic-side operations plus viewport and sheet management.
 
@@ -357,6 +357,7 @@ Schematic-side operations plus viewport and sheet management.
 | `place_sch_components_from_library` | Bulk BOM placement: library_path + lib_ref + x/y/rotation per entry |
 | `sch_add_directive` / `sch_get_directives` | Parameter-set directives (diff pair tags, net class, custom rules) |
 | `sch_place_harness_connector` / `sch_place_cross_sheet_connector` | Harness bundles + hierarchical off-sheet ports |
+| `sch_place_text_frame` / `sch_increment_designators` / `sch_toggle_pin_visibility` | Multi-line note frames, bulk designator renumber, pin-label visibility |
 | `sch_place_probe` | SPICE / simulation measurement node |
 | `sch_set_component_part_id` | Switch active sub-part on a multi-gate symbol (U1A ↔ U1B) |
 | `sch_add_datafile_link` | Attach IBIS / SPICE model / CSV to a component's implementation |
@@ -368,7 +369,7 @@ Schematic-side operations plus viewport and sheet management.
 | `crossref_net` | Sch pin list vs PCB pad list for a named net: diff + `in_sync` flag |
 | `generic_run_process` | Run any Altium process command |
 
-### PCB (70 tools)
+### PCB (72 tools)
 
 Queries and modifications on the active PCB document.
 
@@ -384,9 +385,11 @@ Queries and modifications on the active PCB document.
 | `pcb_get_component_pads` / `pcb_get_pad_properties` | Pad inspection |
 | `pcb_place_track` / `pcb_place_tracks` / `pcb_set_track_width` / `pcb_get_trace_lengths` / `pcb_fillet_corners` | Track operations (batch variant for whole-net routing; `pcb_fillet_corners` rounds acute same-net joins with a tangent arc, defaults to dry_run) |
 | `pcb_place_via` / `pcb_place_via_array` / `pcb_get_vias` | Via operations and stitching arrays |
+| `pcb_set_via_soldermask_relief` | Open soldermask over via barrels (barrel relief) |
 | `pcb_place_arc` / `pcb_place_text` / `pcb_place_fill` / `pcb_place_pad` | Primitive placement |
 | `pcb_place_dimension` / `pcb_place_angular_dimension` / `pcb_place_radial_dimension` | Dimension annotations |
 | `pcb_start_polygon_placement` / `pcb_place_polygon_rect` / `pcb_place_region` / `pcb_get_polygons` / `pcb_modify_polygon` / `pcb_repour_polygons` | Polygons and regions |
+| `pcb_calc_polygon_area` | Per-polygon copper area in square mm / mil |
 | `pcb_place_embedded_board` | Panelization: drop an `IPCB_EmbeddedBoard` grid referencing a child `.PcbDoc` |
 | `pcb_create_diff_pair` / `pcb_distribute_components` / `pcb_set_board_shape` | Higher-level ops |
 | `pcb_create_room` | Room placement |

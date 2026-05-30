@@ -245,6 +245,22 @@ KNOWN_WRONG_E_IDENTS = {
     # ePcbDoc: there is no ObjectId constant for the board itself; if you
     # need to verify you're on a PCB, check IPCB_Board <> Nil.
     "ePcbDoc": "no such constant; verify with PCBServer.GetCurrentPCBBoard <> Nil",
+    # eOffSheetConnector: not a real object-id. Altium's "connect to the same
+    # net on another sheet" object is the cross-sheet connector. Confirmed
+    # Undeclared identifier at runtime in Altium Designer.
+    "eOffSheetConnector": "use eCrossSheetConnector; the off-sheet connector is the cross-sheet connector",
+    # ePolygonPourOver_Same: not a real value. The TPolygonPourOver enum is
+    # ePolygonPourOver_None / _SameNet / _SameNetPolygon(s).
+    "ePolygonPourOver_Same": "use ePolygonPourOver_SameNet (or _None / _SameNetPolygon)",
+    # eHatchStyle*: not real. The TPolyHatchStyle enum (IPCB_Polygon.PolyHatchStyle)
+    # is ePolySolid / ePolyNoHatch / ePolyHatch45 / ePolyHatch90 only.
+    "eHatchStyleNone": "use ePolySolid or ePolyNoHatch",
+    "eHatchStyle45Degree": "use ePolyHatch45",
+    "eHatchStyle90Degree": "use ePolyHatch90",
+    "eHatchStyleHorizontal": "no such value; TPolyHatchStyle is Solid/NoHatch/Hatch45/Hatch90",
+    "eHatchStyleVertical": "no such value; TPolyHatchStyle is Solid/NoHatch/Hatch45/Hatch90",
+    # CoordToMms is a typo for the Utils.pas helper CoordToMM (no trailing 's').
+    "CoordToMms": "typo -- the helper is CoordToMM (no trailing 's')",
 }
 RULE_KNOWN_WRONG_E_IDENT = LineRule(
     name="known-wrong-altium-enum",
@@ -284,6 +300,14 @@ KNOWN_WRONG_METHOD_NAMES = {
     # fail if those code paths ever fire; left in place because they're
     # not currently exercised and removing them is out of scope here.
     "ClearAllSelection":    "RunProcess('Sch:DeSelect') with Scope=All",
+    # IPCB_Polygon's hatch-style property is PolyHatchStyle, not HatchStyle.
+    # .HatchStyle raises Undeclared identifier at runtime. (.PolyHatchStyle has
+    # the dot before "Poly", so this pattern does not false-match it.)
+    "HatchStyle":           "use .PolyHatchStyle (IPCB_Polygon)",
+    # IPCB_Polygon.GeometricPolygon is undeclared in this Altium script binding
+    # (raises at runtime) despite being in the API docs. Use AreaSize (outline
+    # area) + BoundingRectangle instead of GeometricPolygon.GetState_Area.
+    "GeometricPolygon":     "undeclared here; use .AreaSize + .BoundingRectangle",
 }
 RULE_KNOWN_WRONG_METHOD = LineRule(
     name="known-wrong-altium-method",

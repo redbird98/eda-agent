@@ -3968,6 +3968,7 @@ Var
     Found : Boolean;
     FoundObj : IPCB_Primitive;
     Dist, BestDist : Double;
+    BRect : TCoordRect;
 Begin
     Board := GetPCBBoardAnywhere;
     If Board = Nil Then
@@ -4006,10 +4007,21 @@ Begin
         ObjFilter := eFillObject
     Else If ObjTypeStr = 'text' Then
         ObjFilter := eTextObject
+    Else If ObjTypeStr = 'pad' Then
+        ObjFilter := ePadObject
+    Else If ObjTypeStr = 'arc' Then
+        ObjFilter := eArcObject
+    Else If ObjTypeStr = 'polygon' Then
+        ObjFilter := ePolyObject
+    Else If ObjTypeStr = 'region' Then
+        ObjFilter := eRegionObject
+    Else If ObjTypeStr = 'component' Then
+        ObjFilter := eComponentObject
     Else
     Begin
         Result := BuildErrorResponse(RequestId, 'INVALID_PARAM',
-            'Unknown object_type: ' + ObjTypeStr + '. Use track, via, fill, or text');
+            'Unknown object_type: ' + ObjTypeStr +
+            '. Use track, via, fill, text, pad, arc, polygon, region, or component');
         Exit;
     End;
 
@@ -4032,7 +4044,7 @@ Begin
             ObjX := CoordToMils((Obj.x1 + Obj.x2) Div 2);
             ObjY := CoordToMils((Obj.y1 + Obj.y2) Div 2);
         End
-        Else If ObjFilter = eViaObject Then
+        Else If (ObjFilter = eViaObject) Or (ObjFilter = ePadObject) Then
         Begin
             ObjX := CoordToMils(Obj.x);
             ObjY := CoordToMils(Obj.y);
@@ -4044,8 +4056,11 @@ Begin
         End
         Else
         Begin
-            ObjX := CoordToMils(Obj.XLocation);
-            ObjY := CoordToMils(Obj.YLocation);
+            { Polygons, regions, components, arcs and text: use the bounding
+              rectangle centre -- XLocation is not exposed on every type. }
+            BRect := Obj.BoundingRectangle;
+            ObjX := CoordToMils((BRect.Left + BRect.Right) Div 2);
+            ObjY := CoordToMils((BRect.Bottom + BRect.Top) Div 2);
         End;
 
         Dist := Sqrt((ObjX - TargetX) * (ObjX - TargetX) + (ObjY - TargetY) * (ObjY - TargetY));
@@ -4365,6 +4380,47 @@ Begin
 End;
 
 {..............................................................................}
+{ PolygonAreaSqMils - Compute a polygon's outline area in SQUARE MILS via the  }
+{ shoelace formula over its line vertices. Altium's IPCB_Polygon.AreaSize is   }
+{ unreliable (it can exceed the bounding box) and IPCB_Polygon.GeometricPolygon }
+{ is undeclared in this script binding, so this vertex sum is the trustworthy   }
+{ area. CRITICAL: convert each coord to mils (/ 10000.0, a REAL division)       }
+{ BEFORE multiplying -- raw internal coords (~2e7) overflow 32-bit integer      }
+{ multiplication and yield garbage.                                            }
+{..............................................................................}
+
+Function PolygonAreaSqMils(Poly : IPCB_Polygon) : Double;
+Var
+    I, N : Integer;
+    Ax, Ay, Bx, By, Sum : Double;
+Begin
+    Result := 0;
+    N := 0;
+    Try N := Poly.PointCount; Except End;
+    If N < 3 Then Exit;
+    Sum := 0;
+    For I := 0 To N - 1 Do
+    Begin
+        Try
+            Ax := Poly.Segments[I].vx / 10000.0;
+            Ay := Poly.Segments[I].vy / 10000.0;
+            If I < N - 1 Then
+            Begin
+                Bx := Poly.Segments[I + 1].vx / 10000.0;
+                By := Poly.Segments[I + 1].vy / 10000.0;
+            End
+            Else
+            Begin
+                Bx := Poly.Segments[0].vx / 10000.0;
+                By := Poly.Segments[0].vy / 10000.0;
+            End;
+            Sum := Sum + (Ax * By - Bx * Ay);
+        Except End;
+    End;
+    Result := Abs(Sum) / 2.0;
+End;
+
+{..............................................................................}
 { PCB_GetPolygons - Get all polygon pours with layer, net, hatching, etc.    }
 {..............................................................................}
 
@@ -4411,11 +4467,10 @@ Begin
         // Get hatching style
         HatchStr := 'Unknown';
         Try
-            If Polygon.HatchStyle = eHatchStyleNone Then HatchStr := 'Solid'
-            Else If Polygon.HatchStyle = eHatchStyle45Degree Then HatchStr := '45Degree'
-            Else If Polygon.HatchStyle = eHatchStyle90Degree Then HatchStr := '90Degree'
-            Else If Polygon.HatchStyle = eHatchStyleHorizontal Then HatchStr := 'Horizontal'
-            Else If Polygon.HatchStyle = eHatchStyleVertical Then HatchStr := 'Vertical'
+            If Polygon.PolyHatchStyle = ePolySolid Then HatchStr := 'Solid'
+            Else If Polygon.PolyHatchStyle = ePolyNoHatch Then HatchStr := 'NoHatch'
+            Else If Polygon.PolyHatchStyle = ePolyHatch45 Then HatchStr := '45Degree'
+            Else If Polygon.PolyHatchStyle = ePolyHatch90 Then HatchStr := '90Degree'
             Else HatchStr := 'Other';
         Except End;
 
@@ -4423,16 +4478,15 @@ Begin
         { area for the polygon outline. Used for current-capacity audits }
         { (multiply area_mm2 by copper thickness for cubic copper) and   }
         { for spotting accidentally-tiny power islands.                  }
-        AreaInternal := 0;
-        Try
-            If Polygon.GeometricPolygon <> Nil Then
-                AreaInternal := Polygon.GeometricPolygon.GetState_Area;
-        Except End;
-        AreaSqMils := AreaInternal / 100000000.0;
+        { AreaSize is the polygon OUTLINE area. IPCB_Polygon.GeometricPolygon
+          is undeclared in this Altium script binding, so the actual-copper
+          area is not available here -- use AreaSize (outline) + bbox. }
+        AreaSqMils := 0;
+        Try AreaSqMils := PolygonAreaSqMils(Polygon); Except End;
         AreaMm2 := AreaSqMils * 0.00064516;
         BR := Polygon.BoundingRectangle;
-        BBoxMm2 := CoordToMms(BR.Right - BR.Left)
-                 * CoordToMms(BR.Top - BR.Bottom);
+        BBoxMm2 := CoordToMM(BR.Right - BR.Left)
+                 * CoordToMM(BR.Top - BR.Bottom);
         VCount := 0;
         Try VCount := Polygon.PointCount; Except End;
 
@@ -4441,11 +4495,10 @@ Begin
             + '"net":"' + EscapeJsonString(NetName) + '",'
             + '"layer":"' + EscapeJsonString(LayerStr) + '",'
             + '"hatch_style":"' + EscapeJsonString(HatchStr) + '",'
-            + '"pour_over":' + BoolToJsonStr(Polygon.PourOver) + ','
-            + '"remove_dead_copper":' + BoolToJsonStr(Polygon.RemoveDead) + ','
+            + '"pour_over":' + BoolToJsonStr(Polygon.PourOver <> ePolygonPourOver_None) + ','
             + '"area_sqmils":' + IntToStr(Trunc(AreaSqMils)) + ','
-            + '"area_mm2":' + FormatFloat('0.0000', AreaMm2) + ','
-            + '"bbox_mm2":' + FormatFloat('0.0000', BBoxMm2) + ','
+            + '"area_mm2":' + FloatToJsonStr(AreaMm2) + ','
+            + '"bbox_mm2":' + FloatToJsonStr(BBoxMm2) + ','
             + '"vertex_count":' + IntToStr(VCount) + '}';
         Inc(Count);
         Polygon := Iterator.NextPCBObject;
@@ -4549,15 +4602,13 @@ Begin
         If HatchStr <> '' Then
         Begin
             If HatchStr = 'Solid' Then
-                FoundPoly.HatchStyle := eHatchStyleNone
+                FoundPoly.PolyHatchStyle := ePolySolid
+            Else If HatchStr = 'NoHatch' Then
+                FoundPoly.PolyHatchStyle := ePolyNoHatch
             Else If HatchStr = '45Degree' Then
-                FoundPoly.HatchStyle := eHatchStyle45Degree
+                FoundPoly.PolyHatchStyle := ePolyHatch45
             Else If HatchStr = '90Degree' Then
-                FoundPoly.HatchStyle := eHatchStyle90Degree
-            Else If HatchStr = 'Horizontal' Then
-                FoundPoly.HatchStyle := eHatchStyleHorizontal
-            Else If HatchStr = 'Vertical' Then
-                FoundPoly.HatchStyle := eHatchStyleVertical;
+                FoundPoly.PolyHatchStyle := ePolyHatch90;
         End;
 
         PCBServer.SendMessageToRobots(FoundPoly.I_ObjectAddress, c_Broadcast,
@@ -4970,6 +5021,7 @@ Begin
           individual fields through the indexed property. Build each
           corner as a local record and assign in order. }
         Board.BoardOutline.PointCount := 4;
+        Seg := TPolySegment;   { instantiate before any field write -- see memory }
         Seg.Kind := ePolySegmentLine;
 
         Seg.vx := Cx1;  Seg.vy := Cy1;  Board.BoardOutline.Segments[0] := Seg;
@@ -5040,10 +5092,16 @@ Begin
         If LayerStr = '' Then LayerStr := 'TopLayer';
         Polygon.Layer := GetLayerFromString(LayerStr);
 
-        { Assign each corner as a full TPolySegment record, per the
-          verified pattern;
-          field-level writes through Segments[I] aren't supported. }
+        Polygon.PolyHatchStyle := ePolySolid;
+
+        { Build the 4-corner outline via the Segments API. CRITICAL: a local
+          TPolySegment must be instantiated with ':= TPolySegment' before its
+          fields can be written -- without that, Seg.Kind := ... raises
+          "Undeclared identifier: Kind" in the script engine. IPCB_Polygon has
+          no SetOutlineContour (that is a region-only method), so Segments is
+          the only path. Whole-record writes (Segments[i] := Seg) are fine. }
         Polygon.PointCount := 4;
+        Seg := TPolySegment;
         Seg.Kind := ePolySegmentLine;
         Seg.vx := Cx1;  Seg.vy := Cy1;  Polygon.Segments[0] := Seg;
         Seg.vx := Cx2;  Seg.vy := Cy1;  Polygon.Segments[1] := Seg;
@@ -5061,7 +5119,7 @@ Begin
           same-net primitives (tracks/pads). Default true, matches the
           common "pour GND plane" case. }
         If (PourOverStr = '') Or (LowerCase(PourOverStr) = 'true') Then
-            Polygon.PourOver := ePolygonPourOver_Same
+            Polygon.PourOver := ePolygonPourOver_SameNet
         Else
             Polygon.PourOver := ePolygonPourOver_None;
 
@@ -6551,8 +6609,8 @@ Begin
     { Bounding box -- use the board outline rect.                            }
     Try
         R := Board.BoardOutline.BoundingRectangle;
-        BoardW := CoordToMms(R.Right - R.Left);
-        BoardH := CoordToMms(R.Top - R.Bottom);
+        BoardW := CoordToMM(R.Right - R.Left);
+        BoardH := CoordToMM(R.Top - R.Bottom);
         BoardA := BoardW * BoardH;
     Except
         BoardW := 0;
@@ -7207,6 +7265,143 @@ End;
 
 
 {..............................................................................}
+{ PCB_CalcPolygonArea - Report the outline area of each polygon on the board, }
+{ optionally filtered by net and/or layer. AreaSize is the polygon's overall  }
+{ boundary area; reported in square mils and square millimetres.              }
+{ Params: net (optional), layer (optional)                                    }
+{..............................................................................}
+
+Function PCB_CalcPolygonArea(Params : String; RequestId : String) : String;
+Var
+    Board : IPCB_Board;
+    Iterator : IPCB_BoardIterator;
+    Poly : IPCB_Polygon;
+    NetFilter, LayerFilter, NetName, LayerName, NameStr, JsonItems : String;
+    AreaCoord, SqMils, SqMm : Double;
+    First, Keep : Boolean;
+    Count : Integer;
+Begin
+    Board := GetPCBBoardAnywhere;
+    If Board = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCB', 'No PCB document is active');
+        Exit;
+    End;
+
+    NetFilter := ExtractJsonValue(Params, 'net');
+    LayerFilter := ExtractJsonValue(Params, 'layer');
+    JsonItems := '';
+    First := True;
+    Count := 0;
+
+    Iterator := Board.BoardIterator_Create;
+    Iterator.AddFilter_ObjectSet(MkSet(ePolyObject));
+    Iterator.AddFilter_LayerSet(AllLayers);
+    Iterator.AddFilter_Method(eProcessAll);
+    Poly := Iterator.FirstPCBObject;
+    While Poly <> Nil Do
+    Begin
+        NetName := '';
+        Try If Poly.Net <> Nil Then NetName := Poly.Net.Name; Except End;
+        LayerName := '';
+        Try LayerName := GetLayerString(Poly.Layer); Except End;
+        NameStr := '';
+        Try NameStr := Poly.Name; Except End;
+
+        Keep := True;
+        If (NetFilter <> '') And (NetName <> NetFilter) Then Keep := False;
+        If (LayerFilter <> '') And (LayerName <> LayerFilter) Then Keep := False;
+
+        If Keep Then
+        Begin
+            SqMils := 0;
+            Try SqMils := PolygonAreaSqMils(Poly); Except End;
+            SqMm := SqMils * 0.00064516;
+            If Not First Then JsonItems := JsonItems + ',';
+            First := False;
+            JsonItems := JsonItems
+                + '{"name":"' + EscapeJsonString(NameStr) + '",'
+                + '"net":"' + EscapeJsonString(NetName) + '",'
+                + '"layer":"' + EscapeJsonString(LayerName) + '",'
+                + '"area_sq_mils":' + FloatToJsonStr(SqMils) + ','
+                + '"area_sq_mm":' + FloatToJsonStr(SqMm) + '}';
+            Inc(Count);
+        End;
+        Poly := Iterator.NextPCBObject;
+    End;
+    Board.BoardIterator_Destroy(Iterator);
+
+    Result := BuildSuccessResponse(RequestId,
+        '{"polygons":[' + JsonItems + '],"count":' + IntToStr(Count) + '}');
+End;
+
+{..............................................................................}
+{ PCB_SetViaSoldermaskRelief - Set per-via soldermask expansion from the hole }
+{ edge so via barrels get a soldermask opening (barrel relief). Optionally    }
+{ filter by net. Params: expansion_mils (default 4), net (optional)           }
+{..............................................................................}
+
+Function PCB_SetViaSoldermaskRelief(Params : String; RequestId : String) : String;
+Var
+    Board : IPCB_Board;
+    Iterator : IPCB_BoardIterator;
+    Via : IPCB_Via;
+    NetFilter, NetName, ExpStr : String;
+    ExpMils, Count : Integer;
+    Keep : Boolean;
+Begin
+    Board := GetPCBBoardAnywhere;
+    If Board = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCB', 'No PCB document is active');
+        Exit;
+    End;
+
+    NetFilter := ExtractJsonValue(Params, 'net');
+    ExpStr := ExtractJsonValue(Params, 'expansion_mils');
+    ExpMils := StrToIntDef(ExpStr, 4);
+    Count := 0;
+
+    Iterator := Board.BoardIterator_Create;
+    Iterator.AddFilter_ObjectSet(MkSet(eViaObject));
+    Iterator.AddFilter_LayerSet(AllLayers);
+    Iterator.AddFilter_Method(eProcessAll);
+
+    PCBServer.PreProcess;
+    Try
+        Via := Iterator.FirstPCBObject;
+        While Via <> Nil Do
+        Begin
+            NetName := '';
+            Try If Via.Net <> Nil Then NetName := Via.Net.Name; Except End;
+            Keep := True;
+            If (NetFilter <> '') And (NetName <> NetFilter) Then Keep := False;
+            If Keep Then
+            Begin
+                Try
+                    PCBServer.SendMessageToRobots(Via.I_ObjectAddress, c_Broadcast,
+                        PCBM_BeginModify, c_NoEventData);
+                    Via.SolderMaskExpansionFromHoleEdge := True;
+                    Via.SolderMaskExpansion := MilsToCoord(ExpMils);
+                    PCBServer.SendMessageToRobots(Via.I_ObjectAddress, c_Broadcast,
+                        PCBM_EndModify, c_NoEventData);
+                    Inc(Count);
+                Except
+                End;
+            End;
+            Via := Iterator.NextPCBObject;
+        End;
+    Finally
+        PCBServer.PostProcess;
+    End;
+    Board.BoardIterator_Destroy(Iterator);
+
+    Result := BuildSuccessResponse(RequestId,
+        '{"success":true,"modified":' + IntToStr(Count) + ','
+        + '"expansion_mils":' + IntToStr(ExpMils) + '}');
+End;
+
+{..............................................................................}
 { HandlePCBCommand - Route PCB actions to handlers                            }
 {..............................................................................}
 
@@ -7264,6 +7459,8 @@ Begin
         'set_track_width':         Result := PCB_SetTrackWidth(Params, RequestId);
         'get_unrouted_nets':       Result := PCB_GetUnroutedNets(Params, RequestId);
         'get_polygons':            Result := PCB_GetPolygons(Params, RequestId);
+        'calc_polygon_area':       Result := PCB_CalcPolygonArea(Params, RequestId);
+        'set_via_soldermask_relief': Result := PCB_SetViaSoldermaskRelief(Params, RequestId);
         'modify_polygon':          Result := PCB_ModifyPolygon(Params, RequestId);
         'get_room_rules':          Result := PCB_GetRoomRules(Params, RequestId);
         'create_room':             Result := PCB_CreateRoom(Params, RequestId);

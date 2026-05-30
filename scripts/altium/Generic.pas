@@ -7506,6 +7506,237 @@ Begin
 End;
 
 {..............................................................................}
+{ Gen_IncrementDesignators - Offset the trailing number of every schematic     }
+{ component designator by a delta (e.g. +100 turns R5 into R105), optionally   }
+{ restricted to a designator prefix. Useful for renumbering a copied block.    }
+{ Params: delta (non-zero int), prefix (optional, e.g. "R")                    }
+{..............................................................................}
+
+Function Gen_IncrementDesignators(Params : String; RequestId : String) : String;
+Var
+    SchDoc : ISch_Document;
+    Iter : ISch_Iterator;
+    Comp : ISch_Component;
+    Delta, NumVal, Count, i, DigitPos : Integer;
+    PrefixFilter, DesigFull, AlphaPart, NumPart, NewDesig : String;
+    Ch : Char;
+Begin
+    Delta := StrToIntDef(ExtractJsonValue(Params, 'delta'), 0);
+    PrefixFilter := ExtractJsonValue(Params, 'prefix');
+
+    SchDoc := SchServer.GetCurrentSchDocument;
+    If SchDoc = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_SCHEMATIC', 'No schematic document is active');
+        Exit;
+    End;
+    If Delta = 0 Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAM', 'delta must be a non-zero integer');
+        Exit;
+    End;
+
+    Count := 0;
+    SchServer.ProcessControl.PreProcess(SchDoc, '');
+    Try
+        Iter := SchDoc.SchIterator_Create;
+        Iter.AddFilter_ObjectSet(MkSet(eSchComponent));
+        Try
+            Comp := Iter.FirstSchObject;
+            While Comp <> Nil Do
+            Begin
+                DesigFull := '';
+                Try DesigFull := Comp.Designator.Text; Except End;
+                DigitPos := 0;
+                For i := Length(DesigFull) DownTo 1 Do
+                Begin
+                    Ch := DesigFull[i];
+                    If (Ch >= '0') And (Ch <= '9') Then DigitPos := i
+                    Else Break;
+                End;
+                If DigitPos > 0 Then
+                Begin
+                    AlphaPart := Copy(DesigFull, 1, DigitPos - 1);
+                    NumPart := Copy(DesigFull, DigitPos, Length(DesigFull) - DigitPos + 1);
+                    If (PrefixFilter = '') Or (AlphaPart = PrefixFilter) Then
+                    Begin
+                        NumVal := StrToIntDef(NumPart, -1);
+                        If NumVal >= 0 Then
+                        Begin
+                            NewDesig := AlphaPart + IntToStr(NumVal + Delta);
+                            Try
+                                SchBeginModify(Comp.Designator);
+                                Comp.Designator.Text := NewDesig;
+                                SchEndModify(Comp.Designator);
+                                Inc(Count);
+                            Except
+                            End;
+                        End;
+                    End;
+                End;
+                Comp := Iter.NextSchObject;
+            End;
+        Finally
+            SchDoc.SchIterator_Destroy(Iter);
+        End;
+    Finally
+        SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
+    End;
+    SchDoc.GraphicallyInvalidate;
+
+    Result := BuildSuccessResponse(RequestId,
+        '{"success":true,"modified":' + IntToStr(Count) + ',"delta":' + IntToStr(Delta) + '}');
+End;
+
+{..............................................................................}
+{ Gen_TogglePinVisibility - Show/hide pin name and/or designator labels on a   }
+{ single component (by designator) or on every component on the sheet.        }
+{ Params: designator (optional), show_name ("true"/"false", optional),        }
+{         show_designator ("true"/"false", optional)                          }
+{..............................................................................}
+
+Function Gen_TogglePinVisibility(Params : String; RequestId : String) : String;
+Var
+    SchDoc : ISch_Document;
+    Iter, PinIter : ISch_Iterator;
+    Comp : ISch_Component;
+    Pin : ISch_Pin;
+    DesigFilter, ShowNameStr, ShowDesigStr, CompDesig : String;
+    SetName, SetDesig, NameVal, DesigVal, Matched : Boolean;
+    Count : Integer;
+Begin
+    DesigFilter := ExtractJsonValue(Params, 'designator');
+    ShowNameStr := LowerCase(ExtractJsonValue(Params, 'show_name'));
+    ShowDesigStr := LowerCase(ExtractJsonValue(Params, 'show_designator'));
+    SetName := (ShowNameStr = 'true') Or (ShowNameStr = 'false');
+    SetDesig := (ShowDesigStr = 'true') Or (ShowDesigStr = 'false');
+    NameVal := (ShowNameStr = 'true');
+    DesigVal := (ShowDesigStr = 'true');
+
+    If (Not SetName) And (Not SetDesig) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAM',
+            'Provide show_name and/or show_designator as "true"/"false"');
+        Exit;
+    End;
+
+    SchDoc := SchServer.GetCurrentSchDocument;
+    If SchDoc = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_SCHEMATIC', 'No schematic document is active');
+        Exit;
+    End;
+
+    Count := 0;
+    SchServer.ProcessControl.PreProcess(SchDoc, '');
+    Try
+        Iter := SchDoc.SchIterator_Create;
+        Iter.AddFilter_ObjectSet(MkSet(eSchComponent));
+        Try
+            Comp := Iter.FirstSchObject;
+            While Comp <> Nil Do
+            Begin
+                CompDesig := '';
+                Try CompDesig := Comp.Designator.Text; Except End;
+                Matched := (DesigFilter = '') Or (CompDesig = DesigFilter);
+                If Matched Then
+                Begin
+                    PinIter := Comp.SchIterator_Create;
+                    PinIter.AddFilter_ObjectSet(MkSet(ePin));
+                    Try
+                        Pin := PinIter.FirstSchObject;
+                        While Pin <> Nil Do
+                        Begin
+                            Try
+                                SchBeginModify(Pin);
+                                If SetName Then Pin.ShowName := NameVal;
+                                If SetDesig Then Pin.ShowDesignator := DesigVal;
+                                SchEndModify(Pin);
+                                Inc(Count);
+                            Except
+                            End;
+                            Pin := PinIter.NextSchObject;
+                        End;
+                    Finally
+                        Comp.SchIterator_Destroy(PinIter);
+                    End;
+                End;
+                Comp := Iter.NextSchObject;
+            End;
+        Finally
+            SchDoc.SchIterator_Destroy(Iter);
+        End;
+    Finally
+        SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
+    End;
+    SchDoc.GraphicallyInvalidate;
+
+    Result := BuildSuccessResponse(RequestId,
+        '{"success":true,"pins_modified":' + IntToStr(Count) + '}');
+End;
+
+{..............................................................................}
+{ Gen_PlaceTextFrame - Place a multi-line schematic text frame (note block).  }
+{ Params: x1,y1,x2,y2 (mils, the two rectangle corners), text (use \n for     }
+{         line breaks), align ("left"/"center"/"right", optional)             }
+{..............................................................................}
+
+Function Gen_PlaceTextFrame(Params : String; RequestId : String) : String;
+Var
+    X1, Y1, X2, Y2, TmpI : Integer;
+    SchDoc : ISch_Document;
+    TF : ISch_TextFrame;
+    TextStr, AlignStr : String;
+Begin
+    X1 := StrToIntDef(ExtractJsonValue(Params, 'x1'), 0);
+    Y1 := StrToIntDef(ExtractJsonValue(Params, 'y1'), 0);
+    X2 := StrToIntDef(ExtractJsonValue(Params, 'x2'), 0);
+    Y2 := StrToIntDef(ExtractJsonValue(Params, 'y2'), 0);
+    TextStr := ExtractJsonValue(Params, 'text');
+    AlignStr := LowerCase(ExtractJsonValue(Params, 'align'));
+    If X1 > X2 Then Begin TmpI := X1; X1 := X2; X2 := TmpI; End;
+    If Y1 > Y2 Then Begin TmpI := Y1; Y1 := Y2; Y2 := TmpI; End;
+
+    SchDoc := SchServer.GetCurrentSchDocument;
+    If SchDoc = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_SCHEMATIC', 'No schematic document is active');
+        Exit;
+    End;
+
+    TF := SchServer.SchObjectFactory(eTextFrame, eCreate_Default);
+    If TF = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'CREATE_FAILED', 'Failed to create text frame');
+        Exit;
+    End;
+
+    TF.Location := Point(MilsToCoord(X1), MilsToCoord(Y1));
+    TF.Corner := Point(MilsToCoord(X2), MilsToCoord(Y2));
+    Try TF.Text := TextStr; Except End;
+    Try TF.WordWrap := True; Except End;
+    Try TF.ClipToRect := True; Except End;
+    Try TF.ShowBorder := True; Except End;
+    Try TF.IsSolid := False; Except End;
+    If AlignStr = 'center' Then
+    Begin Try TF.Alignment := eHorizontalCentreAlign; Except End; End
+    Else If AlignStr = 'right' Then
+    Begin Try TF.Alignment := eRightAlign; Except End; End
+    Else
+    Begin Try TF.Alignment := eLeftAlign; Except End; End;
+
+    SchServer.ProcessControl.PreProcess(SchDoc, '');
+    SchDoc.RegisterSchObjectInContainer(TF);
+    SchRegisterObject(SchDoc, TF);
+    SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
+    SchDoc.GraphicallyInvalidate;
+
+    Result := BuildSuccessResponse(RequestId,
+        '{"placed":true,"x1":' + IntToStr(X1) + ',"y1":' + IntToStr(Y1) + ','
+        + '"x2":' + IntToStr(X2) + ',"y2":' + IntToStr(Y2) + '}');
+End;
+
+{..............................................................................}
 { Command Handler - must be at end                                            }
 {..............................................................................}
 
@@ -7569,6 +7800,9 @@ Begin
         'get_constraint_groups':      Result := Gen_GetConstraintGroups(Params, RequestId);
         'place_harness_connector':    Result := Gen_PlaceHarnessConnector(Params, RequestId);
         'place_cross_sheet_connector': Result := Gen_PlaceCrossSheetConnector(Params, RequestId);
+        'place_text_frame': Result := Gen_PlaceTextFrame(Params, RequestId);
+        'increment_designators': Result := Gen_IncrementDesignators(Params, RequestId);
+        'toggle_pin_visibility': Result := Gen_TogglePinVisibility(Params, RequestId);
         'set_component_part_id':      Result := Gen_SetComponentPartId(Params, RequestId);
         'place_probe':                Result := Gen_PlaceProbe(Params, RequestId);
         'add_datafile_link':          Result := Gen_AddDatafileLink(Params, RequestId);

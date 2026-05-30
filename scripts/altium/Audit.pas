@@ -1101,9 +1101,11 @@ Begin
                     Region := Obj;
                     IsInvalid := False;
                     Try
-                        If Region.GeometricPolygon = Nil Then
-                            IsInvalid := True
-                        Else If Region.GeometricPolygon.GetState_Area < 1 Then
+                        { GeometricPolygon is undeclared in this script binding;
+                          flag regions whose bounding box is degenerate (zero
+                          width or height = a zero / unset-area region). }
+                        BBox := Region.BoundingRectangle;
+                        If ((BBox.X2 - BBox.X1) <= 0) Or ((BBox.Y2 - BBox.Y1) <= 0) Then
                             IsInvalid := True;
                     Except
                         IsInvalid := True;

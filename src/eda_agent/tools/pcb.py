@@ -1923,6 +1923,61 @@ def register_pcb_tools(mcp):
         return result
 
     @mcp.tool()
+    async def pcb_calc_polygon_area(
+        net: str = "",
+        layer: str = "",
+    ) -> dict[str, Any]:
+        """Report the area of each copper polygon on the active board.
+
+        Returns each polygon's overall boundary area in square mils and
+        square millimetres, optionally filtered by net and/or layer.
+        Useful for estimating copper coverage / plane area.
+
+        Args:
+            net: Only polygons on this net (optional).
+            layer: Only polygons on this layer name (optional).
+
+        Returns:
+            Dict with ``polygons`` (each: name, net, layer, area_sq_mils,
+            area_sq_mm) and ``count``.
+        """
+        bridge = get_bridge()
+        params: dict[str, Any] = {}
+        if net:
+            params["net"] = net
+        if layer:
+            params["layer"] = layer
+        return await bridge.send_command_async("pcb.calc_polygon_area", params)
+
+    @mcp.tool()
+    async def pcb_set_via_soldermask_relief(
+        expansion_mils: int = 4,
+        net: str = "",
+    ) -> dict[str, Any]:
+        """Open soldermask over via barrels (barrel relief).
+
+        Sets each via's soldermask expansion-from-hole-edge so the via
+        barrel gets a soldermask opening, optionally limited to one net.
+        This is a common fab requirement that design rules don't expose
+        directly per-via.
+
+        Args:
+            expansion_mils: Soldermask expansion from the hole edge, in
+                mils (default 4).
+            net: Only vias on this net (optional; default all vias).
+
+        Returns:
+            Dict with success, modified (count), expansion_mils.
+        """
+        bridge = get_bridge()
+        params: dict[str, Any] = {"expansion_mils": str(expansion_mils)}
+        if net:
+            params["net"] = net
+        return await bridge.send_command_async(
+            "pcb.set_via_soldermask_relief", params
+        )
+
+    @mcp.tool()
     async def pcb_delete_object(
         x: int,
         y: int,
@@ -1943,6 +1998,13 @@ def register_pcb_tools(mcp):
                 "via" - Via
                 "fill" - Copper fill
                 "text" - Text string
+                "pad" - Free pad
+                "arc" - Arc
+                "polygon" - Copper polygon pour
+                "region" - Region / split-plane
+                "component" - Placed component
+                (polygon/region/component/arc are matched by bounding-box
+                centre; for bulk/filter-based deletes use ``delete_objects``)
 
         Returns:
             Dictionary with deleted status, object_type, and distance_mils

@@ -3729,8 +3729,8 @@ Begin
                     First := False;
                     Items := Items + JsonObj(
                         JsonStr('name', FpName) + ',' +
-                        JsonFloat('old_height_mm', CoordToMms(OldH)) + ',' +
-                        JsonFloat('new_height_mm', CoordToMms(NewH))
+                        JsonFloat('old_height_mm', CoordToMM(OldH)) + ',' +
+                        JsonFloat('new_height_mm', CoordToMM(NewH))
                     );
                 End;
             Except End;

@@ -7,7 +7,7 @@ All intelligence lives in the Python/MCP side, the DelphiScript is just
 a pass-through layer for object iteration, property access, and process execution.
 """
 
-from typing import Any
+from typing import Any, Optional
 from ..bridge import get_bridge
 from ..scope import to_wire as scope_to_wire
 from .bulk_hints import BulkHintTracker
@@ -1627,6 +1627,102 @@ def register_generic_tools(mcp):
             params["side"] = side
         return await bridge.send_command_async(
             "generic.place_cross_sheet_connector", params
+        )
+
+    @mcp.tool()
+    async def sch_place_text_frame(
+        x1: int,
+        y1: int,
+        x2: int,
+        y2: int,
+        text: str,
+        align: str = "left",
+    ) -> dict[str, Any]:
+        """Place a multi-line text frame (note block) on the active sheet.
+
+        A text frame is a bordered rectangle that word-wraps a block of
+        text. Use ``\\n`` in ``text`` for explicit line breaks.
+
+        Args:
+            x1, y1, x2, y2: The two rectangle corners in mils.
+            text: Frame contents (use \\n for line breaks).
+            align: Horizontal alignment "left", "center", or "right".
+
+        Returns:
+            Dict confirming placement and the frame corners.
+        """
+        bridge = get_bridge()
+        return await bridge.send_command_async(
+            "generic.place_text_frame",
+            {
+                "x1": str(x1),
+                "y1": str(y1),
+                "x2": str(x2),
+                "y2": str(y2),
+                "text": text,
+                "align": align,
+            },
+        )
+
+    @mcp.tool()
+    async def sch_increment_designators(
+        delta: int,
+        prefix: str = "",
+    ) -> dict[str, Any]:
+        """Offset the trailing number of schematic designators by a delta.
+
+        Adds ``delta`` to the numeric suffix of every component designator
+        on the active sheet (e.g. delta=100 turns R5 into R105),
+        optionally restricted to a designator prefix. Handy after copying
+        a block to avoid designator collisions before re-annotating.
+
+        Args:
+            delta: Non-zero integer added to each designator's number.
+            prefix: If set (e.g. "R"), only designators with this letter
+                prefix are changed.
+
+        Returns:
+            Dict with success, modified (count), delta.
+        """
+        bridge = get_bridge()
+        params: dict[str, Any] = {"delta": str(delta)}
+        if prefix:
+            params["prefix"] = prefix
+        return await bridge.send_command_async(
+            "generic.increment_designators", params
+        )
+
+    @mcp.tool()
+    async def sch_toggle_pin_visibility(
+        designator: str = "",
+        show_name: Optional[bool] = None,
+        show_designator: Optional[bool] = None,
+    ) -> dict[str, Any]:
+        """Show or hide pin name / designator labels on schematic symbols.
+
+        Targets a single component (by ``designator``) or every component
+        on the active sheet when ``designator`` is empty. Provide
+        ``show_name`` and/or ``show_designator`` to set those flags; omit a
+        flag to leave it unchanged.
+
+        Args:
+            designator: Component to target, or "" for all components.
+            show_name: True/False to set pin-name visibility (optional).
+            show_designator: True/False to set pin-designator visibility.
+
+        Returns:
+            Dict with success and pins_modified (count).
+        """
+        bridge = get_bridge()
+        params: dict[str, Any] = {}
+        if designator:
+            params["designator"] = designator
+        if show_name is not None:
+            params["show_name"] = "true" if show_name else "false"
+        if show_designator is not None:
+            params["show_designator"] = "true" if show_designator else "false"
+        return await bridge.send_command_async(
+            "generic.toggle_pin_visibility", params
         )
 
     @mcp.tool()
