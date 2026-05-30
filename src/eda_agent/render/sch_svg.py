@@ -118,6 +118,8 @@ def render_sch_svg(geometry: dict[str, Any],
     pieces.append(_render_net_labels(geometry.get("net_labels") or [], opt))
     pieces.append(_render_ports(geometry.get("ports") or [], opt))
     pieces.append(_render_power_ports(geometry.get("power_ports") or [], opt))
+    if opt.flip_y:
+        pieces.append("</g>")  # close the Y-flip wrapper opened in the root
     pieces.append("</svg>")
     return "".join(p for p in pieces if p)
 

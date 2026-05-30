@@ -11,8 +11,12 @@ LLM tool can hook click / hover / cross-probe without re-parsing).
 
 from .sch_svg import render_sch_svg, SchRenderOptions
 from .pcb_svg import render_pcb_svg, PcbRenderOptions
+from .rasterize import rasterize_svg, size_svg_for_raster
+from .review_rubric import visual_review_guidance
 
 __all__ = [
     "render_sch_svg", "SchRenderOptions",
     "render_pcb_svg", "PcbRenderOptions",
+    "rasterize_svg", "size_svg_for_raster",
+    "visual_review_guidance",
 ]

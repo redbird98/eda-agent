@@ -1295,7 +1295,8 @@ def register_generic_tools(mcp):
 
         Args:
             object_type: Altium object type constant (see query_objects for options)
-            scope: "active_doc" (default) or "project"
+            scope: "active_doc" (default), "project", or
+                "doc:C:\\path\\Sheet.SchDoc" for a specific loaded sheet.
             filter: Pipe-separated property=value conditions (AND logic)
 
         Returns:
@@ -1969,6 +1970,7 @@ def register_generic_tools(mcp):
     @mcp.tool()
     async def place_sch_components_from_library(
         placements: list[dict[str, Any]],
+        document_path: Optional[str] = None,
     ) -> dict[str, Any]:
         """Place MANY schematic components from libraries in ONE call.
 
@@ -1976,7 +1978,19 @@ def register_generic_tools(mcp):
         Laying out a 50-part BOM is inherently a bulk operation;
         done one-by-one it costs 50 LLM turns.
 
+        TARGET DOCUMENT: placement lands on the ACTIVE schematic. Right
+        after `create_document` the new sheet is NOT auto-focused, so
+        without `document_path` parts can silently land on a *different*
+        open sheet. Pass `document_path` (absolute .SchDoc path) and this
+        tool focuses that sheet first (`set_active_document`) before
+        placing — always set it when you have just created the target
+        sheet.
+
         Args:
+            document_path: Absolute path of the .SchDoc to place onto.
+                When given, it is focused before placement so parts can't
+                land on the wrong sheet. When omitted, the current active
+                document is used.
             placements: List of placement dicts, each with:
                 - library_path (str, optional, empty uses an
                   already-open library)
@@ -2022,6 +2036,23 @@ def register_generic_tools(mcp):
             return {"error": "No valid placements", "placed": 0}
 
         bridge = get_bridge()
+        # Focus the target sheet first so placement can't land on a
+        # different open document (placement targets the active doc, and
+        # a freshly created sheet is not auto-focused).
+        if document_path:
+            focus = await bridge.send_command_async(
+                "application.set_active_document",
+                {"file_path": document_path},
+            )
+            if isinstance(focus, dict) and not focus.get("success", True):
+                return {
+                    "error": "FOCUS_FAILED",
+                    "reason": f"could not focus {document_path} before "
+                    "placement; aborting to avoid placing on the wrong "
+                    "sheet",
+                    "focus_result": focus,
+                    "placed": 0,
+                }
         return await bridge.send_command_async(
             "generic.place_sch_components_from_library",
             {"placements": "~~".join(op_strs)},

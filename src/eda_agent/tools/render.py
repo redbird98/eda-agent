@@ -28,8 +28,17 @@ from ..config import get_config
 from ..render import (
     render_sch_svg, SchRenderOptions,
     render_pcb_svg, PcbRenderOptions,
+    rasterize_svg, size_svg_for_raster, visual_review_guidance,
 )
 from ..render.bom_html import render_bom_html
+
+
+def _renders_dir() -> Path:
+    """Transient render-output directory, kept OUT of the workspace root so
+    renders don't pile up in (any) user's folder. Created on demand."""
+    d = get_config().workspace_dir / "renders"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
 
 
 def register_render_tools(mcp):
@@ -57,8 +66,9 @@ def register_render_tools(mcp):
         interactive overlay but does not yet draw the actual symbol art.
 
         Args:
-            output_path: Where to write the SVG. Defaults to
-                ``<workspace>/<docname>.svg``.
+            output_path: Where to write the SVG. Defaults to the
+                transient ``<workspace>/renders/`` dir (kept out of the
+                workspace root so renders don't pile up in your folder).
             margin_mils: Padding around the geometry bbox in mils
                 (default 200).
             flip_y: When True (default) flip the Y axis so the output
@@ -91,7 +101,7 @@ def register_render_tools(mcp):
         if output_path:
             target = Path(output_path)
         else:
-            target = get_config().workspace_dir / doc_name
+            target = _renders_dir() / doc_name
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(svg, encoding="utf-8")
 
@@ -132,8 +142,9 @@ def register_render_tools(mcp):
         outlines are deferred to v1.1.
 
         Args:
-            output_path: Where to write the SVG. Defaults to
-                ``<workspace>/<docname>.svg``.
+            output_path: Where to write the SVG. Defaults to the
+                transient ``<workspace>/renders/`` dir (kept out of the
+                workspace root so renders don't pile up in your folder).
             layers: Restrict to these Altium layer names (e.g.
                 ``["TopLayer", "TopOverlay", "KeepOutLayer"]``). When
                 ``None`` (default) every known layer is rendered.
@@ -168,7 +179,7 @@ def register_render_tools(mcp):
         if output_path:
             target = Path(output_path)
         else:
-            target = get_config().workspace_dir / "pcb.svg"
+            target = _renders_dir() / "pcb.svg"
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(svg, encoding="utf-8")
 
@@ -179,6 +190,154 @@ def register_render_tools(mcp):
             "bbox": geometry.get("bbox") or {},
             "bytes": len(svg),
         }
+
+    @mcp.tool()
+    async def design_visual_review(
+        target: str = "auto",
+        output_path: Optional[str] = None,
+        rasterize: bool = True,
+        width: int = 1600,
+        margin_mils: Optional[int] = None,
+        layers: Optional[list[str]] = None,
+    ) -> dict[str, Any]:
+        """Render the active design and return it as a viewable image plus
+        a critique rubric -- the first step of a visual self-check loop.
+
+        Renderers are exports; this turns them into *feedback*. It draws
+        the active SchDoc or PcbDoc, rasterizes it to PNG (headless Edge)
+        so you can actually look at it with the Read tool, and returns a
+        document-specific ``rubric`` (what to look for) and
+        ``loop_protocol`` (render -> look -> critique -> cross-check ->
+        fix -> re-render). Each rubric item names the existing audit
+        tool(s) that measure it exactly, so vision finds candidates and
+        the audits confirm and locate them.
+
+        Use it as a loop: call this, ``Read`` the returned ``png_path``,
+        critique against ``rubric``, run the named audits for anything
+        suspicious, fix with the normal tools (for PCB placement,
+        ``pcb_plan_placement``), then call this again to confirm. A couple
+        of iterations is usually enough.
+
+        Args:
+            target: ``"auto"`` (detect the active document), ``"schematic"``,
+                or ``"pcb"``.
+            output_path: Where to write the SVG (``.png`` sits beside it).
+                Defaults to the transient ``<workspace>/renders/`` dir; the
+                scratch ``.raster.svg`` used for the screenshot is deleted
+                automatically (kept out of your folder).
+            rasterize: Also produce a PNG so the image is directly
+                viewable (default True). If no browser is found the SVG is
+                still returned with a ``rasterize_note``.
+            width: Raster width in pixels (height follows the aspect).
+            margin_mils: Override the render margin.
+            layers: PCB only -- restrict to these layer names.
+
+        Returns:
+            Dict with ``ok``, ``target``, ``doc``, ``svg_path``,
+            ``png_path`` (None if rasterization was skipped/failed),
+            ``counts``, ``bbox``, ``rubric``, ``loop_protocol``,
+            ``next_step``.
+        """
+        bridge = get_bridge()
+        t = (target or "auto").strip().lower()
+        if t in ("auto", ""):
+            info = await bridge.send_command_async(
+                "application.get_active_document")
+            kind = ""
+            if isinstance(info, dict):
+                kind = str(info.get("document_kind")
+                           or info.get("file_name") or "").lower()
+            if "pcb" in kind:
+                t = "pcb"
+            elif "sch" in kind:
+                t = "schematic"
+            else:
+                return {
+                    "ok": False,
+                    "reason": "could not detect the active document kind; "
+                    "pass target='schematic' or target='pcb'",
+                    "active_document": info,
+                }
+        if t in ("sch", "schdoc"):
+            t = "schematic"
+        if t in ("pcbdoc", "board"):
+            t = "pcb"
+        if t not in ("schematic", "pcb"):
+            return {"ok": False,
+                    "reason": f"target must be schematic or pcb (got {target!r})"}
+
+        if t == "schematic":
+            geometry = await bridge.send_command_async(
+                "generic.get_sch_geometry", {}, timeout=60.0)
+            if not isinstance(geometry, dict):
+                return {"ok": False, "reason": "no schematic geometry returned"}
+            opts = SchRenderOptions(
+                margin=margin_mils if margin_mils is not None else 200)
+            svg = render_sch_svg(geometry, opts)
+            doc = geometry.get("doc") or "schematic"
+            default_name = (Path(str(doc)).with_suffix(".review.svg").name
+                            or "schematic.review.svg")
+        else:
+            geometry = await bridge.send_command_async(
+                "generic.get_pcb_geometry", {}, timeout=120.0)
+            if not isinstance(geometry, dict):
+                return {"ok": False, "reason": "no PCB geometry returned"}
+            # No interactive legend: its foreignObject HTML is not
+            # well-formed XML, which breaks standalone-SVG rasterization.
+            # A static critique image does not need the checkboxes anyway.
+            opts = PcbRenderOptions(
+                margin_mils=margin_mils if margin_mils is not None else 250,
+                layers=layers, interactive_legend=False)
+            svg = render_pcb_svg(geometry, opts)
+            doc = geometry.get("doc") or "pcb"
+            default_name = "pcb.review.svg"
+
+        if output_path:
+            svg_target = Path(output_path)
+            if svg_target.suffix.lower() != ".svg":
+                svg_target = svg_target.with_suffix(".svg")
+        else:
+            svg_target = _renders_dir() / default_name
+        svg_target.parent.mkdir(parents=True, exist_ok=True)
+        svg_target.write_text(svg, encoding="utf-8")
+
+        result: dict[str, Any] = {
+            "ok": True,
+            "target": t,
+            "doc": geometry.get("doc"),
+            "svg_path": str(svg_target),
+            "png_path": None,
+            "counts": geometry.get("counts") or {},
+            "bbox": geometry.get("bbox") or {},
+        }
+
+        if rasterize:
+            # Give the responsive SVG explicit pixel dims, write a sized
+            # copy, and screenshot it. Best-effort: a failure leaves the
+            # SVG as the fallback artifact.
+            sized, w_px, h_px = size_svg_for_raster(svg, target_width=int(width))
+            raster_svg = svg_target.with_suffix(".raster.svg")
+            raster_svg.write_text(sized, encoding="utf-8")
+            png_target = str(svg_target.with_suffix(".png"))
+            rr = rasterize_svg(str(raster_svg), png_target, width=w_px, height=h_px)
+            # The sized copy is pure scratch for the screenshot -- never leave
+            # it cluttering the user's folder.
+            try:
+                raster_svg.unlink()
+            except OSError:
+                pass
+            if rr.get("ok"):
+                result["png_path"] = rr["png_path"]
+            else:
+                result["rasterize_note"] = rr.get("reason")
+
+        result.update(visual_review_guidance(t))
+        viewable = result["png_path"] or result["svg_path"]
+        result["next_step"] = (
+            f"Read {viewable} and critique it against `rubric`, then work "
+            "through `loop_protocol`."
+        )
+        return result
 
     @mcp.tool()
     async def export_bom_html(

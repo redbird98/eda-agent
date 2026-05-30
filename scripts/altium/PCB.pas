@@ -34,6 +34,59 @@ Begin
     Board.BoardIterator_Destroy(Iterator);
 End;
 
+{ Find a net by name, or create it if missing (used to wire up pad nets when  }
+{ populating a board without an ECO). Net creation is the standard            }
+{ PCBObjectFactory(eNetObject) + AddPCBObject pattern.                        }
+Function EnsureNet(Board : IPCB_Board; NetName : String) : IPCB_Net;
+Var
+    Net : IPCB_Net;
+Begin
+    Result := Nil;
+    If NetName = '' Then Exit;
+    Result := FindNetByName(Board, NetName);
+    If Result <> Nil Then Exit;
+    Net := PCBServer.PCBObjectFactory(eNetObject, eNoDimension, eCreate_Default);
+    If Net = Nil Then Exit;
+    Net.Name := NetName;
+    Board.AddPCBObject(Net);
+    Result := Net;
+End;
+
+{ Look up a pad's net in a pipe-delimited "padname=netname|..." string.        }
+Function GetPadNet(PadNetsStr, PadName : String) : String;
+Var
+    Token, Remaining, K, V : String;
+    PipePos, EqPos : Integer;
+Begin
+    Result := '';
+    Remaining := PadNetsStr;
+    While Remaining <> '' Do
+    Begin
+        PipePos := Pos('|', Remaining);
+        If PipePos > 0 Then
+        Begin
+            Token := Copy(Remaining, 1, PipePos - 1);
+            Remaining := Copy(Remaining, PipePos + 1, Length(Remaining));
+        End
+        Else
+        Begin
+            Token := Remaining;
+            Remaining := '';
+        End;
+        EqPos := Pos('=', Token);
+        If EqPos > 0 Then
+        Begin
+            K := Copy(Token, 1, EqPos - 1);
+            V := Copy(Token, EqPos + 1, Length(Token));
+            If K = PadName Then
+            Begin
+                Result := V;
+                Exit;
+            End;
+        End;
+    End;
+End;
+
 {..............................................................................}
 { PCB_GetNets - Get all unique net names from the board                       }
 {..............................................................................}
@@ -76,6 +129,135 @@ Begin
 
     Result := BuildSuccessResponse(RequestId,
         '{"nets":[' + JsonItems + '],"count":' + IntToStr(Count) + '}');
+End;
+
+{..............................................................................}
+{ PCB_DeleteNets - Remove nets from the board.                                 }
+{ Params: nets (comma-separated names; empty = all empty nets), force (bool). }
+{ A net with connected primitives is skipped unless force=true (forcing       }
+{ orphans those pads/tracks). Empty nets (no connections) are the common      }
+{ cleanup target left behind after deleting components.                       }
+{..............................................................................}
+
+Function PCB_DeleteNets(Params : String; RequestId : String) : String;
+Var
+    Board : IPCB_Board;
+    Iter : IPCB_BoardIterator;
+    Prim : IPCB_Primitive;
+    Net : IPCB_Net;
+    Connected, Targets, ToDelete : TStringList;
+    NetsStr, ForceStr, NName, Skipped : String;
+    Force, WantThis : Boolean;
+    I, DeletedCount, SkippedCount : Integer;
+Begin
+    Board := GetPCBBoardAnywhere;
+    If Board = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCB', 'No PCB document is active');
+        Exit;
+    End;
+
+    NetsStr := ExtractJsonValue(Params, 'nets');
+    ForceStr := LowerCase(ExtractJsonValue(Params, 'force'));
+    Force := (ForceStr = 'true') Or (ForceStr = '1');
+
+    Connected := TStringList.Create;
+    Targets := TStringList.Create;
+    ToDelete := TStringList.Create;
+    DeletedCount := 0;
+    SkippedCount := 0;
+    Skipped := '';
+
+    { Optional explicit name list (comma-separated). Empty NetsStr means    }
+    { "all empty nets". Inline split (no Split helper in this engine).       }
+    NName := NetsStr;
+    While NName <> '' Do
+    Begin
+        I := Pos(',', NName);
+        If I > 0 Then
+        Begin
+            Targets.Add(Copy(NName, 1, I - 1));
+            NName := Copy(NName, I + 1, Length(NName));
+        End
+        Else
+        Begin
+            Targets.Add(NName);
+            NName := '';
+        End;
+    End;
+
+    { Collect the set of net names that have at least one connected         }
+    { primitive, so "empty" nets can be distinguished from in-use ones.     }
+    Iter := Board.BoardIterator_Create;
+    Iter.AddFilter_ObjectSet(MkSet(eTrackObject, eViaObject, ePadObject,
+        eArcObject, eFillObject, ePolyObject, eRegionObject));
+    Iter.AddFilter_LayerSet(AllLayers);
+    Iter.AddFilter_Method(eProcessAll);
+    Prim := Iter.FirstPCBObject;
+    While Prim <> Nil Do
+    Begin
+        Try
+            If Prim.Net <> Nil Then
+            Begin
+                NName := Prim.Net.Name;
+                If Connected.IndexOf(NName) < 0 Then Connected.Add(NName);
+            End;
+        Except End;
+        Prim := Iter.NextPCBObject;
+    End;
+    Board.BoardIterator_Destroy(Iter);
+
+    { Decide which nets to delete. }
+    Iter := Board.BoardIterator_Create;
+    Iter.AddFilter_ObjectSet(MkSet(eNetObject));
+    Iter.AddFilter_LayerSet(AllLayers);
+    Iter.AddFilter_Method(eProcessAll);
+    Net := Iter.FirstPCBObject;
+    While Net <> Nil Do
+    Begin
+        NName := Net.Name;
+        WantThis := (Targets.Count = 0) Or (Targets.IndexOf(NName) >= 0);
+        If WantThis Then
+        Begin
+            If (Connected.IndexOf(NName) >= 0) And (Not Force) Then
+            Begin
+                If Skipped <> '' Then Skipped := Skipped + ',';
+                Skipped := Skipped + '"' + EscapeJsonString(NName) + '"';
+                SkippedCount := SkippedCount + 1;
+            End
+            Else
+                ToDelete.Add(NName);
+        End;
+        Net := Iter.NextPCBObject;
+    End;
+    Board.BoardIterator_Destroy(Iter);
+
+    { Remove by re-finding each name (don't hold net refs across removal). }
+    PCBServer.PreProcess;
+    Try
+        For I := 0 To ToDelete.Count - 1 Do
+        Begin
+            Net := FindNetByName(Board, ToDelete[I]);
+            If Net <> Nil Then
+            Begin
+                Board.RemovePCBObject(Net);
+                DeletedCount := DeletedCount + 1;
+            End;
+        End;
+    Finally
+        PCBServer.PostProcess;
+    End;
+
+    Connected.Free;
+    Targets.Free;
+    ToDelete.Free;
+
+    SaveDocByPath(Board.FileName);
+
+    Result := BuildSuccessResponse(RequestId,
+        '{"deleted":' + IntToStr(DeletedCount)
+        + ',"skipped_connected":' + IntToStr(SkippedCount)
+        + ',"skipped_nets":[' + Skipped + ']}');
 End;
 
 {..............................................................................}
@@ -348,7 +530,7 @@ Var
     Remaining : String;
 Begin
     Board := Nil;
-    Try Board := PCBServer.GetCurrentPCBBoard; Except End;
+    Try Board := GetPCBBoardAnywhere; Except End;
     If Board = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_BOARD',
@@ -1270,7 +1452,7 @@ Var
     First, PairOk : Boolean;
 Begin
     Board := Nil;
-    Try Board := PCBServer.GetCurrentPCBBoard; Except End;
+    Try Board := GetPCBBoardAnywhere; Except End;
     If Board = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_BOARD',
@@ -1429,7 +1611,7 @@ Var
     MatchedPrim, UpdatedPrim, MatchedComp, UpdatedComp : Integer;
 Begin
     Board := Nil;
-    Try Board := PCBServer.GetCurrentPCBBoard; Except End;
+    Try Board := GetPCBBoardAnywhere; Except End;
     If Board = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_BOARD',
@@ -1608,7 +1790,7 @@ Var
     DryStr : String;
 Begin
     Board := Nil;
-    Try Board := PCBServer.GetCurrentPCBBoard; Except End;
+    Try Board := GetPCBBoardAnywhere; Except End;
     If Board = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_BOARD',
@@ -1782,7 +1964,7 @@ Var
     NameMark : String;
 Begin
     Board := Nil;
-    Try Board := PCBServer.GetCurrentPCBBoard; Except End;
+    Try Board := GetPCBBoardAnywhere; Except End;
     If Board = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_BOARD',
@@ -5675,6 +5857,336 @@ Begin
 End;
 
 {..............................................................................}
+{ PCB_PlaceComponent - Place a footprint from a PcbLib directly onto the      }
+{ board, WITHOUT an ECO. This is the scriptable substitute for Design >       }
+{ Update PCB Document (which is not scriptable): drop footprints whose        }
+{ designators match the schematic so the board can be populated and          }
+{ auto-placed. Pattern from Allen Gong (forum.live.altium.com/#posts/241580): }
+{ PCBObjectFactory(eComponentObject) + IPCB_Component.LoadFromLibrary.        }
+{ Note: this places geometry only; it does NOT create the sch<->pcb linkage   }
+{ or assign pad nets (those come from a real ECO).                            }
+{ Params: footprint (req), library_path (req, .PcbLib), lib_reference,        }
+{         x, y (mils), rotation, layer, designator, comment                   }
+{..............................................................................}
+
+Function PCB_PlaceComponent(Params : String; RequestId : String) : String;
+Var
+    Board : IPCB_Board;
+    Comp : IPCB_Component;
+    GrpIter : IPCB_GroupIterator;
+    Pad : IPCB_Pad;
+    Net : IPCB_Net;
+    X, Y, NetsAssigned : Integer;
+    Linked : Boolean;
+    Rotation : Double;
+    Footprint, LibPath, LibRef, Designator, Comment, LayerStr, LoadStr : String;
+    UniqueIdStr, PadNetsStr, PadName, NetName, BoardPathStr : String;
+Begin
+    { Target a specific board by path when several PcbDocs are open, so a    }
+    { placement can't silently land on the wrong (focused) board. Empty      }
+    { board_path falls back to the current/focused board.                    }
+    BoardPathStr := ExtractJsonValue(Params, 'board_path');
+    Board := ResolvePCBBoard(BoardPathStr);
+    If Board = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCB', 'No PCB document is active');
+        Exit;
+    End;
+
+    Footprint  := ExtractJsonValue(Params, 'footprint');
+    LibPath    := ExtractJsonValue(Params, 'library_path');
+    LibRef     := ExtractJsonValue(Params, 'lib_reference');
+    Designator := ExtractJsonValue(Params, 'designator');
+    Comment    := ExtractJsonValue(Params, 'comment');
+    LayerStr   := ExtractJsonValue(Params, 'layer');
+    UniqueIdStr := ExtractJsonValue(Params, 'unique_id');
+    PadNetsStr  := ExtractJsonValue(Params, 'pad_nets');
+    X := StrToIntDef(ExtractJsonValue(Params, 'x'), 0);
+    Y := StrToIntDef(ExtractJsonValue(Params, 'y'), 0);
+    Rotation := StrToFloatDef(ExtractJsonValue(Params, 'rotation'), 0);
+    NetsAssigned := 0;
+    Linked := False;
+
+    If Footprint = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAM', 'Missing "footprint" parameter');
+        Exit;
+    End;
+    If LibPath = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAM', 'Missing "library_path" parameter (.PcbLib)');
+        Exit;
+    End;
+    If LibRef = '' Then LibRef := Footprint;
+    If LayerStr = '' Then LayerStr := 'TopLayer';
+
+    PCBServer.PreProcess;
+    Try
+        Comp := PCBServer.PCBObjectFactory(eComponentObject, eNoDimension, eCreate_Default);
+        If Comp = Nil Then
+        Begin
+            PCBServer.PostProcess;
+            Result := BuildErrorResponse(RequestId, 'CREATE_FAILED', 'Failed to create component object');
+            Exit;
+        End;
+
+        Comp.Board := Board;
+        LoadStr := 'SourceLibReference=' + LibRef + '|FootPrint=' + Footprint
+                 + '|SourceComponentLibrary=' + LibPath;
+        Comp.LoadFromLibrary(LoadStr);
+        Comp.Layer := GetLayerFromString(LayerStr);
+        Comp.x := MilsToCoord(X);
+        Comp.y := MilsToCoord(Y);
+        Comp.Rotation := Rotation;
+        If Designator <> '' Then Comp.Name.Text := Designator;
+        If Comment <> '' Then Comp.Comment.Text := Comment;
+
+        { sch<->pcb link: stamping the source UniqueId + designator makes a    }
+        { later ECO treat this part as MATCHED to its schematic counterpart    }
+        { instead of "extra in PCB". Same writable Source* family as the       }
+        { proven Comp.SourceFootprintLibrary assignment.                        }
+        If UniqueIdStr <> '' Then
+        Begin
+            Comp.SourceUniqueId := UniqueIdStr;
+            If Designator <> '' Then Comp.SourceDesignator := Designator;
+            Linked := True;
+        End;
+
+        Board.AddPCBObject(Comp);
+        PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
+            PCBM_BoardRegisteration, Comp.I_ObjectAddress);
+
+        { pad nets: create each named net if missing, assign it to the pad,    }
+        { giving the board real connectivity (ratsnest + DRC) without an ECO.  }
+        If PadNetsStr <> '' Then
+        Begin
+            GrpIter := Comp.GroupIterator_Create;
+            GrpIter.AddFilter_ObjectSet(MkSet(ePadObject));
+            Pad := GrpIter.FirstPCBObject;
+            While Pad <> Nil Do
+            Begin
+                PadName := '';
+                Try PadName := Pad.Name; Except End;
+                NetName := GetPadNet(PadNetsStr, PadName);
+                If NetName <> '' Then
+                Begin
+                    Net := EnsureNet(Board, NetName);
+                    If Net <> Nil Then
+                    Begin
+                        Pad.Net := Net;
+                        NetsAssigned := NetsAssigned + 1;
+                    End;
+                End;
+                Pad := GrpIter.NextPCBObject;
+            End;
+            Comp.GroupIterator_Destroy(GrpIter);
+        End;
+    Finally
+        PCBServer.PostProcess;
+    End;
+
+    SaveDocByPath(Board.FileName);
+
+    Result := BuildSuccessResponse(RequestId,
+        '{"placed":true,"footprint":"' + EscapeJsonString(Footprint) + '",'
+        + '"designator":"' + EscapeJsonString(Designator) + '",'
+        + '"x":' + IntToStr(X) + ',"y":' + IntToStr(Y) + ','
+        + '"rotation":' + FloatToJsonStr(Rotation) + ','
+        + '"layer":"' + EscapeJsonString(LayerStr) + '",'
+        + '"linked":' + BoolToJsonStr(Linked) + ','
+        + '"nets_assigned":' + IntToStr(NetsAssigned) + '}');
+End;
+
+{ Read one field from a batch placement record encoded as                     }
+{ key==value;;key==value (so pad_nets' single '=' and '|' don't collide).     }
+Function GetPlacementField(Str, Key : String) : String;
+Var
+    Token, Remaining, K : String;
+    SepPos, EqPos : Integer;
+Begin
+    Result := '';
+    Remaining := Str;
+    While Remaining <> '' Do
+    Begin
+        SepPos := Pos(';;', Remaining);
+        If SepPos > 0 Then
+        Begin
+            Token := Copy(Remaining, 1, SepPos - 1);
+            Remaining := Copy(Remaining, SepPos + 2, Length(Remaining));
+        End
+        Else
+        Begin
+            Token := Remaining;
+            Remaining := '';
+        End;
+        EqPos := Pos('==', Token);
+        If EqPos > 0 Then
+        Begin
+            K := Copy(Token, 1, EqPos - 1);
+            If K = Key Then
+            Begin
+                Result := Copy(Token, EqPos + 2, Length(Token));
+                Exit;
+            End;
+        End;
+    End;
+End;
+
+{..............................................................................}
+{ PCB_PlaceComponents - place MANY footprints in ONE call (board resolved     }
+{ once, one PreProcess/Save). Same synced-placement logic as the singular     }
+{ handler. Records separated by '~~'; fields key==value;;key==value.          }
+{..............................................................................}
+
+Function PCB_PlaceComponents(Params : String; RequestId : String) : String;
+Var
+    Board : IPCB_Board;
+    Comp : IPCB_Component;
+    GrpIter : IPCB_GroupIterator;
+    Pad : IPCB_Pad;
+    Net : IPCB_Net;
+    PlacementsStr, BoardPathStr, OnePlace, Remaining, LoadStr : String;
+    Footprint, LibPath, LibRef, Designator, Comment, LayerStr : String;
+    UniqueIdStr, PadNetsStr, PadName, NetName : String;
+    X, Y, PlacedCount, FailedCount, SepPos : Integer;
+    Rotation : Double;
+Begin
+    BoardPathStr  := ExtractJsonValue(Params, 'board_path');
+    PlacementsStr := ExtractJsonValue(Params, 'placements');
+    Board := ResolvePCBBoard(BoardPathStr);
+    If Board = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCB', 'No PCB document is active');
+        Exit;
+    End;
+
+    PlacedCount := 0;
+    FailedCount := 0;
+
+    PCBServer.PreProcess;
+    Try
+        Remaining := PlacementsStr;
+        While Remaining <> '' Do
+        Begin
+            SepPos := Pos('~~', Remaining);
+            If SepPos > 0 Then
+            Begin
+                OnePlace := Copy(Remaining, 1, SepPos - 1);
+                Remaining := Copy(Remaining, SepPos + 2, Length(Remaining));
+            End
+            Else
+            Begin
+                OnePlace := Remaining;
+                Remaining := '';
+            End;
+            If OnePlace = '' Then Continue;
+
+            Footprint   := GetPlacementField(OnePlace, 'footprint');
+            LibPath     := GetPlacementField(OnePlace, 'library_path');
+            LibRef      := GetPlacementField(OnePlace, 'lib_reference');
+            Designator  := GetPlacementField(OnePlace, 'designator');
+            Comment     := GetPlacementField(OnePlace, 'comment');
+            LayerStr    := GetPlacementField(OnePlace, 'layer');
+            UniqueIdStr := GetPlacementField(OnePlace, 'unique_id');
+            PadNetsStr  := GetPlacementField(OnePlace, 'pad_nets');
+            X := StrToIntDef(GetPlacementField(OnePlace, 'x'), 0);
+            Y := StrToIntDef(GetPlacementField(OnePlace, 'y'), 0);
+            Rotation := StrToFloatDef(GetPlacementField(OnePlace, 'rotation'), 0);
+
+            If (Footprint = '') Or (LibPath = '') Then
+            Begin
+                FailedCount := FailedCount + 1;
+                Continue;
+            End;
+            If LibRef = '' Then LibRef := Footprint;
+            If LayerStr = '' Then LayerStr := 'TopLayer';
+
+            Comp := PCBServer.PCBObjectFactory(eComponentObject, eNoDimension, eCreate_Default);
+            If Comp = Nil Then
+            Begin
+                FailedCount := FailedCount + 1;
+                Continue;
+            End;
+
+            Comp.Board := Board;
+            LoadStr := 'SourceLibReference=' + LibRef + '|FootPrint=' + Footprint
+                     + '|SourceComponentLibrary=' + LibPath;
+            Comp.LoadFromLibrary(LoadStr);
+            Comp.Layer := GetLayerFromString(LayerStr);
+            Comp.x := MilsToCoord(X);
+            Comp.y := MilsToCoord(Y);
+            Comp.Rotation := Rotation;
+            If Designator <> '' Then Comp.Name.Text := Designator;
+            If Comment <> '' Then Comp.Comment.Text := Comment;
+            If UniqueIdStr <> '' Then
+            Begin
+                Comp.SourceUniqueId := UniqueIdStr;
+                If Designator <> '' Then Comp.SourceDesignator := Designator;
+            End;
+
+            Board.AddPCBObject(Comp);
+            PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
+                PCBM_BoardRegisteration, Comp.I_ObjectAddress);
+
+            If PadNetsStr <> '' Then
+            Begin
+                GrpIter := Comp.GroupIterator_Create;
+                GrpIter.AddFilter_ObjectSet(MkSet(ePadObject));
+                Pad := GrpIter.FirstPCBObject;
+                While Pad <> Nil Do
+                Begin
+                    PadName := '';
+                    Try PadName := Pad.Name; Except End;
+                    NetName := GetPadNet(PadNetsStr, PadName);
+                    If NetName <> '' Then
+                    Begin
+                        Net := EnsureNet(Board, NetName);
+                        If Net <> Nil Then Pad.Net := Net;
+                    End;
+                    Pad := GrpIter.NextPCBObject;
+                End;
+                Comp.GroupIterator_Destroy(GrpIter);
+            End;
+
+            PlacedCount := PlacedCount + 1;
+        End;
+    Finally
+        PCBServer.PostProcess;
+    End;
+
+    SaveDocByPath(Board.FileName);
+
+    Result := BuildSuccessResponse(RequestId,
+        '{"placed":' + IntToStr(PlacedCount)
+        + ',"failed":' + IntToStr(FailedCount)
+        + ',"total":' + IntToStr(PlacedCount + FailedCount) + '}');
+End;
+
+{..............................................................................}
+{ PCB_FocusBoard - make a specific board the focused/current one, so the      }
+{ GetPCBBoardAnywhere-based tools (get_components, delete, plan_placement,    }
+{ render, ...) all operate on it. Essential when several PcbDocs are open.    }
+{ Params: board_path (the .PcbDoc to focus).                                  }
+{..............................................................................}
+
+Function PCB_FocusBoard(Params : String; RequestId : String) : String;
+Var
+    Board : IPCB_Board;
+    BoardPathStr : String;
+Begin
+    BoardPathStr := ExtractJsonValue(Params, 'board_path');
+    Board := ResolvePCBBoard(BoardPathStr);
+    If Board = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCB',
+            'Could not resolve a PCB board for the given path');
+        Exit;
+    End;
+    Result := BuildSuccessResponse(RequestId,
+        '{"focused":true,"board":"' + EscapeJsonString(Board.FileName) + '"}');
+End;
+
+{..............................................................................}
 { PCB_PlaceAngularDimension - Place an angular dimension (arc between 2 axes) }
 { Params: center_x, center_y, x1,y1, x2,y2 in mils, radius in mils,          }
 {         layer=<layer>                                                      }
@@ -5916,7 +6428,7 @@ Var
     ItemsPlaced, ItemsSkipped, NetName : String;
     FirstPlaced, FirstSkipped : Boolean;
 Begin
-    Board := PCBServer.GetCurrentPCBBoard;
+    Board := GetPCBBoardAnywhere;
     If Board = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_BOARD',
@@ -6146,7 +6658,7 @@ Var
     PadRot : Double;
     FillX1, FillY1, FillX2, FillY2 : Integer;
 Begin
-    Board := PCBServer.GetCurrentPCBBoard;
+    Board := GetPCBBoardAnywhere;
     If Board = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_BOARD',
@@ -6406,7 +6918,7 @@ Var
     First, BothRouted : Boolean;
     Count : Integer;
 Begin
-    Board := PCBServer.GetCurrentPCBBoard;
+    Board := GetPCBBoardAnywhere;
     If Board = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_BOARD',
@@ -6493,7 +7005,7 @@ Var
     Total, Cleared : Integer;
     UseFilter, Match : Boolean;
 Begin
-    Board := PCBServer.GetCurrentPCBBoard;
+    Board := GetPCBBoardAnywhere;
     If Board = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_BOARD',
@@ -6598,7 +7110,7 @@ Var
     R : TCoordRect;
     HasAny : Boolean;
 Begin
-    Board := PCBServer.GetCurrentPCBBoard;
+    Board := GetPCBBoardAnywhere;
     If Board = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_BOARD',
@@ -7470,6 +7982,7 @@ Function HandlePCBCommand(Action : String; Params : String; RequestId : String) 
 Begin
     Case Action Of
         'get_nets':                Result := PCB_GetNets(Params, RequestId);
+        'delete_nets':             Result := PCB_DeleteNets(Params, RequestId);
         'get_net_classes':         Result := PCB_GetNetClasses(Params, RequestId);
         'create_net_class':        Result := PCB_CreateNetClass(Params, RequestId);
         'get_design_rules':        Result := PCB_GetDesignRules(Params, RequestId);
@@ -7536,6 +8049,9 @@ Begin
         'distribute_components':   Result := PCB_DistributeComponents(Params, RequestId);
         'place_dimension':         Result := PCB_PlaceDimension(Params, RequestId);
         'place_pad':               Result := PCB_PlacePad(Params, RequestId);
+        'place_component':         Result := PCB_PlaceComponent(Params, RequestId);
+        'place_components':        Result := PCB_PlaceComponents(Params, RequestId);
+        'focus_board':             Result := PCB_FocusBoard(Params, RequestId);
         'place_angular_dimension': Result := PCB_PlaceAngularDimension(Params, RequestId);
         'place_radial_dimension':  Result := PCB_PlaceRadialDimension(Params, RequestId);
         'place_embedded_board':    Result := PCB_PlaceEmbeddedBoard(Params, RequestId);

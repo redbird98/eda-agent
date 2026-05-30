@@ -28,6 +28,18 @@ def register_project_tools(mcp):
         Returns:
             Dictionary with created project information
         """
+        # Ensure the parent directory exists. The Altium side writes the
+        # project stub with Rewrite(), which throws EInOutError ("Invalid
+        # file name") into a blocking IDE modal when the folder is missing.
+        # Creating it here (the server runs on the same host as Altium)
+        # keeps that modal from ever firing.
+        import os
+        parent = os.path.dirname(project_path)
+        if parent:
+            try:
+                os.makedirs(parent, exist_ok=True)
+            except OSError:
+                pass
         bridge = get_bridge()
         result = await bridge.send_command_async(
             "project.create",
@@ -1449,22 +1461,30 @@ def register_project_tools(mcp):
 
     @mcp.tool()
     async def update_pcb() -> dict[str, Any]:
-        """Push schematic changes to PCB (ECO). Attempts silent execution.
+        """Push schematic changes to PCB (ECO) — Design ▸ Update PCB Document.
 
-        Equivalent to Design > Update PCB Document in Altium Designer.
+        IMPORTANT — this is NOT silent. Altium's ECO (change-review) dialog
+        is non-suppressible by design, so this **fires the real ECO and then
+        BLOCKS on a modal dialog until a human clicks "Execute Changes"**.
+        Do not call it in an unattended/headless run — it will hang the
+        Altium-side polling loop until someone interacts. (There is no
+        documented silent flag; the prior implementation called a
+        non-existent process id and silently did nothing.)
+
         The server:
           1. Compiles the project and records before-state mappings
              (matched, extra-in-schematic, extra-in-pcb).
-          2. Invokes PCB:UpdatePCBFromProject with silent-mode parameter
-             flags (DisableDialog, Silent, NoConfirm, AutoApply). Modern
-             Altium builds (AD20+) honor DisableDialog=True and apply
-             changes without a dialog. Older builds may still display the
-             ECO dialog.
-          3. Recompiles and reports the after-state, the delta tells you
-             exactly how many components were added/removed programmatically.
-          4. If counts did not change but differences existed, the response
-             includes dialog_may_have_opened:true to flag that manual
-             confirmation may still be needed.
+          2. Invokes ``WorkspaceManager:Compare`` (ObjectKind=Project,
+             Action=UpdateOther) — the evidenced scriptable sch→PCB update.
+             The modal ECO dialog opens here.
+          3. After the user accepts, recompiles and reports the after-state
+             delta (how many components were added/removed).
+          4. If counts did not change, ``dialog_may_have_opened:true`` flags
+             that the dialog was dismissed without applying.
+
+        For unattended board population without a schematic, use
+        ``pcb_place_component`` instead (places geometry only — see its note
+        about leaving the project unsynced).
 
         Returns:
             Dictionary with success, pcb_path, before/after mapping counts,

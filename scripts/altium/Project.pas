@@ -59,6 +59,10 @@ Begin
     End;
 
     Saved := False;
+    // Ensure the target directory exists; Rewrite throws EInOutError
+    // ("Invalid file name") into an engine modal if the folder is missing,
+    // and that modal escapes the Try/Except below.
+    Try ForceDirectories(ExtractFilePath(ProjectPath)); Except End;
     Try
         AssignFile(F, ProjectPath);
         Rewrite(F);
@@ -1104,7 +1108,7 @@ Begin
 
         { 2) Walk the board, find the component by Name.Text, select it.    }
         Board := Nil;
-        Try Board := PCBServer.GetCurrentPCBBoard; Except End;
+        Try Board := GetPCBBoardAnywhere; Except End;
         If Board = Nil Then
         Begin
             Result := BuildErrorResponse(RequestId, 'NO_BOARD',
@@ -3196,23 +3200,23 @@ End;
 {..............................................................................}
 { Push schematic changes to PCB (Design > Update PCB Document).               }
 {                                                                              }
-{ Altium does not expose a fully documented DelphiScript API for silently      }
-{ executing an ECO, the IEngineeringChangeOrder / IECOManager interfaces     }
-{ are not reachable from scripting in any publicly documented way.             }
+{ A SILENT / headless ECO is not possible: Altium's ECO dialog is            }
+{ non-suppressible by design, and the IECO interface exposes no project-wide  }
+{ execute entry point reachable from DelphiScript. What IS scriptable is      }
+{ LAUNCHING the real ECO via WorkspaceManager:Compare (see below); it raises  }
+{ the modal change-review dialog that a human must accept.                    }
 {                                                                              }
 { Strategy:                                                                    }
 {   1. Compile the project and gather component mapping differences so useful  }
 {      counts are available regardless of what the ECO dialog does.            }
-{   2. Invoke PCB:UpdatePCBFromProject with parameter flags (DisableDialog,   }
-{      Silent, Execute, NoConfirm, AutoApply) that various Altium builds      }
-{      honor, older builds ignore unknown flags but do not error. Modern     }
-{      builds (AD20+) honor DisableDialog=True by applying changes            }
-{      automatically in many cases.                                           }
+{   2. Invoke WorkspaceManager:Compare (ObjectKind=Project, Action=UpdateOther)}
+{      -- the documented/evidenced sch->PCB update. It BLOCKS on the modal     }
+{      ECO dialog until the user clicks Execute Changes.                       }
 {   3. Re-compile and recompute mappings; report the before/after delta.      }
 {                                                                              }
-{ If the ECO dialog still opens (older Altium), the caller sees               }
-{ dialog_may_have_opened:true and the user can confirm manually; the          }
-{ difference data still reports what Altium found.                            }
+{ The caller sees dialog_may_have_opened:true when the counts did not change  }
+{ (user dismissed the dialog without applying); the difference data still     }
+{ reports what Altium found.                                                  }
 {..............................................................................}
 
 Function Proj_UpdatePCB(Params : String; RequestId : String) : String;
@@ -3244,15 +3248,24 @@ Begin
         Exit;
     End;
 
-    { Invoke the ECO process with every parameter flag Altium builds have
-      historically honored. Unknown flags are ignored silently. }
+    { Fire the real ECO via the WorkspaceManager comparator. This is the
+      ONLY evidenced scriptable launcher (ref: reference MultiPCBProject.pas,
+      Petar Perisin): WorkspaceManager:Compare with ObjectKind=Project +
+      Action=UpdateOther performs Design > Update PCB Document (schematic ->
+      PCB). The previous 'PCB:UpdatePCBFromProject' was NOT a real process id
+      (RunProcess silently ignores unknown ids -> the handler no-opped), and
+      DisableDialog/Silent/NoConfirm/AutoApply are invented flags that appear
+      in no Altium docs.
+      DIALOG IS UNAVOIDABLE: Altium's Engineering Change Order dialog is
+      non-suppressible BY DESIGN (altium.com .../keeping-synchronized). This
+      process raises that modal and BLOCKS the polling loop until a human
+      clicks "Execute Changes" (or closes it). There is no documented silent
+      variant. Direction note: Action=UpdateOther is sch->PCB when driven with
+      the project/schematic in focus; it back-annotates if a PCB is focused. }
     ResetParameters;
-    AddStringParameter('Action', 'Execute');
-    AddStringParameter('DisableDialog', 'True');
-    AddStringParameter('Silent', 'True');
-    AddStringParameter('NoConfirm', 'True');
-    AddStringParameter('AutoApply', '1');
-    RunProcess('PCB:UpdatePCBFromProject');
+    AddStringParameter('ObjectKind', 'Project');
+    AddStringParameter('Action', 'UpdateOther');
+    RunProcess('WorkspaceManager:Compare');
 
     { Recompile and recompute to report actual changes }
     Try SmartCompile(Project); Except End;

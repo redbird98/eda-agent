@@ -22,7 +22,7 @@ class _FakeBridge:
     """Stub for the IPC bridge.
 
     The audit module calls send_command for:
-      - project.get_project_documents          (sheet enumeration)
+      - project.get_documents          (sheet enumeration)
       - generic.query_objects                  (per (type, scope) read)
 
     We construct responses keyed by object_type, returning lists of
@@ -49,7 +49,7 @@ class _FakeBridge:
         timeout: float | None = None,
     ) -> Any:
         self.calls.append((command, params or {}))
-        if command == "project.get_project_documents":
+        if command == "project.get_documents":
             return {
                 "documents": [
                     {"file_path": s, "kind": "SCH"} for s in self.sheets
@@ -446,7 +446,7 @@ def test_audit_walks_every_sheet_in_the_project() -> None:
     assert report.overlaps[0].sheet == sheet_b
     # The bridge enumeration call must have been issued.
     cmds = [c for c, _ in bridge.calls]
-    assert "project.get_project_documents" in cmds
+    assert "project.get_documents" in cmds
 
 
 # --------------------------------------------------------------------
@@ -457,7 +457,7 @@ def test_audit_walks_every_sheet_in_the_project() -> None:
 def test_audit_handles_query_objects_failure_gracefully() -> None:
     class _ErrBridge:
         def send_command(self, command, params=None, timeout=None):
-            if command == "project.get_project_documents":
+            if command == "project.get_documents":
                 return {"documents": [{"file_path": SHEET, "kind": "SCH"}]}
             if command == "generic.query_objects":
                 raise RuntimeError("forced")
@@ -478,7 +478,7 @@ def test_audit_handles_missing_sheet_enumeration() -> None:
 
         def send_command(self, command, params=None, timeout=None):
             self.calls.append((command, params or {}))
-            if command == "project.get_project_documents":
+            if command == "project.get_documents":
                 raise RuntimeError("no project")
             if command == "generic.query_objects":
                 obj_type = (params or {}).get("object_type", "")

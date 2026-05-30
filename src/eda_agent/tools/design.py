@@ -57,6 +57,9 @@ def register_design_tools(mcp) -> None:
     @mcp.tool()
     async def design_snapshot_inventory(
         library_paths: list[str],
+        name_filter: str = "",
+        limit_per_library: int = 60,
+        include_descriptions: bool = True,
     ) -> dict[str, Any]:
         """Open a list of SchLib files and return what components live in them.
 
@@ -64,29 +67,70 @@ def register_design_tools(mcp) -> None:
         libraries. Do NOT pass project-local library paths from another
         client engagement, design knowledge cannot cross NDA boundaries.
 
+        Large libraries (passives/connectors can hold hundreds of parts)
+        easily exceed the tool-output token budget, so the RETURNED set is
+        filtered and capped. The FULL inventory is always cached to
+        ``<workspace>/inventory.json`` for the dashboard regardless of
+        these limits.
+
         Args:
             library_paths: Absolute paths to .SchLib files to scan.
+            name_filter: Case-insensitive substring; keep only components
+                whose lib_ref or description contains it (e.g. ``"10k"``,
+                ``"NE555"``). Empty = no filter.
+            limit_per_library: Cap components returned per library
+                (default 60; 0 = unlimited). Each library reports
+                ``total`` and ``returned`` so you know if it was capped.
+            include_descriptions: Drop the (often long) ``description``
+                field from the returned rows to save tokens. Default True.
 
         Returns:
-            Inventory dict: ``{"libraries": [{"path", "components": [...]}]}``.
-            Each component carries lib_ref, designator_prefix, pin_count,
-            description, and footprint when available. The planner uses
-            this to bias its part choices toward existing-lib parts.
+            Inventory dict: ``{"libraries": [{"path", "total",
+            "returned", "components": [...]}]}``. Each component carries
+            lib_ref, designator_prefix, pin_count, description (unless
+            suppressed), and footprint when available.
         """
         paths = [Path(p) for p in library_paths]
         inventory = snapshot_live(paths)
-        payload = inventory.model_dump()
-        # Cache the latest snapshot so the web dashboard's Libraries tab
-        # can render it without re-running the (slow) live scan.
+        full_payload = inventory.model_dump()
+        # Cache the FULL snapshot (unfiltered) so the web dashboard's
+        # Libraries tab can render it without re-running the slow scan.
         try:
             from ..config import get_config
             cache_path = get_config().workspace_dir / "inventory.json"
             cache_path.write_text(
-                json.dumps(payload, indent=2), encoding="utf-8",
+                json.dumps(full_payload, indent=2), encoding="utf-8",
             )
         except OSError:
             pass
-        return payload
+
+        # Build a trimmed payload for the response.
+        needle = name_filter.strip().lower()
+        cap = max(0, int(limit_per_library))
+        out_libs: list[dict[str, Any]] = []
+        for lib in full_payload.get("libraries", []):
+            comps = lib.get("components") or []
+            if needle:
+                comps = [
+                    c for c in comps
+                    if needle in str(c.get("lib_ref") or "").lower()
+                    or needle in str(c.get("description") or "").lower()
+                ]
+            total = len(comps)
+            if cap:
+                comps = comps[:cap]
+            if not include_descriptions:
+                comps = [
+                    {k: v for k, v in c.items() if k != "description"}
+                    for c in comps
+                ]
+            out_libs.append({
+                "path": lib.get("path"),
+                "total": total,
+                "returned": len(comps),
+                "components": comps,
+            })
+        return {"libraries": out_libs}
 
     @mcp.tool()
     async def design_validate_plan(plan_json: Union[str, dict]) -> dict[str, Any]:

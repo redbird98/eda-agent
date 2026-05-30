@@ -8,6 +8,15 @@ component placement, trace lengths, layer stackup, board outline, etc.
 
 from typing import Any, Optional
 from ..bridge import get_bridge
+from ..placement import (
+    BoardRegion,
+    PlaceComp,
+    PlaceNet,
+    PlaceOptions,
+    PlacePin,
+    plan_placement,
+    rotate_offset,
+)
 from .bulk_hints import BulkHintTracker
 from .datasheet_hints import tag_response
 
@@ -25,6 +34,65 @@ def register_pcb_tools(mcp):
         bridge = get_bridge()
         result = await bridge.send_command_async("pcb.get_nets", {})
         return result
+
+    @mcp.tool()
+    async def pcb_focus_board(board_path: str) -> dict[str, Any]:
+        """Make a specific PCB the focused/current board.
+
+        When several PcbDocs are open, the other PCB tools
+        (`pcb_get_components`, `pcb_delete_object`, `pcb_delete_net`,
+        `pcb_plan_placement`, `design_visual_review`, …) operate on the
+        *focused* board — and `set_active_document` does NOT reliably set
+        that for a PcbDoc. Call this first to point them all at the board
+        you mean. (`pcb_place_component(s)` already accept `board_path`
+        directly.)
+
+        Args:
+            board_path: Absolute path to the .PcbDoc to focus.
+
+        Returns:
+            Dict with ``focused`` and the resolved ``board`` file name.
+        """
+        bridge = get_bridge()
+        return await bridge.send_command_async(
+            "pcb.focus_board", {"board_path": board_path}
+        )
+
+    @mcp.tool()
+    async def pcb_delete_net(
+        nets: Optional[list[str]] = None,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        """Delete nets from the active PCB.
+
+        By default removes only EMPTY nets (no connected pads / tracks /
+        vias) — the cleanup for stray nets left behind after deleting
+        components, e.g. nets created by `pcb_place_component`'s synced
+        mode. A net that still has connections is skipped unless
+        ``force=True`` (forcing orphans those pads/tracks, so use it
+        deliberately).
+
+        Args:
+            nets: Specific net names to delete. Omit (or pass an empty
+                list) to sweep ALL empty nets on the board.
+            force: Also delete nets that still have connected primitives
+                (orphans them). Default False.
+
+        Returns:
+            Dict with ``deleted`` (count removed), ``skipped_connected``
+            (count), and ``skipped_nets`` (names skipped because still
+            connected).
+        """
+        bridge = get_bridge()
+        return await bridge.send_command_async(
+            "pcb.delete_nets",
+            {
+                "nets": ",".join(
+                    str(n).strip() for n in (nets or []) if str(n).strip()
+                ),
+                "force": "true" if force else "false",
+            },
+        )
 
     @mcp.tool()
     async def pcb_get_net_classes() -> dict[str, Any]:
@@ -315,6 +383,380 @@ def register_pcb_tools(mcp):
             {"moves": "|".join(ops)},
         )
         return result
+
+    @mcp.tool()
+    async def pcb_plan_placement(
+        designators: Optional[list[str]] = None,
+        fixed: Optional[list[str]] = None,
+        region: Optional[dict[str, float]] = None,
+        iterations: int = 400,
+        grid_mils: float = 5.0,
+        clearance_mils: float = 15.0,
+        max_net_fanout: int = 0,
+        exclude_nets: Optional[list[str]] = None,
+        reseed_grid: bool = False,
+        optimize_rotation: bool = True,
+        apply: bool = False,
+    ) -> dict[str, Any]:
+        """Connectivity-driven auto-placement: shorten wirelength, keep
+        components legal. **Dry-run by default** -- returns a proposed
+        move list and quality metrics without touching the board.
+
+        This is the analytical-placement idea from the PCB-placement
+        literature (global spring/repulsion relaxation -> legalization),
+        run as a pure-Python solver on the current board. It reads the
+        compiled netlist and every component's real footprint bounding
+        box, then refines positions to minimize half-perimeter
+        wirelength (HPWL) while keeping components inside the board
+        outline and free of same-layer overlaps.
+
+        With ``optimize_rotation`` (default on) it also picks each
+        eligible part's orientation (0/90/180/270) to point its pins at
+        the nets they connect -- the classic auto-place win for 2-pin
+        passives. This needs per-pin geometry, so the tool also reads the
+        board's pads and maps them to components; orientation is only
+        considered for top-side parts currently sitting at an orthogonal
+        angle (others keep their rotation).
+
+        Workflow: call once with ``apply=False`` (default), read the
+        ``hpwl_improvement_pct`` and ``overlap_pairs_after``, eyeball the
+        ``moves``, then call again with ``apply=True`` to commit them in
+        one ``pcb.batch_move_components`` transaction. Components on
+        opposite layers may share an X/Y footprint (they cannot
+        physically collide).
+
+        Seeding: by default the solver refines the board's CURRENT
+        positions (small, sensible nudges). Pass ``reseed_grid=True`` for
+        a from-scratch re-place (ignores current positions) -- use only
+        on an unplaced or badly-scrambled board.
+
+        Args:
+            designators: If given, ONLY these components are moved; every
+                other placed component is held fixed but still attracts
+                its nets and blocks overlaps. If omitted, all components
+                are candidates (minus ``fixed``).
+            fixed: Designators to pin in place (connectors, mounting
+                holes, anything already positioned). Naming-agnostic --
+                you choose which; the tool does not guess by prefix.
+            region: Placement bounds ``{x1, y1, x2, y2}`` in mils. If
+                omitted, the board outline's bounding rectangle is used.
+            iterations: Global-placement relaxation steps (default 400).
+                More iterations = better convergence, longer runtime.
+            grid_mils: Snap grid for final positions (default 5).
+            clearance_mils: Extra copper-to-copper breathing room added
+                to each pair's half-extents (default 15).
+            max_net_fanout: Skip nets touching more than this many
+                components (default 0 = keep all). Set e.g. 20 to ignore
+                power/ground planes that do not usefully guide placement.
+            exclude_nets: Explicit net names to ignore (e.g. ``["GND"]``).
+            reseed_grid: Re-place from a fresh grid instead of refining
+                current positions (default False).
+            optimize_rotation: Also choose part orientation to shorten
+                pin-level wirelength (default True). Set False to keep
+                every part's current rotation.
+            apply: When True, commit the moves to the board. Default
+                False (dry-run).
+
+        Returns:
+            Dict with:
+              - ``dry_run``: bool (True unless ``apply`` and moves exist)
+              - ``component_count``, ``movable_count``, ``fixed_count``
+              - ``net_count`` (nets used after filtering)
+              - ``pin_count`` (pads mapped to components for rotation)
+              - ``hpwl_before``, ``hpwl_after``, ``hpwl_improvement_pct``
+              - ``overlap_pairs_before``, ``overlap_pairs_after``
+              - ``moved_count``, ``rotated_count`` and ``moves`` (each
+                ``{designator, from: {x, y, rotation}, to: {x, y,
+                rotation}}`` in mils/degrees; ``to.rotation`` is null
+                when the orientation was unchanged)
+              - ``region`` used, ``notes`` from the solver, and
+                ``apply_result`` when ``apply=True``.
+        """
+        bridge = get_bridge()
+
+        comp_resp = await bridge.send_command_async("pcb.get_components", {})
+        raw_comps = comp_resp.get("components") if isinstance(comp_resp, dict) else None
+        if not raw_comps:
+            return {
+                "error": "NO_COMPONENTS",
+                "reason": "pcb.get_components returned no components",
+                "raw": comp_resp,
+            }
+
+        # Resolve placement region from the board outline if not given.
+        region_used: dict[str, float]
+        if region and all(k in region for k in ("x1", "y1", "x2", "y2")):
+            region_used = {k: float(region[k]) for k in ("x1", "y1", "x2", "y2")}
+        else:
+            outline = await bridge.send_command_async("pcb.get_board_outline", {})
+            br = outline.get("bounding_rect") if isinstance(outline, dict) else None
+            if not br:
+                return {
+                    "error": "NO_BOARD_OUTLINE",
+                    "reason": "No board outline; pass an explicit region "
+                    "{x1, y1, x2, y2} in mils.",
+                    "raw": outline,
+                }
+            region_used = {
+                "x1": float(br.get("left", 0)),
+                "y1": float(br.get("bottom", 0)),
+                "x2": float(br.get("right", 0)),
+                "y2": float(br.get("top", 0)),
+            }
+
+        # Build the solver's component list. Capture each part's centroid,
+        # origin, current rotation, bbox (for the pad->component spatial
+        # join), and C0 = the centroid's offset from the origin at
+        # rotation 0 -- needed to convert a solved (centroid, rotation)
+        # back to an Altium move (which sets the origin and rotates about
+        # it).
+        def _is_orthogonal(deg: float) -> bool:
+            return abs((deg % 90.0)) < 0.5 or abs((deg % 90.0) - 90.0) < 0.5
+
+        fixed_set = {str(d).strip() for d in (fixed or []) if str(d).strip()}
+        selected = {str(d).strip() for d in (designators or []) if str(d).strip()}
+        geom: dict[str, dict[str, Any]] = {}
+        place_comps: list[PlaceComp] = []
+        comp_by_ref: dict[str, PlaceComp] = {}
+        all_designators: list[str] = []
+        for c in raw_comps:
+            ref = str(c.get("designator", "")).strip()
+            if not ref:
+                continue
+            all_designators.append(ref)
+            bbox = c.get("bbox") or {}
+            try:
+                w = max(1.0, float(bbox.get("width", 0)))
+                h = max(1.0, float(bbox.get("height", 0)))
+                x1 = float(bbox.get("x1", 0))
+                y1 = float(bbox.get("y1", 0))
+                x2 = float(bbox.get("x2", 0))
+                y2 = float(bbox.get("y2", 0))
+                ox = float(c.get("x", 0))
+                oy = float(c.get("y", 0))
+                rot = float(c.get("rotation", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            cx = (x1 + x2) / 2.0
+            cy = (y1 + y2) / 2.0
+            layer = str(c.get("layer", "Top")) or "Top"
+            # C0 = back-rotated centroid-from-origin vector (rotation 0).
+            c0 = rotate_offset(cx - ox, cy - oy, -rot)
+            geom[ref] = {
+                "cx": cx, "cy": cy, "ox": ox, "oy": oy, "rot": rot,
+                "c0": c0,
+                "bbox": (min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2)),
+                "layer": layer,
+            }
+            # Fixed if explicitly pinned, or (when a selection is given)
+            # not part of the selected set.
+            is_fixed = ref in fixed_set or (bool(selected) and ref not in selected)
+            pc = PlaceComp(
+                ref=ref,
+                w=w,
+                h=h,
+                cx=cx,
+                cy=cy,
+                layer=layer,
+                fixed=is_fixed,
+                rotation=rot,
+            )
+            place_comps.append(pc)
+            comp_by_ref[ref] = pc
+
+        if not place_comps:
+            return {"error": "NO_PLACEABLE_COMPONENTS", "raw": comp_resp}
+
+        # Build the net graph from the compiled netlist. One batch IPC.
+        net_resp = await bridge.send_command_async(
+            "project.get_connectivity_batch",
+            {"designators": "~~".join(all_designators)},
+            timeout=180.0,
+        )
+        exclude = {str(n).strip().upper() for n in (exclude_nets or [])}
+        net_members: dict[str, list[str]] = {}
+        comps_conn = net_resp.get("components") if isinstance(net_resp, dict) else None
+        for c in comps_conn or []:
+            ref = str(c.get("designator", "")).strip()
+            if not ref:
+                continue
+            for pin in c.get("pins") or []:
+                net = str(pin.get("net", "")).strip()
+                if not net or net.upper() in exclude:
+                    continue
+                members = net_members.setdefault(net, [])
+                if ref not in members:
+                    members.append(ref)
+
+        place_nets: list[PlaceNet] = []
+        for net, members in net_members.items():
+            if len(members) < 2:
+                continue
+            if max_net_fanout and len(members) > max_net_fanout:
+                continue
+            place_nets.append(PlaceNet(tuple(members), name=net))
+
+        # Pin geometry: one board-wide pad query, then a spatial join (pad
+        # center -> smallest containing component bbox) + back-rotation to
+        # recover rotation-0 local offsets. Needed for rotation
+        # optimization AND -- crucially -- to derive the net graph when
+        # there is no compiled schematic netlist (a PCB-only / synced-
+        # placement board, where connectivity lives on the pads, not in a
+        # schematic). Only top-side, orthogonally-placed parts are made
+        # rotatable.
+        pin_count = 0
+        netgraph_from_pads = False
+        if optimize_rotation or not net_members:
+            pad_resp = await bridge.send_command_async(
+                "generic.query_objects",
+                {"object_type": "ePadObject", "properties": "X,Y,Net",
+                 "scope": "active_doc", "filter": ""},
+                timeout=120.0,
+            )
+            pads = pad_resp.get("objects") if isinstance(pad_resp, dict) else None
+            bbox_list = [(ref, geom[ref]["bbox"]) for ref in geom]
+            pins_by_ref: dict[str, list[PlacePin]] = {}
+            pad_net_members: dict[str, list[str]] = {}
+            for pad in pads or []:
+                try:
+                    px = float(pad.get("X"))
+                    py = float(pad.get("Y"))
+                except (TypeError, ValueError):
+                    continue
+                net = str(pad.get("Net", "")).strip()
+                if not net or net.upper() in exclude:
+                    continue
+                owner = None
+                owner_area = None
+                for ref, (bx1, by1, bx2, by2) in bbox_list:
+                    if bx1 <= px <= bx2 and by1 <= py <= by2:
+                        area = (bx2 - bx1) * (by2 - by1)
+                        if owner_area is None or area < owner_area:
+                            owner_area = area
+                            owner = ref
+                if owner is None:
+                    continue
+                g = geom[owner]
+                lx, ly = rotate_offset(px - g["cx"], py - g["cy"], -g["rot"])
+                pins_by_ref.setdefault(owner, []).append(PlacePin(lx, ly, net))
+                m = pad_net_members.setdefault(net, [])
+                if owner not in m:
+                    m.append(owner)
+            if optimize_rotation:
+                for ref, pins in pins_by_ref.items():
+                    pc = comp_by_ref[ref]
+                    pc.pins = tuple(pins)
+                    pc.rotatable = (
+                        pc.layer.lower().startswith("top")
+                        and _is_orthogonal(geom[ref]["rot"])
+                    )
+                    pin_count += len(pins)
+            # No schematic netlist -> build the net graph from PCB pad nets
+            # so the spring placement (and rotation) actually optimize.
+            if not net_members and pad_net_members:
+                net_members = pad_net_members
+                netgraph_from_pads = True
+                place_nets = []
+                for net, members in net_members.items():
+                    if len(members) < 2:
+                        continue
+                    if max_net_fanout and len(members) > max_net_fanout:
+                        continue
+                    place_nets.append(PlaceNet(tuple(members), name=net))
+
+        options = PlaceOptions(
+            iterations=max(0, int(iterations)),
+            grid_mils=float(grid_mils),
+            clearance_mils=float(clearance_mils),
+            reseed_grid=bool(reseed_grid),
+            optimize_rotation=bool(optimize_rotation),
+        )
+        region_obj = BoardRegion(
+            region_used["x1"], region_used["y1"],
+            region_used["x2"], region_used["y2"],
+        )
+        result = plan_placement(place_comps, place_nets, region_obj, options)
+
+        # Convert each solved (centroid, rotation) back to an Altium move.
+        # Altium sets the origin (Comp.x/y) and rotates the body about it,
+        # so new_origin = target_centroid - R(newRot) * C0, where C0 is
+        # the centroid's offset from the origin at rotation 0. Emit a move
+        # when the part shifted past half the snap grid OR was re-oriented.
+        threshold = max(1.0, float(grid_mils) / 2.0)
+        moves: list[dict[str, Any]] = []
+        for ref, (ncx, ncy) in result.positions.items():
+            comp = comp_by_ref.get(ref)
+            if comp is None or comp.fixed:
+                continue
+            g = geom[ref]
+            new_rot = float(result.rotations.get(ref, g["rot"]))
+            rotated = ref in result.rotated
+            c0x, c0y = g["c0"]
+            r0x, r0y = rotate_offset(c0x, c0y, new_rot)
+            new_ox = int(round(ncx - r0x))
+            new_oy = int(round(ncy - r0y))
+            old_ox = int(round(g["ox"]))
+            old_oy = int(round(g["oy"]))
+            moved_xy = (abs(new_ox - old_ox) >= threshold
+                        or abs(new_oy - old_oy) >= threshold)
+            if not moved_xy and not rotated:
+                continue
+            moves.append({
+                "designator": ref,
+                "from": {"x": old_ox, "y": old_oy, "rotation": g["rot"]},
+                "to": {"x": new_ox, "y": new_oy,
+                       "rotation": new_rot if rotated else None},
+            })
+
+        hpwl_before = result.hpwl_before
+        hpwl_after = result.hpwl_after
+        improvement = (
+            round((hpwl_before - hpwl_after) / hpwl_before * 100.0, 2)
+            if hpwl_before > 0 else 0.0
+        )
+        movable_count = sum(1 for c in place_comps if not c.fixed)
+        rotated_count = sum(1 for m in moves if m["to"]["rotation"] is not None)
+        summary: dict[str, Any] = {
+            "dry_run": True,
+            "component_count": len(place_comps),
+            "movable_count": movable_count,
+            "fixed_count": len(place_comps) - movable_count,
+            "net_count": len(place_nets),
+            "net_graph_source": "pcb_pads" if netgraph_from_pads else "schematic",
+            "pin_count": pin_count,
+            "hpwl_before": round(hpwl_before, 1),
+            "hpwl_after": round(hpwl_after, 1),
+            "hpwl_improvement_pct": improvement,
+            "overlap_pairs_before": result.overlap_pairs_before,
+            "overlap_pairs_after": result.overlap_pairs_after,
+            "moved_count": len(moves),
+            "rotated_count": rotated_count,
+            "moves": moves,
+            "region": region_used,
+            "notes": result.notes,
+        }
+
+        if apply and moves:
+            # Pack as designator,x,y,rotation (empty rotation field leaves
+            # the orientation unchanged).
+            ops = []
+            for m in moves:
+                rot = m["to"]["rotation"]
+                rot_str = "" if rot is None else str(rot)
+                ops.append(
+                    f"{m['designator']},{m['to']['x']},{m['to']['y']},{rot_str}"
+                )
+            apply_result = await bridge.send_command_async(
+                "pcb.batch_move_components",
+                {"moves": "|".join(ops)},
+            )
+            summary["dry_run"] = False
+            summary["apply_result"] = apply_result
+        elif apply and not moves:
+            summary["apply_result"] = {"moves_applied": 0,
+                                       "reason": "no moves to apply"}
+
+        return summary
 
     @mcp.tool()
     async def pcb_copy_component_placement(
@@ -2501,6 +2943,171 @@ def register_pcb_tools(mcp):
             },
         )
         return result
+
+    @mcp.tool()
+    async def pcb_place_component(
+        footprint: str,
+        library_path: str,
+        x: int,
+        y: int,
+        designator: str = "",
+        lib_reference: str = "",
+        comment: str = "",
+        rotation: float = 0,
+        layer: str = "TopLayer",
+        unique_id: str = "",
+        pad_nets: Optional[dict[str, str]] = None,
+        board_path: str = "",
+    ) -> dict[str, Any]:
+        """Place a footprint from a PcbLib directly onto the board — a
+        scriptable substitute for ECO / *Design ▸ Update PCB Document*.
+
+        To place MANY footprints, prefer the batch `pcb_place_components`
+        (one IPC round-trip, board resolved once) over looping this.
+
+        ``board_path``: when several PcbDocs are open, set this to the
+        absolute .PcbDoc path to target a SPECIFIC board — otherwise the
+        focused/current board is used, which may be the wrong one.
+
+        Why this exists: Altium's ECO is not dialog-free (it always raises a
+        modal), so for unattended board population this drops a footprint
+        straight onto the board. With ``unique_id`` + ``pad_nets`` it can
+        produce a **synced, connected** part; without them it is geometry
+        only.
+
+        Two modes:
+
+        * **Geometry only** (no ``unique_id``/``pad_nets``): places the
+          footprint with a designator. No schematic↔PCB link, no pad nets —
+          pads are unconnected (DRC flags them), and a later real ECO treats
+          the part as "extra in PCB". Fine for artwork, panelization,
+          fiducials, mechanical/placement studies, or testing.
+        * **Synced** (pass ``unique_id`` + ``pad_nets``): also stamps the
+          schematic component's UniqueId onto the PCB part (so a later ECO
+          sees it as MATCHED, not extra) and creates/assigns each pad's net
+          (so the board has real connectivity — ratsnest + DRC). This is the
+          programmatic-ECO path: populate a board from a compiled schematic
+          with NO dialog. Read ``unique_id`` from the schematic component
+          (e.g. ``query_objects(eSchComponent, "Designator.Text,UniqueId")``)
+          and ``pad_nets`` from the compiled netlist
+          (``get_connectivity_many`` → pad number → net).
+
+        Footprints come from a **.PcbLib**, not the .SchLib.
+
+        Args:
+            footprint: Footprint name inside the PcbLib (e.g. "SOIC-8").
+            library_path: Absolute path to the .PcbLib holding it.
+            x, y: Placement position in mils.
+            designator: Reference designator to assign (e.g. "U1"). Match
+                the schematic for the netlist join.
+            lib_reference: Source library reference; defaults to
+                ``footprint`` when omitted.
+            comment: Comment / value text (optional).
+            rotation: Orientation in degrees (default 0).
+            layer: Placement layer (default "TopLayer"; "BottomLayer"
+                for bottom-side).
+            unique_id: The schematic component's UniqueId, to link this PCB
+                part to its schematic counterpart (so a later ECO matches it
+                instead of flagging it as extra).
+            pad_nets: ``{pad_name: net_name}`` (e.g. ``{"1": "VCC",
+                "2": "GND"}``). Each named net is created on the board if
+                missing and assigned to that pad, giving real connectivity.
+
+        Returns:
+            Dict with ``placed``, ``footprint``, ``designator``, ``x``,
+            ``y``, ``rotation``, ``layer``, ``linked`` (UniqueId stamped),
+            ``nets_assigned`` (pad count wired) — or an error.
+        """
+        pad_nets_str = ""
+        if pad_nets:
+            pad_nets_str = "|".join(
+                f"{str(k).strip()}={str(v).strip()}"
+                for k, v in pad_nets.items()
+                if str(k).strip() and str(v).strip()
+            )
+        bridge = get_bridge()
+        return await bridge.send_command_async(
+            "pcb.place_component",
+            {
+                "footprint": footprint,
+                "library_path": library_path,
+                "lib_reference": lib_reference,
+                "designator": designator,
+                "comment": comment,
+                "x": str(int(x)),
+                "y": str(int(y)),
+                "rotation": str(rotation),
+                "layer": layer,
+                "unique_id": unique_id,
+                "pad_nets": pad_nets_str,
+                "board_path": board_path,
+            },
+        )
+
+    @mcp.tool()
+    async def pcb_place_components(
+        placements: list[dict[str, Any]],
+        board_path: str = "",
+    ) -> dict[str, Any]:
+        """Place MANY footprints from PcbLibs onto the board in ONE call.
+
+        PREFER THIS over looping `pcb_place_component` — it resolves the
+        board once and places every footprint in a single Altium
+        transaction (one IPC round-trip instead of N). Same synced-mode
+        capability per component (UniqueId link + pad-net creation).
+
+        ``board_path``: target a specific .PcbDoc when several are open
+        (resolved once for the whole batch). Otherwise the focused board
+        is used.
+
+        Args:
+            placements: List of placement dicts, each with:
+                footprint (required), library_path (required, .PcbLib),
+                x, y (mils), designator, lib_reference, comment,
+                rotation, layer, unique_id, and pad_nets
+                (``{pad_name: net_name}``). See `pcb_place_component` for
+                the meaning of each (geometry-only vs synced).
+            board_path: Absolute .PcbDoc path to place onto (optional).
+
+        Returns:
+            Dict with ``placed`` (count), ``failed`` (count), ``total``.
+        """
+        recs: list[str] = []
+        for p in placements:
+            fp = str(p.get("footprint", "")).strip()
+            lib = str(p.get("library_path", "")).strip()
+            if not fp or not lib:
+                continue
+            fields = [f"footprint=={fp}", f"library_path=={lib}"]
+            for key in ("lib_reference", "designator", "comment",
+                        "layer", "unique_id"):
+                v = str(p.get(key, "") or "").strip()
+                if v:
+                    fields.append(f"{key}=={v}")
+            fields.append(f"x=={int(p.get('x', 0))}")
+            fields.append(f"y=={int(p.get('y', 0))}")
+            if p.get("rotation") is not None:
+                fields.append(f"rotation=={p.get('rotation')}")
+            pn = p.get("pad_nets")
+            if pn:
+                pn_str = "|".join(
+                    f"{str(k).strip()}={str(v).strip()}"
+                    for k, v in pn.items()
+                    if str(k).strip() and str(v).strip()
+                )
+                if pn_str:
+                    fields.append(f"pad_nets=={pn_str}")
+            recs.append(";;".join(fields))
+
+        if not recs:
+            return {"error": "No valid placements (need footprint + "
+                    "library_path)", "placed": 0}
+
+        bridge = get_bridge()
+        return await bridge.send_command_async(
+            "pcb.place_components",
+            {"placements": "~~".join(recs), "board_path": board_path},
+        )
 
     @mcp.tool()
     async def pcb_place_angular_dimension(

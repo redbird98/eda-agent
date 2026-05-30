@@ -99,8 +99,11 @@ Function App_GetActiveDocument(RequestId : String) : String;
 Var
     Workspace : IWorkspace;
     Doc : IDocument;
+    SchDoc : ISch_Document;
+    Board : IPCB_Board;
     Data, FileName : String;
 Begin
+    Data := '';
     Workspace := GetWorkspace;
     If Workspace <> Nil Then
     Begin
@@ -111,12 +114,40 @@ Begin
             Data := '{"file_name":"' + EscapeJsonString(ExtractFileName(FileName)) + '"';
             Data := Data + ',"file_path":"' + EscapeJsonString(FileName) + '"';
             Data := Data + ',"document_kind":"' + EscapeJsonString(Doc.DM_DocumentKind) + '"}';
-        End
-        Else
-            Data := '{}';
-    End
-    Else
-        Data := '{}';
+        End;
+    End;
+
+    // DM_FocusedDocument is UI-focus-dependent and returns Nil when no
+    // editor window holds focus (e.g. right after a programmatic
+    // create/place). Fall back to the SCH then PCB server module's
+    // current document, which track the last-shown sheet/board
+    // independent of workspace focus.
+    If Data = '' Then
+    Begin
+        SchDoc := Nil;
+        Try SchDoc := SchServer.GetCurrentSchDocument; Except SchDoc := Nil; End;
+        If SchDoc <> Nil Then
+        Begin
+            FileName := SchDoc.DocumentName;
+            Data := '{"file_name":"' + EscapeJsonString(ExtractFileName(FileName)) + '"';
+            Data := Data + ',"file_path":"' + EscapeJsonString(FileName) + '"';
+            Data := Data + ',"document_kind":"SCH"}';
+        End;
+    End;
+    If Data = '' Then
+    Begin
+        Board := Nil;
+        Try Board := GetPCBBoardAnywhere; Except Board := Nil; End;
+        If Board <> Nil Then
+        Begin
+            FileName := Board.FileName;
+            Data := '{"file_name":"' + EscapeJsonString(ExtractFileName(FileName)) + '"';
+            Data := Data + ',"file_path":"' + EscapeJsonString(FileName) + '"';
+            Data := Data + ',"document_kind":"PCB"}';
+        End;
+    End;
+
+    If Data = '' Then Data := '{}';
     Result := BuildSuccessResponse(RequestId, Data);
 End;
 

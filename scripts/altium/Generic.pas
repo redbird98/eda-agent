@@ -255,7 +255,13 @@ Begin
         // SheetFileName.Text label that links the symbol to its child sheet.
         Else If (PropName = 'Designator') Or (PropName = 'Designator.Text') Then
         Begin
-            If Obj.ObjectId = eSheetSymbol Then
+            If Obj.ObjectId = ePin Then
+                // A pin's Designator IS its pin number (ISch_Pin.Designator);
+                // it must not be routed through the component-text helper,
+                // which returns empty for a pin and was the cause of blank
+                // pin numbers in ePin queries.
+                Result := Obj.Designator
+            Else If Obj.ObjectId = eSheetSymbol Then
                 Result := GetSheetSymbolText(Obj, 'Designator')
             Else
                 Result := GetSchComponentSubText(Obj, 'Designator');
@@ -3745,10 +3751,16 @@ Begin
     End
     Else
     Begin
-        SchDoc := SchServer.GetCurrentSchDocument;
+        // Honor doc:<path> scope (parallel to query_objects). Without
+        // this the count silently fell back to the active document,
+        // returning a misleading number for an explicit doc: scope.
+        If (ScopeType = 'doc') And (ScopePath <> '') Then
+            SchDoc := SchServer.GetSchDocumentByPath(ScopePath)
+        Else
+            SchDoc := SchServer.GetCurrentSchDocument;
         If SchDoc = Nil Then
         Begin
-            Result := BuildErrorResponse(RequestId, 'NO_SCHEMATIC', 'No schematic document is active');
+            Result := BuildErrorResponse(RequestId, 'NO_SCHEMATIC', 'No schematic document is active or loaded for the given scope');
             Exit;
         End;
 

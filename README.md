@@ -370,13 +370,15 @@ Schematic-side operations plus viewport and sheet management.
 | `crossref_net` | Sch pin list vs PCB pad list for a named net: diff + `in_sync` flag |
 | `generic_run_process` | Run any Altium process command |
 
-### PCB (73 tools)
+### PCB (78 tools)
 
 Queries and modifications on the active PCB document.
 
 | Tool | Purpose |
 |---|---|
 | `pcb_get_nets` / `pcb_get_net_classes` / `pcb_create_net_class` | Net / net class management |
+| `pcb_focus_board` | Make a specific .PcbDoc the focused board so all the GetPCBBoardAnywhere-based tools target it (needed when several PcbDocs are open; `set_active_document` doesn't reliably set the current PCB) |
+| `pcb_delete_net` | Remove nets — by default only empty ones (cleanup for stray nets left after deleting components); `force` to delete connected nets too |
 | `pcb_get_design_rules` / `pcb_create_design_rule` / `pcb_delete_design_rule` / `pcb_get_diff_pair_rules` / `pcb_get_room_rules` | Design rules. `pcb_create_design_rule` dispatches to typed `IPCB_*Constraint` subtypes for clearance / width / via-size with the proper per-layer setters |
 | `pcb_get_rule_properties` / `pcb_set_rule_properties` | Read rule metadata + the `descriptor` string (which carries every constraint value in human-readable form, e.g. `Width Constraint (Min=0.102mm) (Max=5.08mm) (Preferred=0.127mm)`); set metadata-only (Enabled / Priority / Scope1 / Scope2 / Comment). Constraint values must be set via `pcb_create_design_rule` or the Altium UI; they live on per-kind subtypes that DelphiScript cannot dispatch to safely from a base `IPCB_Rule` reference |
 | `pcb_set_rules_enabled` | Bulk DRC-rule enable/disable by name pattern |
@@ -388,11 +390,13 @@ Queries and modifications on the active PCB document.
 | `pcb_place_via` / `pcb_place_via_array` / `pcb_get_vias` | Via operations and stitching arrays |
 | `pcb_set_via_soldermask_relief` | Open soldermask over via barrels (barrel relief) |
 | `pcb_place_arc` / `pcb_place_text` / `pcb_place_fill` / `pcb_place_pad` | Primitive placement |
+| `pcb_place_component` / `pcb_place_components` | Place footprint(s) from a PcbLib directly onto the board — scriptable substitute for ECO/Update-PCB. Synced mode (`unique_id` + `pad_nets`) stamps the sch↔pcb link and creates/assigns nets (real connectivity, no dialog); `board_path` targets a specific board when several are open. Batch variant places N in one transaction |
 | `pcb_place_dimension` / `pcb_place_angular_dimension` / `pcb_place_radial_dimension` | Dimension annotations |
 | `pcb_start_polygon_placement` / `pcb_place_polygon_rect` / `pcb_place_region` / `pcb_get_polygons` / `pcb_modify_polygon` / `pcb_repour_polygons` | Polygons and regions |
 | `pcb_calc_polygon_area` | Per-polygon copper area in square mm / mil |
 | `pcb_place_embedded_board` | Panelization: drop an `IPCB_EmbeddedBoard` grid referencing a child `.PcbDoc` |
 | `pcb_create_diff_pair` / `pcb_distribute_components` / `pcb_set_board_shape` | Higher-level ops |
+| `pcb_plan_placement` | Connectivity-driven auto-placement: force-directed global placement + legalization minimizes HPWL while keeping parts on-board and overlap-free, and optimizes part orientation (0/90/180/270) from real pin geometry. Pure-Python solver; dry-run by default, applies via `pcb_move_components` |
 | `pcb_create_room` | Room placement |
 | `pcb_get_unrouted_nets` | Ratsnest / unrouted analysis |
 | `pcb_get_layer_stackup` / `pcb_add_layer` / `pcb_remove_layer` / `pcb_modify_layer` / `pcb_set_layer_visibility` | Layer stack: get, add/remove layers, copper thickness + dielectric properties |

@@ -13,7 +13,7 @@ Const
     // returns, mismatch means Altium is running a stale compiled script
     // (DelphiScript caches compiled units until the script project is
     // reopened or Altium is restarted).
-    SCRIPT_VERSION = '2026.05.30.14';
+    SCRIPT_VERSION = '2026.05.31.1';
 
     // Wire protocol version. Bumped whenever the request/response JSON shape
     // changes incompatibly. Python and Pascal must agree; mismatch returns
@@ -343,6 +343,39 @@ Begin
     { Restore the user's prior view so the focus blink is invisible. }
     If (PrevView <> Nil) And (Client <> Nil) Then
         Try Client.ShowDocument(PrevView.OwnerDocument); Except End;
+End;
+
+{..............................................................................}
+{ ResolvePCBBoard - get a SPECIFIC board by path when several PcbDocs are     }
+{ open. GetPCBBoardAnywhere returns the focused/current board, which is the   }
+{ WRONG one when the caller meant a different (e.g. newly created) board.     }
+{ PCBServer.GetPCBBoardByPath is undeclared on this build, so we open + show  }
+{ the target (which focuses it) and then read GetCurrentPCBBoard. Empty path  }
+{ falls back to GetPCBBoardAnywhere.                                          }
+{..............................................................................}
+
+Function ResolvePCBBoard(Path : String) : IPCB_Board;
+Var
+    ServerDoc : IServerDocument;
+Begin
+    Result := Nil;
+    If Path = '' Then
+    Begin
+        Result := GetPCBBoardAnywhere;
+        Exit;
+    End;
+    ServerDoc := Nil;
+    Try ServerDoc := Client.OpenDocument('PCB', Path); Except End;
+    If ServerDoc = Nil Then
+    Begin
+        { Path didn't resolve to a loadable PcbDoc; fall back rather than    }
+        { silently returning Nil and erroring the whole call.                }
+        Result := GetPCBBoardAnywhere;
+        Exit;
+    End;
+    Try Client.ShowDocument(ServerDoc); Except End;
+    Try Result := PCBServer.GetCurrentPCBBoard; Except End;
+    If Result = Nil Then Result := GetPCBBoardAnywhere;
 End;
 
 { Save every modified IServerDocument the workspace knows about, both     }

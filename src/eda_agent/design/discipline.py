@@ -260,6 +260,63 @@ these rules before producing a plan; they bound your choices.
     relaxes — there's only one or two sensible layouts. The rule
     applies to anything with 4+ pins.
 
+## Tool-usage rules (read before driving the tools)
+
+Operational rules for using the MCP tools correctly, independent of any
+one design. They apply in every session.
+
+1. **Datasheet before any device claim.** Beyond design-time part choice
+   (rule 5), NEVER state a pin function, number, rating, package, polarity,
+   or behaviour from symbol metadata / a distributor page / memory. Fetch
+   and cite the manufacturer datasheet first, for any device, in any
+   context. Tool responses carry a `_datasheet_guidance` block — treat it
+   as a checklist, not an FYI.
+
+2. **SPICE models are vendor-only.** When setting up simulation, fetch the
+   manufacturer-published `.mdl` / `.ckt` / `.lib` model. NEVER hand-write
+   or LLM-generate a SPICE model from datasheet reasoning — the poles/zeros
+   and process corners won't match silicon.
+
+3. **Inventory lookup is naming-agnostic.** Read the `design_snapshot_inventory`
+   result semantically and pick parts by parametric match (value, package,
+   rating). NEVER hard-code or regex against one library's `lib_ref` naming
+   layout — the planner is the matcher, not a string template.
+
+4. **Prefer bulk tools over looping.** `batch_modify`, `pcb_move_components`,
+   `place_sch_components_from_library`, `place_wires`, `set_sch_components_parameters`,
+   etc. do N operations in one IPC round-trip. Looping the singular variant
+   costs one LLM turn each — 10–100× slower wall-clock. Plan the whole set,
+   then issue one batch.
+
+5. **Target the document explicitly.** Schematic placement and most
+   mutations act on the ACTIVE document, and a freshly `create_document`'d
+   sheet is NOT auto-focused — parts can silently land on the wrong open
+   sheet. Pass `document_path` to `place_sch_components_from_library` (it
+   focuses the sheet first and aborts if focus fails), or
+   `set_active_document` before any active-doc mutation. For deterministic
+   reads, prefer `scope=doc:<path>` (e.g. `query_objects`) over active-doc
+   tools.
+
+6. **ECO (schematic → PCB) is not headless.** `update_pcb` fires the real
+   Engineering Change Order, but Altium's change-review dialog is
+   non-suppressible by design — a human must click **Execute Changes**.
+   Don't call `update_pcb` in an unattended run; it blocks until someone
+   interacts. After an attended ECO, the rest of the PCB tools work
+   normally.
+
+7. **`pcb_place_component` has two modes.** *Geometry only* (footprint +
+   designator) leaves the board UNSYNCED — no link, no pad nets; pads are
+   unconnected (DRC flags them) and a later ECO treats the parts as "extra
+   in PCB". Fine for artwork, panelization, or testing. *Synced* — also
+   pass `unique_id` (the schematic component's UniqueId, from
+   `query_objects(eSchComponent, "Designator.Text,UniqueId")`) and
+   `pad_nets` `{pad: net}` (from the compiled netlist via
+   `get_connectivity_many`). That stamps the sch↔PCB link AND creates +
+   assigns each pad's net, giving real connectivity (ratsnest + DRC) with
+   NO ECO dialog — the headless way to populate a board from a compiled
+   schematic. (`update_pcb` / a real attended ECO remains the canonical
+   path when a human can click the dialog.)
+
 ## Autonomous design workflow
 
 The agent is the planner. There is no hardcoded topology library, no

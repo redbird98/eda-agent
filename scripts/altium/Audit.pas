@@ -470,7 +470,7 @@ Var
     Ratio, ViolationPct : Double;
 Begin
     Board := Nil;
-    Try Board := PCBServer.GetCurrentPCBBoard; Except End;
+    Try Board := GetPCBBoardAnywhere; Except End;
     If Board = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_BOARD',
@@ -743,7 +743,7 @@ Var
     Found, First : Boolean;
 Begin
     Board := Nil;
-    Try Board := PCBServer.GetCurrentPCBBoard; Except End;
+    Try Board := GetPCBBoardAnywhere; Except End;
     If Board = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_BOARD',
@@ -959,7 +959,7 @@ Var
     First, ReturnFound : Boolean;
 Begin
     Board := Nil;
-    Try Board := PCBServer.GetCurrentPCBBoard; Except End;
+    Try Board := GetPCBBoardAnywhere; Except End;
     If Board = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_BOARD',
@@ -1072,7 +1072,7 @@ Var
     First, IsInvalid : Boolean;
 Begin
     Board := Nil;
-    Try Board := PCBServer.GetCurrentPCBBoard; Except End;
+    Try Board := GetPCBBoardAnywhere; Except End;
     If Board = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_BOARD',
@@ -1435,7 +1435,7 @@ Var
     First, HitOnLayer : Boolean;
 Begin
     Board := Nil;
-    Try Board := PCBServer.GetCurrentPCBBoard; Except End;
+    Try Board := GetPCBBoardAnywhere; Except End;
     If Board = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_BOARD',
@@ -1722,7 +1722,7 @@ Var
     PadX, PadY : TCoord;
 Begin
     Board := Nil;
-    Try Board := PCBServer.GetCurrentPCBBoard; Except End;
+    Try Board := GetPCBBoardAnywhere; Except End;
     If Board = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_BOARD',
@@ -1970,7 +1970,7 @@ Var
     First, Inside : Boolean;
 Begin
     Board := Nil;
-    Try Board := PCBServer.GetCurrentPCBBoard; Except End;
+    Try Board := GetPCBBoardAnywhere; Except End;
     If Board = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_BOARD',
@@ -2067,7 +2067,7 @@ Var
     First : Boolean;
 Begin
     Board := Nil;
-    Try Board := PCBServer.GetCurrentPCBBoard; Except End;
+    Try Board := GetPCBBoardAnywhere; Except End;
     If Board = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_BOARD',
@@ -2640,7 +2640,7 @@ Var
     First : Boolean;
     OnTop : Boolean;
 Begin
-    Board := PCBServer.GetCurrentPCBBoard;
+    Board := GetPCBBoardAnywhere;
     If Board = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_BOARD',
@@ -2907,7 +2907,7 @@ Var
     ItemsJson, EntryJson, CompName : String;
     First, Locked : Boolean;
 Begin
-    Board := PCBServer.GetCurrentPCBBoard;
+    Board := GetPCBBoardAnywhere;
     If Board = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_BOARD',
@@ -2977,7 +2977,7 @@ Var
     First, MirrorFlag : Boolean;
     LayerVal : TLayer;
 Begin
-    Board := PCBServer.GetCurrentPCBBoard;
+    Board := GetPCBBoardAnywhere;
     If Board = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_BOARD',
@@ -3578,7 +3578,7 @@ Var
     V1X, V1Y, V2X, V2Y : Double;
     L1, L2, Dot, CosTheta, ThetaDeg : Double;
 Begin
-    Board := PCBServer.GetCurrentPCBBoard;
+    Board := GetPCBBoardAnywhere;
     If Board = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_BOARD',
@@ -3786,7 +3786,7 @@ Var
     MinW, MaxW, TX, TY : Integer;
     Ratio : Double;
 Begin
-    Board := PCBServer.GetCurrentPCBBoard;
+    Board := GetPCBBoardAnywhere;
     If Board = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_BOARD',
@@ -3890,7 +3890,7 @@ Var
     First, TrackTouches, EndpointAtCenter : Boolean;
 Begin
     Board := Nil;
-    Try Board := PCBServer.GetCurrentPCBBoard; Except End;
+    Try Board := GetPCBBoardAnywhere; Except End;
     If Board = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_BOARD',

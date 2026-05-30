@@ -42,7 +42,23 @@ Begin
             If Obj.Net <> Nil Then Result := Obj.Net.Name Else Result := '';
         End
         Else If PropName = 'Width'     Then Result := IntToStr(CoordToMils(Obj.Width))
-        Else If PropName = 'Name'      Then Result := Obj.Name
+        Else If PropName = 'Name'      Then
+        Begin
+            { For a component, Obj.Name is an IPCB_Text interface, not a    }
+            { string. Returning it raised "Could not convert variant of     }
+            { type (Dispatch) into type (OleStr)" in EscapeJsonString and   }
+            { popped a modal that escaped the Try/Except. Use .Text.        }
+            If Obj.ObjectId = eComponentObject Then Result := Obj.Name.Text
+            Else Result := Obj.Name;
+        End
+        Else If (PropName = 'Designator') Or (PropName = 'Designator.Text') Then
+        Begin
+            If Obj.ObjectId = eComponentObject Then Result := Obj.Name.Text;
+        End
+        Else If (PropName = 'Comment') Or (PropName = 'Comment.Text') Then
+        Begin
+            If Obj.ObjectId = eComponentObject Then Result := Obj.Comment.Text;
+        End
         Else If PropName = 'Rotation'  Then Result := FloatToStr(Obj.Rotation)
         Else If PropName = 'HoleSize'  Then Result := IntToStr(CoordToMils(Obj.HoleSize))
         Else If PropName = 'TopXSize'  Then Result := IntToStr(CoordToMils(Obj.TopXSize))
