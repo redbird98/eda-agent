@@ -13,7 +13,7 @@ Const
     // returns, mismatch means Altium is running a stale compiled script
     // (DelphiScript caches compiled units until the script project is
     // reopened or Altium is restarted).
-    SCRIPT_VERSION = '2026.05.31.1';
+    SCRIPT_VERSION = '2026.05.31.3';
 
     // Wire protocol version. Bumped whenever the request/response JSON shape
     // changes incompatibly. Python and Pascal must agree; mismatch returns
@@ -34,6 +34,11 @@ Const
     SCHM_PrimitiveRegistration = 1;
     SCHM_BeginModify           = 2;
     SCHM_EndModify             = 3;
+
+    // DelphiScript does NOT predefine Delphi's MaxInt (raises "Undeclared
+    // identifier" at runtime). Declare it explicitly. Used as a
+    // "smallest seen so far" sentinel in board-statistics scans.
+    MAX_INT = 2147483647;
 
 Var
     WorkspaceDir : String;

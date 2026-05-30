@@ -7151,9 +7151,9 @@ Begin
 
     ViasTotal := 0; ViasThrough := 0; ViasBlind := 0; ViasBuried := 0;
     PadsPlated := 0; PadsUnplated := 0; PadsSlotted := 0;
-    MinAnnularRing := MaxInt;
-    MinTrackWidth := MaxInt;
-    SmallestHole := MaxInt;
+    MinAnnularRing := MAX_INT;
+    MinTrackWidth := MAX_INT;
+    SmallestHole := MAX_INT;
     LargestHole := 0;
     DistinctHolesList := '|';
     DistinctHoleCount := 0;
@@ -7276,7 +7276,7 @@ Begin
         MinAnnularRing := 0;
         SmallestHole := 0;
     End;
-    If MinTrackWidth = MaxInt Then MinTrackWidth := 0;
+    If MinTrackWidth = MAX_INT Then MinTrackWidth := 0;
 
     Result := BuildSuccessResponse(RequestId,
         JsonObj(

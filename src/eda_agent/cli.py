@@ -103,12 +103,19 @@ def cmd_install_scripts(dest: Optional[str] = None, force: bool = False) -> int:
         print(f"ERROR: bundled scripts directory not found: {src}", file=sys.stderr)
         return 1
 
+    # An auto-accept harness (e.g. Gemini CLI) may allocate a pty -- so
+    # sys.stdin.isatty() is True -- yet never feed the prompt, hanging input()
+    # forever. Honor an env override so such harnesses can opt out of the
+    # prompt without remembering --force on every call.
+    if os.environ.get("EDA_AGENT_ASSUME_YES", "").strip().lower() in ("1", "true", "yes"):
+        force = True
+
     if dst.exists() and any(dst.iterdir()) and not force:
         if not sys.stdin.isatty():
             print(
                 f"ERROR: target directory already exists and is not empty:\n"
                 f"  {dst}\n"
-                f"Re-run with --force to overwrite.",
+                f"Re-run with --force (or set EDA_AGENT_ASSUME_YES=1) to overwrite.",
                 file=sys.stderr,
             )
             return 1

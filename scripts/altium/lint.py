@@ -209,6 +209,20 @@ RULE_FOOTPRINT_NAME_WRITE = LineRule(
     description="CurrentFootprintModelName is read-only; edit Implementations.ModelName instead.",
 )
 
+# Standard Delphi RTL constants that DelphiScript does NOT predefine.
+# `MaxInt` (and the Long/Min siblings) raise "Undeclared identifier" at
+# runtime, uncatchable by Try/Except. Use a literal or the MAX_INT const
+# declared in Main.pas. The negative lookbehind skips member accesses
+# (`.MaxInt`) and longer identifiers (`MyMaxInt`); `MAX_INT` (underscore)
+# never matches.
+RULE_UNDECLARED_DELPHI_CONST = LineRule(
+    name="undeclared-delphi-constant",
+    pattern=re.compile(r"(?<![A-Za-z0-9_.])(MaxInt|MinInt|MaxLongInt|MinLongInt)\b"),
+    severity="error",
+    memory="delphiscript_undeclared_maxint.md",
+    description="DelphiScript doesn't predefine MaxInt/MinInt/MaxLongInt; use a literal or the MAX_INT const.",
+)
+
 # IPCB_Rule.Priority is a read-only function, not a property.
 RULE_RULE_PRIORITY_WRITE = LineRule(
     name="rule-priority-readonly-write",
@@ -377,6 +391,7 @@ LINE_RULES = [
     RULE_INC_ARRAY,
     RULE_RESERVED_IDENT,
     RULE_TYPED_CONSTANT,
+    RULE_UNDECLARED_DELPHI_CONST,
     RULE_FOOTPRINT_NAME_WRITE,
     RULE_RULE_PRIORITY_WRITE,
     RULE_PROBE_TEXT_WRITE,
@@ -641,6 +656,73 @@ def _scan_if_then_try(path: str, lines: list[str]) -> list[Finding]:
     return findings
 
 
+# Call-before-definition within a single unit. DelphiScript resolves
+# identifiers strictly top-down and has NO `Forward;` directive (documented
+# in Project.pas), so calling a locally-defined Function/Procedure on a line
+# above its definition raises "Undeclared identifier" -- and that only
+# surfaces after a full Altium restart + recompile cycle. The JSON prop
+# builders calling EscapeJsonString (defined lower in Utils.pas) is the
+# regression this guards. Cross-unit order is governed by the .PrjScr unit
+# list and is out of scope here; we only flag same-file forward references.
+_DEF_RE = re.compile(r"^\s*(?:Function|Procedure)\s+([A-Za-z_]\w*)", re.IGNORECASE)
+
+# Delphi/DelphiScript RTL routines that the scripts sometimes RE-DEFINE
+# locally (e.g. a defensive StrToIntDef). A call above the local definition
+# binds to the built-in, not the not-yet-declared local, so it does NOT
+# raise "Undeclared identifier" -- flagging it would be a false positive.
+# Lowercased; extend if a redefined built-in trips the call-before-def rule.
+_DELPHI_BUILTINS = {
+    "length", "copy", "pos", "delete", "insert", "trim", "trimleft",
+    "trimright", "uppercase", "lowercase", "stringreplace", "format",
+    "inttostr", "strtoint", "strtointdef", "floattostr", "strtofloat",
+    "strtofloatdef", "booltostr", "strtobool", "inttohex", "chr", "ord",
+    "concat", "comparetext", "comparestr", "sametext", "quotedstr",
+    "vartostr", "floattostrf", "abs", "round", "trunc", "int", "frac",
+    "sqrt", "sqr", "power", "min", "max", "random", "assigned", "high",
+    "low", "sizeof", "varisnull", "vartype", "val",
+}
+
+
+def _scan_call_before_definition(path: str, lines: list[str]) -> list[Finding]:
+    findings: list[Finding] = []
+    stripped = [strip_comments_and_strings(l) for l in lines]
+
+    # First definition line per local routine (case-insensitive: Pascal
+    # identifiers are case-folded). Store the lowercased name -> (line, orig).
+    def_line: dict[str, int] = {}
+    for i, line in enumerate(stripped, 1):
+        m = _DEF_RE.match(line)
+        if m:
+            key = m.group(1).lower()
+            if key not in def_line:
+                def_line[key] = i
+    if not def_line:
+        return findings
+
+    call_re = re.compile(
+        r"(?<![.\w])(" + "|".join(re.escape(n) for n in def_line) + r")\s*\(",
+        re.IGNORECASE,
+    )
+    for i, line in enumerate(stripped, 1):
+        header = _DEF_RE.match(line)
+        header_key = header.group(1).lower() if header else None
+        for m in call_re.finditer(line):
+            key = m.group(1).lower()
+            if key == header_key:
+                continue  # the definition header itself, not a call
+            if key in _DELPHI_BUILTINS:
+                continue  # early call binds to the built-in, not the local
+            if i < def_line[key]:
+                findings.append(Finding(
+                    file=path, line=i, col=m.start(1) + 1,
+                    rule="call-before-definition",
+                    severity="error",
+                    snippet=lines[i - 1],
+                    memory="delphiscript_call_before_definition.md",
+                ))
+    return findings
+
+
 # ---------------------------------------------------------------------------
 # Comment / string stripping. Cheap state machine: handles `{...}` block
 # comments, `(* ... *)` block comments, `// ...` line comments, and
@@ -742,6 +824,7 @@ def lint_file(path: str) -> list[Finding]:
     findings.extend(_scan_if_then_try(rel, raw_lines))
     findings.extend(_scan_reserved_in_var_block(rel, raw_lines))
     findings.extend(_scan_dollar_i(rel, text))
+    findings.extend(_scan_call_before_definition(rel, raw_lines))
     # Comment-brace check uses raw text (it tracks comment depth itself).
     findings.extend(_scan_comment_brace(rel, text))
 

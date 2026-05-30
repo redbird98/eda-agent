@@ -147,7 +147,7 @@ these rules before producing a plan; they bound your choices.
     - `.preview_*.svg` at the repo root for one-off preview renders
     - `.symbol_cache/` (gitignored) for the symbol-extraction cache
 
-    NEVER default to `%USERPROFILE%\EDA Agent\projects\...` or
+    NEVER default to `%USERPROFILE%\\EDA Agent\\projects\\...` or
     similar user-profile paths. That dir is reserved for the user's
     own deliberate projects and for the eda-agent IPC workspace.
 
