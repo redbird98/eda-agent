@@ -291,7 +291,7 @@ These six tools cover most day-to-day work. They accept any object type supporte
 | `diag_workspace` | Diagnostic: enumerate the IPC workspace directory and report pending request files. Useful when investigating IPC plumbing |
 | `set_intent` | Record the current conversation's intent so the web dashboard can display what the agent is working on |
 
-### Project (49 tools)
+### Project (50 tools)
 
 Lifecycle, parameters, compilation, analysis, outputs, ECO sync, variants.
 
@@ -302,6 +302,7 @@ Lifecycle, parameters, compilation, analysis, outputs, ECO sync, variants.
 | `get_project_documents` / `add_document_to_project` / `remove_document_from_project` / `import_document` | Document management |
 | `load_project_sheets` | Force every SCH sheet of the focused project into the editor so `scope=project` queries hit them |
 | `get_project_parameters` / `set_project_parameter` / `set_document_parameter` | Parameters |
+| `project_push_params_to_sheets` | Copy all project parameters onto each loaded sheet (title-block fields) |
 | `get_project_options` | Compiler / variant / channel settings |
 | `compile_project` / `get_messages` | Compile and read violations |
 | `get_design_stats` / `get_design_differences` / `get_board_info` | Design analysis |
@@ -369,7 +370,7 @@ Schematic-side operations plus viewport and sheet management.
 | `crossref_net` | Sch pin list vs PCB pad list for a named net: diff + `in_sync` flag |
 | `generic_run_process` | Run any Altium process command |
 
-### PCB (72 tools)
+### PCB (73 tools)
 
 Queries and modifications on the active PCB document.
 
@@ -395,6 +396,7 @@ Queries and modifications on the active PCB document.
 | `pcb_create_room` | Room placement |
 | `pcb_get_unrouted_nets` | Ratsnest / unrouted analysis |
 | `pcb_get_layer_stackup` / `pcb_add_layer` / `pcb_remove_layer` / `pcb_modify_layer` / `pcb_set_layer_visibility` | Layer stack: get, add/remove layers, copper thickness + dielectric properties |
+| `pcb_get_mech_layer_names` | Enabled mechanical layers with their custom names |
 | `pcb_get_board_outline` / `pcb_get_board_statistics` / `pcb_get_fab_stats` | Board-level queries. `pcb_get_fab_stats` returns the DFM summary fab houses ask for (min annular ring, min track width, via type counts, distinct hole count) |
 | `pcb_get_selected_objects` | Current selection |
 | `pcb_export_coordinates` | Pick-and-place export |

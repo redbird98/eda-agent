@@ -7402,6 +7402,67 @@ Begin
 End;
 
 {..............................................................................}
+{ PCB_GetMechLayerNames - List the enabled (displayed) mechanical layers with  }
+{ their custom names. Uses only proven accessors (LayerStack_V7 /              }
+{ LayerObject_V7[] / LayerIsDisplayed) -- ILayer.MechanicalLayer(i) and        }
+{ MechanicalLayerEnabled are undeclared in this script binding.               }
+{..............................................................................}
+
+Function PCB_GetMechLayerNames(Params : String; RequestId : String) : String;
+Var
+    Board : IPCB_Board;
+    LayerStack : IPCB_LayerStack_V7;
+    LayerObj : IPCB_LayerObject_V7;
+    Lyr : TLayer;
+    JsonItems, NameStr : String;
+    First, Disp : Boolean;
+    Count : Integer;
+Begin
+    Board := GetPCBBoardAnywhere;
+    If Board = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCB', 'No PCB document is active');
+        Exit;
+    End;
+
+    LayerStack := Board.LayerStack_V7;
+    If LayerStack = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_STACKUP', 'Could not access layer stack');
+        Exit;
+    End;
+
+    JsonItems := '';
+    First := True;
+    Count := 0;
+
+    For Lyr := eMechanical1 To eMechanical16 Do
+    Begin
+        LayerObj := Nil;
+        Try LayerObj := LayerStack.LayerObject_V7[Lyr]; Except LayerObj := Nil; End;
+        If LayerObj <> Nil Then
+        Begin
+            Disp := False;
+            Try Disp := Board.LayerIsDisplayed[Lyr]; Except End;
+            If Disp Then
+            Begin
+                NameStr := '';
+                Try NameStr := LayerObj.Name; Except End;
+                If Not First Then JsonItems := JsonItems + ',';
+                First := False;
+                JsonItems := JsonItems
+                    + '{"layer":"' + EscapeJsonString(GetLayerString(Lyr)) + '",'
+                    + '"name":"' + EscapeJsonString(NameStr) + '"}';
+                Inc(Count);
+            End;
+        End;
+    End;
+
+    Result := BuildSuccessResponse(RequestId,
+        '{"mechanical_layers":[' + JsonItems + '],"count":' + IntToStr(Count) + '}');
+End;
+
+{..............................................................................}
 { HandlePCBCommand - Route PCB actions to handlers                            }
 {..............................................................................}
 
@@ -7461,6 +7522,7 @@ Begin
         'get_polygons':            Result := PCB_GetPolygons(Params, RequestId);
         'calc_polygon_area':       Result := PCB_CalcPolygonArea(Params, RequestId);
         'set_via_soldermask_relief': Result := PCB_SetViaSoldermaskRelief(Params, RequestId);
+        'get_mech_layer_names':    Result := PCB_GetMechLayerNames(Params, RequestId);
         'modify_polygon':          Result := PCB_ModifyPolygon(Params, RequestId);
         'get_room_rules':          Result := PCB_GetRoomRules(Params, RequestId);
         'create_room':             Result := PCB_CreateRoom(Params, RequestId);

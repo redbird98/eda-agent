@@ -3846,6 +3846,122 @@ Begin
 End;
 
 {..............................................................................}
+{ Proj_PushParamsToSheets - Copy every project-level parameter onto each LOADED }
+{ schematic sheet as a document parameter (so title blocks can reference them). }
+{ Unloaded sheets are skipped -- call load_project_sheets first to include them. }
+{ Models the proven Proj_SetDocumentParameter set/create idiom per (sheet,param).}
+{..............................................................................}
+
+Function Proj_PushParamsToSheets(Params : String; RequestId : String) : String;
+Var
+    Workspace : IWorkspace;
+    Project : IProject;
+    Doc : IDocument;
+    SchDoc : ISch_Document;
+    Iterator : ISch_Iterator;
+    Parameter : ISch_Parameter;
+    I, P, PCount : Integer;
+    SheetsUpdated, SheetsSkipped, ParamsPushed : Integer;
+    FullPath, ParamName, ParamValue : String;
+    Found, IsSch : Boolean;
+Begin
+    Workspace := GetWorkspace;
+    If Workspace = Nil Then Begin Result := BuildErrorResponse(RequestId, 'NO_WORKSPACE', 'No workspace'); Exit; End;
+    Project := Workspace.DM_FocusedProject;
+    If Project = Nil Then Begin Result := BuildErrorResponse(RequestId, 'NO_PROJECT', 'No focused project'); Exit; End;
+
+    PCount := 0;
+    Try PCount := Project.DM_ParameterCount; Except End;
+    If PCount = 0 Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PARAMS', 'Project has no parameters to push');
+        Exit;
+    End;
+
+    SheetsUpdated := 0;
+    SheetsSkipped := 0;
+    ParamsPushed := 0;
+
+    For I := 0 To Project.DM_LogicalDocumentCount - 1 Do
+    Begin
+        Doc := Nil;
+        Try Doc := Project.DM_LogicalDocuments(I); Except End;
+        If Doc <> Nil Then
+        Begin
+            FullPath := '';
+            Try FullPath := Doc.DM_FullPath; Except End;
+            IsSch := (Pos('.SCHDOC', UpperCase(FullPath)) > 0);
+            If IsSch Then
+            Begin
+                SchDoc := Nil;
+                Try SchDoc := SchServer.GetSchDocumentByPath(FullPath); Except SchDoc := Nil; End;
+                If SchDoc = Nil Then
+                    Inc(SheetsSkipped)
+                Else
+                Begin
+                    SchServer.ProcessControl.PreProcess(SchDoc, '');
+                    Try
+                        For P := 0 To PCount - 1 Do
+                        Begin
+                            ParamName := '';
+                            ParamValue := '';
+                            Try
+                                ParamName := Project.DM_Parameters(P).DM_Name;
+                                ParamValue := Project.DM_Parameters(P).DM_Value;
+                            Except End;
+                            If ParamName <> '' Then
+                            Begin
+                                Found := False;
+                                Iterator := SchDoc.SchIterator_Create;
+                                Iterator.SetState_IterationDepth(eIterateFirstLevel);
+                                Iterator.AddFilter_ObjectSet(MkSet(eParameter));
+                                Try
+                                    Parameter := Iterator.FirstSchObject;
+                                    While Parameter <> Nil Do
+                                    Begin
+                                        If Parameter.Name = ParamName Then
+                                        Begin
+                                            SchBeginModify(Parameter);
+                                            Parameter.Text := ParamValue;
+                                            SchEndModify(Parameter);
+                                            Found := True;
+                                            Break;
+                                        End;
+                                        Parameter := Iterator.NextSchObject;
+                                    End;
+                                Finally
+                                    SchDoc.SchIterator_Destroy(Iterator);
+                                End;
+                                If Not Found Then
+                                Begin
+                                    Parameter := SchServer.SchObjectFactory(eParameter, eCreate_Default);
+                                    Parameter.Name := ParamName;
+                                    Parameter.Text := ParamValue;
+                                    SchDoc.RegisterSchObjectInContainer(Parameter);
+                                    SchRegisterObject(SchDoc, Parameter);
+                                End;
+                                Inc(ParamsPushed);
+                            End;
+                        End;
+                    Finally
+                        SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
+                    End;
+                    Try SaveDocByPath(FullPath); Except End;
+                    Try SchDoc.GraphicallyInvalidate; Except End;
+                    Inc(SheetsUpdated);
+                End;
+            End;
+        End;
+    End;
+
+    Result := BuildSuccessResponse(RequestId,
+        '{"success":true,"param_count":' + IntToStr(PCount)
+        + ',"sheets_updated":' + IntToStr(SheetsUpdated)
+        + ',"sheets_skipped_not_loaded":' + IntToStr(SheetsSkipped)
+        + ',"params_pushed":' + IntToStr(ParamsPushed) + '}');
+End;
+
+{..............................................................................}
 { Command Handler - must be at end so all functions are declared               }
 {..............................................................................}
 
@@ -3861,6 +3977,7 @@ Begin
         'remove_document':   Result := Proj_RemoveDocument(Params, RequestId);
         'get_parameters':    Result := Proj_GetParameters(Params, RequestId);
         'set_parameter':     Result := Proj_SetParameter(Params, RequestId);
+        'push_params_to_sheets': Result := Proj_PushParamsToSheets(Params, RequestId);
         'compile':           Result := Proj_Compile(Params, RequestId);
         'get_focused':       Result := Proj_GetFocused(RequestId);
         'get_nets':          Result := Proj_GetNets(Params, RequestId);

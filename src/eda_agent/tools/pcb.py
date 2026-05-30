@@ -1978,6 +1978,21 @@ def register_pcb_tools(mcp):
         )
 
     @mcp.tool()
+    async def pcb_get_mech_layer_names() -> dict[str, Any]:
+        """List the enabled mechanical layers on the active board with names.
+
+        Returns each displayed/enabled mechanical layer's internal layer id
+        and its custom name (e.g. "Assembly Top", "Courtyard"), so an agent
+        can target the right mechanical layer by name rather than guessing
+        "Mechanical 1".
+
+        Returns:
+            Dict with ``mechanical_layers`` (each: layer, name) and ``count``.
+        """
+        bridge = get_bridge()
+        return await bridge.send_command_async("pcb.get_mech_layer_names", {})
+
+    @mcp.tool()
     async def pcb_delete_object(
         x: int,
         y: int,

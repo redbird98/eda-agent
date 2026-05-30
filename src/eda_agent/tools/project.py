@@ -194,6 +194,24 @@ def register_project_tools(mcp):
         return result
 
     @mcp.tool()
+    async def project_push_params_to_sheets() -> dict[str, Any]:
+        """Copy all project-level parameters onto each loaded schematic sheet.
+
+        Every project parameter is written as a document (sheet) parameter on
+        each LOADED schematic in the focused project, so title blocks can
+        reference project-wide values. Unloaded sheets are skipped -- call
+        ``load_project_sheets`` first to include every sheet.
+
+        Returns:
+            Dict with param_count, sheets_updated, sheets_skipped_not_loaded,
+            and params_pushed.
+        """
+        bridge = get_bridge()
+        return await bridge.send_command_async(
+            "project.push_params_to_sheets", {}
+        )
+
+    @mcp.tool()
     async def get_nets(
         component: str = "",
         net_name: str = "",
