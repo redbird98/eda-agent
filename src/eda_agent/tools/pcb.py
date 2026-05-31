@@ -385,6 +385,185 @@ def register_pcb_tools(mcp):
         return result
 
     @mcp.tool()
+    async def pcb_import_placement(
+        placements: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Position components from a coordinate list (pick-and-place import).
+
+        The inverse of `pcb_export_coordinates`. Each entry repositions a
+        component already on the board, by designator. Absolute coordinates in
+        mils, rotation in degrees; supplying `side`/`layer` flips the component
+        to that side.
+
+        Args:
+            placements: list of dicts, each supporting:
+                designator (required)
+                x        (optional) , X in mils
+                y        (optional) , Y in mils
+                rotation (optional) , degrees
+                side     (optional) , "top" or "bottom"
+                layer    (optional) , "TopLayer" / "BottomLayer" (overrides side)
+
+        Returns:
+            {"applied": N, "failed": M}.
+        """
+        ops: list[str] = []
+        for p in placements:
+            desig = str(p.get("designator", "")).strip()
+            if not desig:
+                continue
+            x_str = str(int(p["x"])) if p.get("x") is not None else ""
+            y_str = str(int(p["y"])) if p.get("y") is not None else ""
+            rot_str = str(p["rotation"]) if p.get("rotation") is not None else ""
+            layer = p.get("layer")
+            if not layer and p.get("side") is not None:
+                side = str(p["side"]).strip().lower()
+                layer = "BottomLayer" if side in ("bottom", "bot", "b") else "TopLayer"
+            layer_str = str(layer) if layer else ""
+            ops.append(f"{desig},{x_str},{y_str},{rot_str},{layer_str}")
+        if not ops:
+            return {"error": "No valid placements provided", "applied": 0}
+        bridge = get_bridge()
+        return await bridge.send_command_async(
+            "pcb.import_placement", {"placements": "|".join(ops)}
+        )
+
+    @mcp.tool()
+    async def pcb_add_teardrops() -> dict[str, Any]:
+        """Add teardrops to pad/via-track junctions board-wide.
+
+        Launches Altium's Teardrop command on all objects. The Teardrop dialog
+        is modal and cannot be suppressed from script (same limitation as the
+        ECO dialog) — choose Add and confirm it in Altium. Returns once the
+        command is dispatched.
+        """
+        bridge = get_bridge()
+        return await bridge.send_command_async("pcb.teardrops", {})
+
+    @mcp.tool()
+    async def pcb_remove_teardrops() -> dict[str, Any]:
+        """Remove teardrops board-wide.
+
+        Opens the same modal Teardrop dialog as `pcb_add_teardrops`; choose
+        Remove and confirm it in Altium.
+        """
+        bridge = get_bridge()
+        return await bridge.send_command_async("pcb.teardrops", {})
+
+    @mcp.tool()
+    async def pcb_autoplace_silkscreen() -> dict[str, Any]:
+        """Reposition component designators to clear pads and other silk.
+
+        For every visible designator, tries a ring of auto-position anchors and
+        keeps the first that overlaps no pad or other silk text; otherwise
+        leaves the designator where it was. First-fit, not a global optimum —
+        pair with the silk audits and `design_visual_review` to check the
+        result.
+
+        Returns:
+            {"placed": N, "skipped": M, "total": T}.
+        """
+        bridge = get_bridge()
+        return await bridge.send_command_async("pcb.autoplace_silkscreen", {})
+
+    @mcp.tool()
+    async def pcb_tune_length(
+        net: str,
+        add_length_mils: int,
+        x_mils: int,
+        y_mils: int,
+        layer: str = "TopLayer",
+        amplitude_mils: int = 40,
+        width_mils: int = 6,
+    ) -> dict[str, Any]:
+        """Add approximate routed length to a net with a square serpentine.
+
+        Lays a square meander on `net` at (x_mils, y_mils) sized to add about
+        `add_length_mils`, then reports the net's routed length before and
+        after.
+
+        Open-loop and NOT DRC-checked: you choose where the meander goes and
+        verify clearance afterward (`pcb_run_drc`). Use it to get a net close to
+        a target, then finish in Altium's interactive tuner if needed. There is
+        no scriptable interactive tuner in Altium, so this is the available
+        approximation.
+
+        Args:
+            net: net name.
+            add_length_mils: target length to add (mils).
+            x_mils, y_mils: anchor point of the meander (mils).
+            layer: routing layer (default TopLayer).
+            amplitude_mils: meander height; bump count = add_length / (2*amplitude).
+            width_mils: track width.
+
+        Returns:
+            {"length_before_mils", "length_after_mils", "added_mils", "bumps",
+             "drc_checked": false}.
+        """
+        bridge = get_bridge()
+        return await bridge.send_command_async(
+            "pcb.tune_length",
+            {
+                "net": net,
+                "add_length_mils": add_length_mils,
+                "x_mils": x_mils,
+                "y_mils": y_mils,
+                "layer": layer,
+                "amplitude_mils": amplitude_mils,
+                "width_mils": width_mils,
+            },
+        )
+
+    @mcp.tool()
+    async def pcb_panelize(
+        child_path: str,
+        board_width_mils: int,
+        board_height_mils: int,
+        rows: int = 2,
+        cols: int = 2,
+        col_gap_mils: int = 100,
+        row_gap_mils: int = 100,
+        border_mils: int = 200,
+        tooling_holes: bool = True,
+        fiducials: bool = True,
+    ) -> dict[str, Any]:
+        """Build a production panel on the CURRENT (blank) PCB document.
+
+        Open a new empty .PcbDoc and run this on it. Creates an embedded-board
+        array of `child_path`, a rectangular panel outline, corner tooling
+        holes, and fiducials. Supply the source board size
+        (`board_width_mils` / `board_height_mils`).
+
+        Args:
+            child_path: path to the source .PcbDoc to array.
+            board_width_mils, board_height_mils: source board size (mils).
+            rows, cols: array dimensions.
+            col_gap_mils, row_gap_mils: spacing between adjacent boards.
+            border_mils: rail width around the array (also half the tooling inset).
+            tooling_holes, fiducials: whether to add them.
+
+        Returns:
+            {"panel_width_mils", "panel_height_mils", "rows", "cols",
+             "tooling_holes", "fiducials"}.
+        """
+        bridge = get_bridge()
+        return await bridge.send_command_async(
+            "pcb.panelize",
+            {
+                "child_path": child_path,
+                "board_width_mils": board_width_mils,
+                "board_height_mils": board_height_mils,
+                "rows": rows,
+                "cols": cols,
+                "col_gap_mils": col_gap_mils,
+                "row_gap_mils": row_gap_mils,
+                "border_mils": border_mils,
+                "tooling_holes": tooling_holes,
+                "fiducials": fiducials,
+            },
+        )
+
+    @mcp.tool()
     async def pcb_plan_placement(
         designators: Optional[list[str]] = None,
         fixed: Optional[list[str]] = None,

@@ -990,6 +990,120 @@ def register_project_tools(mcp):
             "results": per_container,
         }
 
+    @mcp.tool()
+    async def generate_fab_package(
+        outjob_path: str = "",
+        include_step: bool = False,
+        include_dxf: bool = False,
+        fresh_window_seconds: float = 5.0,
+    ) -> dict[str, Any]:
+        """Generate a fabrication package from an OutJob (Gerbers, NC drill,
+        IPC-356, pick-and-place, assembly, BOM) and report every file produced.
+
+        Altium has no per-format export process for Gerber / NC-drill /
+        IPC-356 / P&P — those exist only as OutJob output containers. This runs
+        every container in the project's OutJob, scans each container's output
+        directory, and returns a consolidated manifest. Optionally also exports
+        a STEP 3D model and a DXF (which are separate PCB export processes, not
+        OutJob containers).
+
+        Prerequisite: the project must have an OutJob whose fab containers are
+        configured and enabled — the script cannot enable outputs that are off
+        in the OutJob editor.
+
+        Args:
+            outjob_path: path to the .OutJob; omit to use the first one in the
+                focused project.
+            include_step: also export a STEP 3D model of the active PCB.
+            include_dxf: also export a DXF of the active PCB.
+            fresh_window_seconds: files modified within this window before a
+                container ran still count as newly produced.
+
+        Returns:
+            {"ok", "outjob_path", "containers_run", "results" (per-container
+             with output_dir + files), "extras" (step/dxf results),
+             "all_files" (flat list of newly-produced file paths)}.
+        """
+        from pathlib import Path
+        import time as _time
+
+        bridge = get_bridge()
+        list_params: dict[str, Any] = {}
+        if outjob_path:
+            list_params["outjob_path"] = outjob_path
+        listing = await bridge.send_command_async(
+            "project.get_outjob_containers", list_params, timeout=30.0,
+        )
+        if not isinstance(listing, dict):
+            return {"ok": False, "reason": "container listing failed"}
+        containers = listing.get("containers") or []
+        if not containers:
+            return {
+                "ok": False,
+                "reason": "no OutJob containers found; create and configure an "
+                "OutJob (Gerber, NC drill, etc.) before generating a fab package",
+            }
+
+        per_container: list[dict[str, Any]] = []
+        all_files: list[str] = []
+        for c in containers:
+            name = c.get("name") if isinstance(c, dict) else str(c)
+            if not name:
+                continue
+            started_at = _time.time()
+            params: dict[str, Any] = {"container_name": name}
+            if outjob_path:
+                params["outjob_path"] = outjob_path
+            run = await bridge.send_command_async(
+                "project.run_outjob", params, timeout=300.0,
+            )
+            entry: dict[str, Any] = {
+                "container": name,
+                "container_type": (run or {}).get("container_type"),
+                "ok": bool(isinstance(run, dict) and run.get("success")),
+                "output_dir": (run or {}).get("output_dir"),
+                "files": [],
+            }
+            out_dir = entry["output_dir"]
+            if out_dir:
+                p = Path(out_dir)
+                if p.exists() and p.is_dir():
+                    cutoff = started_at - float(fresh_window_seconds)
+                    for f in p.rglob("*"):
+                        if not f.is_file():
+                            continue
+                        try:
+                            st = f.stat()
+                        except OSError:
+                            continue
+                        newly = st.st_mtime >= cutoff
+                        entry["files"].append(
+                            {"path": str(f), "size": st.st_size,
+                             "newly_produced": newly}
+                        )
+                        if newly:
+                            all_files.append(str(f))
+            per_container.append(entry)
+
+        extras: dict[str, Any] = {}
+        if include_step:
+            extras["step"] = await bridge.send_command_async(
+                "project.export_step", {}, timeout=120.0
+            )
+        if include_dxf:
+            extras["dxf"] = await bridge.send_command_async(
+                "project.export_dxf", {}, timeout=120.0
+            )
+
+        return {
+            "ok": True,
+            "outjob_path": outjob_path,
+            "containers_run": [r["container"] for r in per_container],
+            "results": per_container,
+            "extras": extras,
+            "all_files": sorted(set(all_files)),
+        }
+
     # ------------------------------------------------------------------
     # Variant management tools
     # ------------------------------------------------------------------

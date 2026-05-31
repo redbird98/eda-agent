@@ -347,6 +347,10 @@ KNOWN_WRONG_METHOD_NAMES = {
     # (raises at runtime) despite being in the API docs. Use AreaSize (outline
     # area) + BoundingRectangle instead of GeometricPolygon.GetState_Area.
     "GeometricPolygon":     "undeclared here; use .AreaSize + .BoundingRectangle",
+    # IPCB_Board has no GetNetByName; iterate eNetObject. The FindNetByName /
+    # EnsureNet helpers in PCB.pas do this. Raised "Undeclared identifier:
+    # GetNetByName" at runtime in PCB_PlacePad and five sibling handlers.
+    "GetNetByName":         "undeclared on IPCB_Board; use FindNetByName (iterate eNetObject)",
 }
 RULE_KNOWN_WRONG_METHOD = LineRule(
     name="known-wrong-altium-method",

@@ -5297,7 +5297,7 @@ Begin
         { Assign net if specified. }
         If NetStr <> '' Then
         Begin
-            Try FoundNet := Board.GetNetByName(NetStr); Except FoundNet := Nil; End;
+            Try FoundNet := FindNetByName(Board,NetStr); Except FoundNet := Nil; End;
             If FoundNet <> Nil Then Polygon.Net := FoundNet;
         End;
 
@@ -5367,7 +5367,7 @@ Begin
 
     FoundNet := Nil;
     If NetStr <> '' Then
-        Try FoundNet := Board.GetNetByName(NetStr); Except End;
+        Try FoundNet := FindNetByName(Board,NetStr); Except End;
 
     If LowLayerStr = '' Then LowLayer := eTopLayer
     Else LowLayer := GetLayerFromString(LowLayerStr);
@@ -5449,8 +5449,8 @@ Begin
 
     PosNetObj := Nil;
     NegNetObj := Nil;
-    Try PosNetObj := Board.GetNetByName(PosNet); Except End;
-    Try NegNetObj := Board.GetNetByName(NegNet); Except End;
+    Try PosNetObj := FindNetByName(Board,PosNet); Except End;
+    Try NegNetObj := FindNetByName(Board,NegNet); Except End;
     If (PosNetObj = Nil) Or (NegNetObj = Nil) Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NET_NOT_FOUND',
@@ -5549,7 +5549,7 @@ Begin
 
         If NetStr <> '' Then
         Begin
-            Try FoundNet := Board.GetNetByName(NetStr); Except FoundNet := Nil; End;
+            Try FoundNet := FindNetByName(Board,NetStr); Except FoundNet := Nil; End;
             If FoundNet <> Nil Then Region.Net := FoundNet;
         End;
 
@@ -5837,7 +5837,7 @@ Begin
 
         If NetStr <> '' Then
         Begin
-            Try FoundNet := Board.GetNetByName(NetStr); Except FoundNet := Nil; End;
+            Try FoundNet := FindNetByName(Board,NetStr); Except FoundNet := Nil; End;
             If FoundNet <> Nil Then Pad.Net := FoundNet;
         End;
 
@@ -7979,6 +7979,551 @@ Begin
 End;
 
 {..............................................................................}
+{ Shared helpers for the production-feature handlers below.                   }
+{..............................................................................}
+
+{ AABB overlap of two coordinate rectangles, each x1<x2, y1<y2, expanded by   }
+{ Margin (internal units) on every side.                                      }
+Function RectsOverlap(Ax1, Ay1, Ax2, Ay2, Bx1, By1, Bx2, By2, Margin : Integer) : Boolean;
+Begin
+    Result := Not ((Ax1 - Margin > Bx2) Or (Ax2 + Margin < Bx1)
+                Or (Ay1 - Margin > By2) Or (Ay2 + Margin < By1));
+End;
+
+{ Map a candidate index 0..7 to a designator auto-position anchor, fanning    }
+{ out from the preferred side first.                                          }
+Function SilkAnchorForIndex(I : Integer) : TTextAutoposition;
+Begin
+    Case I Of
+        0: Result := eAutoPos_CenterRight;
+        1: Result := eAutoPos_TopCenter;
+        2: Result := eAutoPos_BottomCenter;
+        3: Result := eAutoPos_CenterLeft;
+        4: Result := eAutoPos_TopRight;
+        5: Result := eAutoPos_TopLeft;
+        6: Result := eAutoPos_BottomRight;
+        7: Result := eAutoPos_BottomLeft;
+    Else
+        Result := eAutoPos_CenterCenter;
+    End;
+End;
+
+{ True if the designator text Slk overlaps any pad or other silk text in its  }
+{ immediate vicinity. SelfAddr excludes the text object itself from the test. }
+Function SilkCollides(Board : IPCB_Board; Slk : IPCB_Text; SelfAddr : Integer) : Boolean;
+Var
+    SBB, OBB : TCoordRect;
+    Margin : Integer;
+    Iter : IPCB_SpatialIterator;
+    Obj : IPCB_Primitive;
+Begin
+    Result := False;
+    SBB := Slk.BoundingRectangle;
+    Margin := MilsToCoord(2);
+    Iter := Board.SpatialIterator_Create;
+    Try
+        Iter.AddFilter_ObjectSet(MkSet(ePadObject, eTextObject));
+        Iter.AddFilter_LayerSet(AllLayers);
+        Iter.AddFilter_Area(SBB.X1 - Margin, SBB.Y1 - Margin, SBB.X2 + Margin, SBB.Y2 + Margin);
+        Obj := Iter.FirstPCBObject;
+        While Obj <> Nil Do
+        Begin
+            If Obj.I_ObjectAddress <> SelfAddr Then
+            Begin
+                Try
+                    OBB := Obj.BoundingRectangle;
+                    If RectsOverlap(SBB.X1, SBB.Y1, SBB.X2, SBB.Y2,
+                                    OBB.X1, OBB.Y1, OBB.X2, OBB.Y2, 0) Then
+                        Result := True;
+                Except End;
+            End;
+            If Result Then Break;
+            Obj := Iter.NextPCBObject;
+        End;
+    Finally
+        Board.SpatialIterator_Destroy(Iter);
+    End;
+End;
+
+{ Create a track primitive (caller adds it to the board / net).               }
+Function NewTrack(X1c, Y1c, X2c, Y2c, WidthC : Integer; Layer : TLayer) : IPCB_Track;
+Begin
+    Result := PCBServer.PCBObjectFactory(eTrackObject, eNoDimension, eCreate_Default);
+    Result.Layer := Layer;
+    Result.Width := WidthC;
+    Result.x1 := X1c;
+    Result.y1 := Y1c;
+    Result.x2 := X2c;
+    Result.y2 := Y2c;
+End;
+
+{ Create an unplated tooling hole (copper == hole, no annular ring) and add   }
+{ it to the board. Coordinates and diameter are in internal units.            }
+Function NewToolingHole(Board : IPCB_Board; Xc, Yc, Dia : Integer) : IPCB_Pad;
+Begin
+    Result := PCBServer.PCBObjectFactory(ePadObject, eNoDimension, eCreate_Default);
+    Result.Layer := eMultiLayer;
+    Result.X := Xc;
+    Result.Y := Yc;
+    Result.TopXSize := Dia;
+    Result.TopYSize := Dia;
+    Result.SetState_HoleSize(Dia);
+    Board.AddPCBObject(Result);
+End;
+
+{ Create a round copper fiducial on Lyr and add it to the board.              }
+Function NewFiducial(Board : IPCB_Board; Xc, Yc, Dia : Integer; Lyr : TLayer) : IPCB_Pad;
+Begin
+    Result := PCBServer.PCBObjectFactory(ePadObject, eNoDimension, eCreate_Default);
+    Result.Layer := Lyr;
+    Result.X := Xc;
+    Result.Y := Yc;
+    Result.TopXSize := Dia;
+    Result.TopYSize := Dia;
+    Board.AddPCBObject(Result);
+End;
+
+{..............................................................................}
+{ PCB_ImportPlacement - position components from a packed coordinate list.    }
+{ placements = pipe-separated records "designator,x_mils,y_mils,rotation,     }
+{ layer". x/y/rotation/layer each optional per record (empty = leave as-is).  }
+{ Mirror of pcb_export_coordinates: absolute mils, rotation degrees, layer    }
+{ token TopLayer/BottomLayer (a layer change flips the component side).       }
+{..............................................................................}
+Function PCB_ImportPlacement(Params : String; RequestId : String) : String;
+Var
+    Board : IPCB_Board;
+    Comp : IPCB_Component;
+    ListStr, RecStr, Remaining, Token : String;
+    Desig, XStr, YStr, RotStr, LayerStr : String;
+    PipePos, CommaPos, FieldIdx, Applied, Failed : Integer;
+    TargetLayer : TLayer;
+Begin
+    Board := GetPCBBoardAnywhere;
+    If Board = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCB', 'No PCB document is active');
+        Exit;
+    End;
+
+    ListStr := ExtractJsonValue(Params, 'placements');
+    If ListStr = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAM', 'placements parameter required');
+        Exit;
+    End;
+
+    Applied := 0;
+    Failed := 0;
+    Remaining := ListStr;
+    While Length(Remaining) > 0 Do
+    Begin
+        PipePos := Pos('|', Remaining);
+        If PipePos = 0 Then
+        Begin
+            RecStr := Remaining;
+            Remaining := '';
+        End
+        Else
+        Begin
+            RecStr := Copy(Remaining, 1, PipePos - 1);
+            Remaining := Copy(Remaining, PipePos + 1, Length(Remaining));
+        End;
+        If RecStr = '' Then Continue;
+
+        Desig := ''; XStr := ''; YStr := ''; RotStr := ''; LayerStr := '';
+        FieldIdx := 0;
+        While (RecStr <> '') And (FieldIdx <= 4) Do
+        Begin
+            CommaPos := Pos(',', RecStr);
+            If CommaPos = 0 Then
+            Begin
+                Token := RecStr;
+                RecStr := '';
+            End
+            Else
+            Begin
+                Token := Copy(RecStr, 1, CommaPos - 1);
+                RecStr := Copy(RecStr, CommaPos + 1, Length(RecStr));
+            End;
+            Case FieldIdx Of
+                0: Desig := Token;
+                1: XStr := Token;
+                2: YStr := Token;
+                3: RotStr := Token;
+                4: LayerStr := Token;
+            End;
+            FieldIdx := FieldIdx + 1;
+        End;
+
+        If Desig = '' Then
+        Begin
+            Failed := Failed + 1;
+            Continue;
+        End;
+        Comp := Board.GetPcbComponentByRefDes(Desig);
+        If Comp = Nil Then
+        Begin
+            Failed := Failed + 1;
+            Continue;
+        End;
+
+        PCBServer.PreProcess;
+        Try
+            PCBServer.SendMessageToRobots(Comp.I_ObjectAddress, c_Broadcast,
+                PCBM_BeginModify, c_NoEventData);
+            If XStr <> '' Then Comp.x := MilsToCoord(StrToIntDef(XStr, 0));
+            If YStr <> '' Then Comp.y := MilsToCoord(StrToIntDef(YStr, 0));
+            If RotStr <> '' Then Comp.Rotation := StrToFloatDef(RotStr, 0);
+            If LayerStr <> '' Then
+            Begin
+                TargetLayer := GetLayerFromString(LayerStr);
+                If Comp.Layer <> TargetLayer Then Comp.Layer := TargetLayer;
+            End;
+            PCBServer.SendMessageToRobots(Comp.I_ObjectAddress, c_Broadcast,
+                PCBM_EndModify, c_NoEventData);
+        Finally
+            PCBServer.PostProcess;
+        End;
+        Applied := Applied + 1;
+    End;
+
+    SaveDocByPath(Board.FileName);
+    Result := BuildSuccessResponse(RequestId,
+        '{"applied":' + IntToStr(Applied) + ',"failed":' + IntToStr(Failed) + '}');
+End;
+
+{..............................................................................}
+{ PCB_Teardrops - launch Altium's Teardrop command board-wide.                }
+{ The Teardrop dialog is modal and cannot be suppressed from script (same     }
+{ limitation as the ECO dialog); the add/remove choice is made in the dialog. }
+{..............................................................................}
+Function PCB_Teardrops(Params : String; RequestId : String) : String;
+Var
+    Board : IPCB_Board;
+Begin
+    Board := GetPCBBoardAnywhere;
+    If Board = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCB', 'No PCB document is active');
+        Exit;
+    End;
+
+    ResetParameters;
+    AddStringParameter('Scope', 'All');
+    RunProcess('PCB:Select');
+    ResetParameters;
+    RunProcess('PCB:Teardrop');
+
+    Result := BuildSuccessResponse(RequestId,
+        '{"launched":true,"modal":true,'
+        + '"note":"The Teardrop dialog is modal and cannot be suppressed from '
+        + 'script; choose Add or Remove and confirm it in Altium."}');
+End;
+
+{..............................................................................}
+{ PCB_AutoplaceSilkscreen - reposition component designators to clear pads    }
+{ and other silk. For each visible designator, try a ring of auto-position    }
+{ anchors and keep the first that collides with nothing; otherwise leave it.  }
+{ Approximate (first-fit), not a global optimum.                              }
+{..............................................................................}
+Function PCB_AutoplaceSilkscreen(Params : String; RequestId : String) : String;
+Var
+    Board : IPCB_Board;
+    Iter : IPCB_BoardIterator;
+    Comp : IPCB_Component;
+    Slk : IPCB_Text;
+    I, Placed, Skipped, Total : Integer;
+    Ok : Boolean;
+Begin
+    Board := GetPCBBoardAnywhere;
+    If Board = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCB', 'No PCB document is active');
+        Exit;
+    End;
+
+    Placed := 0;
+    Skipped := 0;
+    Total := 0;
+    Try PCBServer.SystemOptions.DoOnlineDRC := False; Except End;
+    PCBServer.PreProcess;
+    Try
+        Iter := Board.BoardIterator_Create;
+        Try
+            Iter.AddFilter_ObjectSet(MkSet(eComponentObject));
+            Iter.AddFilter_LayerSet(AllLayers);
+            Iter.AddFilter_Method(eProcessAll);
+            Comp := Iter.FirstPCBObject;
+            While Comp <> Nil Do
+            Begin
+                Total := Total + 1;
+                Slk := Nil;
+                Try Slk := Comp.Name; Except End;
+                If (Slk <> Nil) And (Not Slk.IsHidden) Then
+                Begin
+                    Ok := False;
+                    Slk.BeginModify;
+                    For I := 0 To 7 Do
+                    Begin
+                        Try Comp.ChangeNameAutoposition(SilkAnchorForIndex(I)); Except End;
+                        If Not SilkCollides(Board, Slk, Slk.I_ObjectAddress) Then
+                        Begin
+                            Ok := True;
+                            Break;
+                        End;
+                    End;
+                    Slk.EndModify;
+                    If Ok Then Placed := Placed + 1 Else Skipped := Skipped + 1;
+                End
+                Else Skipped := Skipped + 1;
+                Comp := Iter.NextPCBObject;
+            End;
+        Finally
+            Board.BoardIterator_Destroy(Iter);
+        End;
+    Finally
+        PCBServer.PostProcess;
+        Try PCBServer.SystemOptions.DoOnlineDRC := True; Except End;
+    End;
+
+    SaveDocByPath(Board.FileName);
+    Result := BuildSuccessResponse(RequestId,
+        '{"placed":' + IntToStr(Placed) + ',"skipped":' + IntToStr(Skipped)
+        + ',"total":' + IntToStr(Total) + '}');
+End;
+
+{..............................................................................}
+{ PCB_TuneLength - add approximate routed length to a net by laying a square  }
+{ serpentine at a caller-given anchor. Open-loop and NOT DRC-checked: the     }
+{ caller supplies where to put it and verifies clearance. Reports the net's   }
+{ RoutedLength before and after so the achieved delta is visible.            }
+{ Params: net, add_length_mils, x_mils, y_mils, layer, amplitude_mils,        }
+{ width_mils (optional). Serpentine runs horizontally from the anchor.        }
+{..............................................................................}
+Function PCB_TuneLength(Params : String; RequestId : String) : String;
+Var
+    Board : IPCB_Board;
+    Net : IPCB_Net;
+    NetName, LayerStr : String;
+    AddLen, X0, Y0, Amp, WidthMils, Bumps, I : Integer;
+    Layer : TLayer;
+    BeforeLen, AfterLen, AmpC, WidthC, X, Step : Integer;
+    Trk : IPCB_Track;
+Begin
+    Board := GetPCBBoardAnywhere;
+    If Board = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCB', 'No PCB document is active');
+        Exit;
+    End;
+
+    NetName := ExtractJsonValue(Params, 'net');
+    If NetName = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAM', 'net parameter required');
+        Exit;
+    End;
+    Net := FindNetByName(Board, NetName);
+    If Net = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NOT_FOUND', 'Net not found: ' + NetName);
+        Exit;
+    End;
+
+    AddLen := StrToIntDef(ExtractJsonValue(Params, 'add_length_mils'), 0);
+    X0 := StrToIntDef(ExtractJsonValue(Params, 'x_mils'), 0);
+    Y0 := StrToIntDef(ExtractJsonValue(Params, 'y_mils'), 0);
+    Amp := StrToIntDef(ExtractJsonValue(Params, 'amplitude_mils'), 40);
+    WidthMils := StrToIntDef(ExtractJsonValue(Params, 'width_mils'), 6);
+    LayerStr := ExtractJsonValue(Params, 'layer');
+    If LayerStr <> '' Then Layer := GetLayerFromString(LayerStr) Else Layer := eTopLayer;
+
+    If (AddLen <= 0) Or (Amp <= 0) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'BAD_PARAM',
+            'add_length_mils and amplitude_mils must be positive');
+        Exit;
+    End;
+
+    { Each square bump (up + down) adds ~2*amplitude of copper. }
+    Bumps := AddLen Div (2 * Amp);
+    If Bumps < 1 Then Bumps := 1;
+
+    AmpC := MilsToCoord(Amp);
+    WidthC := MilsToCoord(WidthMils);
+    Step := MilsToCoord(Amp);            { horizontal pitch per bump leg }
+    X := MilsToCoord(X0);
+
+    BeforeLen := CoordToMils(Net.RoutedLength);
+
+    PCBServer.PreProcess;
+    Try
+        For I := 0 To Bumps - 1 Do
+        Begin
+            { up }
+            Trk := NewTrack(X, MilsToCoord(Y0), X, MilsToCoord(Y0) + AmpC, WidthC, Layer);
+            PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
+                PCBM_BoardRegisteration, Trk.I_ObjectAddress);
+            Board.AddPCBObject(Trk);
+            Net.AddPCBObject(Trk);
+            { across the top }
+            Trk := NewTrack(X, MilsToCoord(Y0) + AmpC, X + Step, MilsToCoord(Y0) + AmpC, WidthC, Layer);
+            PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
+                PCBM_BoardRegisteration, Trk.I_ObjectAddress);
+            Board.AddPCBObject(Trk);
+            Net.AddPCBObject(Trk);
+            { down }
+            Trk := NewTrack(X + Step, MilsToCoord(Y0) + AmpC, X + Step, MilsToCoord(Y0), WidthC, Layer);
+            PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
+                PCBM_BoardRegisteration, Trk.I_ObjectAddress);
+            Board.AddPCBObject(Trk);
+            Net.AddPCBObject(Trk);
+            { baseline gap to the next bump }
+            Trk := NewTrack(X + Step, MilsToCoord(Y0), X + 2 * Step, MilsToCoord(Y0), WidthC, Layer);
+            PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
+                PCBM_BoardRegisteration, Trk.I_ObjectAddress);
+            Board.AddPCBObject(Trk);
+            Net.AddPCBObject(Trk);
+            X := X + 2 * Step;
+        End;
+    Finally
+        PCBServer.PostProcess;
+    End;
+
+    ResetParameters;
+    RunProcess('PCB:UpdateConnectivity');
+    AfterLen := CoordToMils(Net.RoutedLength);
+    SaveDocByPath(Board.FileName);
+
+    Result := BuildSuccessResponse(RequestId,
+        '{"net":"' + EscapeJsonString(NetName) + '",'
+        + '"bumps":' + IntToStr(Bumps) + ','
+        + '"length_before_mils":' + IntToStr(BeforeLen) + ','
+        + '"length_after_mils":' + IntToStr(AfterLen) + ','
+        + '"added_mils":' + IntToStr(AfterLen - BeforeLen) + ','
+        + '"drc_checked":false}');
+End;
+
+{..............................................................................}
+{ PCB_Panelize - build a production panel on the current (blank) board:       }
+{ an embedded-board array of a source .PcbDoc, a rectangular panel outline,   }
+{ corner tooling holes, and fiducials. board_width_mils / board_height_mils   }
+{ are the source board size; the caller supplies them.                        }
+{..............................................................................}
+Function PCB_Panelize(Params : String; RequestId : String) : String;
+Var
+    Board : IPCB_Board;
+    Emb : IPCB_EmbeddedBoard;
+    Trk : IPCB_Track;
+    ChildPath : String;
+    Rows, Cols, BoardW, BoardH, ColGap, RowGap, Border : Integer;
+    PanW, PanH, RailW, FidC, ToolC, Inset : Integer;
+    MechL : TLayer;
+    AddFid, AddTool : Boolean;
+Begin
+    Board := GetPCBBoardAnywhere;
+    If Board = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCB', 'No PCB document is active (open the blank panel board first)');
+        Exit;
+    End;
+
+    ChildPath := ExtractJsonValue(Params, 'child_path');
+    If ChildPath = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAM', 'child_path (source .PcbDoc) is required');
+        Exit;
+    End;
+    ChildPath := StringReplace(ChildPath, '\\', '\', -1);
+
+    BoardW := StrToIntDef(ExtractJsonValue(Params, 'board_width_mils'), 0);
+    BoardH := StrToIntDef(ExtractJsonValue(Params, 'board_height_mils'), 0);
+    If (BoardW <= 0) Or (BoardH <= 0) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'BAD_PARAM', 'board_width_mils and board_height_mils are required (source board size)');
+        Exit;
+    End;
+    Rows := StrToIntDef(ExtractJsonValue(Params, 'rows'), 2);
+    Cols := StrToIntDef(ExtractJsonValue(Params, 'cols'), 2);
+    ColGap := StrToIntDef(ExtractJsonValue(Params, 'col_gap_mils'), 100);
+    RowGap := StrToIntDef(ExtractJsonValue(Params, 'row_gap_mils'), 100);
+    Border := StrToIntDef(ExtractJsonValue(Params, 'border_mils'), 200);
+    AddTool := ExtractJsonValue(Params, 'tooling_holes') <> 'false';
+    AddFid := ExtractJsonValue(Params, 'fiducials') <> 'false';
+    If Rows < 1 Then Rows := 1;
+    If Cols < 1 Then Cols := 1;
+
+    PanW := 2 * Border + BoardW * Cols + ColGap * (Cols - 1);
+    PanH := 2 * Border + BoardH * Rows + RowGap * (Rows - 1);
+    RailW := MilsToCoord(10);
+    MechL := eMechanical1;
+    FidC := MilsToCoord(40);
+    ToolC := MilsToCoord(118);
+    Inset := Border Div 2;
+
+    PCBServer.PreProcess;
+    Try
+        { Embedded-board array (the panel core). Emb is the subtype so the    }
+        { RowCount/ColCount/Spacing members resolve.                          }
+        Emb := PCBServer.PCBObjectFactory(eEmbeddedBoardObject, eNoDimension, eCreate_Default);
+        Emb.DocumentPath := ChildPath;
+        Emb.RowCount := Rows;
+        Emb.ColCount := Cols;
+        Emb.RowSpacing := MilsToCoord(BoardH + RowGap);
+        Emb.ColSpacing := MilsToCoord(BoardW + ColGap);
+        Emb.XLocation := MilsToCoord(Border);
+        Emb.YLocation := MilsToCoord(Border);
+        Board.AddPCBObject(Emb);
+        PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
+            PCBM_BoardRegisteration, Emb.I_ObjectAddress);
+
+        { Rectangular panel rails on a mechanical layer (converted to the      }
+        { board outline below). Tracks are created selected for the convert.   }
+        Trk := NewTrack(0, 0, MilsToCoord(PanW), 0, RailW, MechL);
+        Board.AddPCBObject(Trk); Trk.Selected := True;
+        Trk := NewTrack(MilsToCoord(PanW), 0, MilsToCoord(PanW), MilsToCoord(PanH), RailW, MechL);
+        Board.AddPCBObject(Trk); Trk.Selected := True;
+        Trk := NewTrack(MilsToCoord(PanW), MilsToCoord(PanH), 0, MilsToCoord(PanH), RailW, MechL);
+        Board.AddPCBObject(Trk); Trk.Selected := True;
+        Trk := NewTrack(0, MilsToCoord(PanH), 0, 0, RailW, MechL);
+        Board.AddPCBObject(Trk); Trk.Selected := True;
+        Try Board.LayerIsDisplayed[MechL] := True; Except End;
+
+        If AddTool Then
+        Begin
+            NewToolingHole(Board, MilsToCoord(Inset), MilsToCoord(Inset), ToolC);
+            NewToolingHole(Board, MilsToCoord(PanW - Inset), MilsToCoord(Inset), ToolC);
+            NewToolingHole(Board, MilsToCoord(PanW - Inset), MilsToCoord(PanH - Inset), ToolC);
+            NewToolingHole(Board, MilsToCoord(Inset), MilsToCoord(PanH - Inset), ToolC);
+        End;
+        If AddFid Then
+        Begin
+            NewFiducial(Board, MilsToCoord(Inset), MilsToCoord(Inset), FidC, eTopLayer);
+            NewFiducial(Board, MilsToCoord(Inset), MilsToCoord(Inset), FidC, eBottomLayer);
+            NewFiducial(Board, MilsToCoord(PanW - Inset), MilsToCoord(Inset), FidC, eTopLayer);
+            NewFiducial(Board, MilsToCoord(Inset), MilsToCoord(PanH - Inset), FidC, eTopLayer);
+        End;
+    Finally
+        PCBServer.PostProcess;
+    End;
+
+    { Convert the selected rail tracks into the actual board outline. }
+    ResetParameters;
+    AddStringParameter('Mode', 'BOARDOUTLINE_FROM_SEL_PRIMS');
+    RunProcess('PCB:PlaceBoardOutline');
+
+    SaveDocByPath(Board.FileName);
+    Result := BuildSuccessResponse(RequestId,
+        '{"child_path":"' + EscapeJsonString(ChildPath) + '",'
+        + '"rows":' + IntToStr(Rows) + ',"cols":' + IntToStr(Cols) + ','
+        + '"panel_width_mils":' + IntToStr(PanW) + ','
+        + '"panel_height_mils":' + IntToStr(PanH) + ','
+        + '"tooling_holes":' + BoolToJsonStr(AddTool) + ','
+        + '"fiducials":' + BoolToJsonStr(AddFid) + '}');
+End;
+
+{..............................................................................}
 { HandlePCBCommand - Route PCB actions to handlers                            }
 {..............................................................................}
 
@@ -8060,6 +8605,11 @@ Begin
         'place_radial_dimension':  Result := PCB_PlaceRadialDimension(Params, RequestId);
         'place_embedded_board':    Result := PCB_PlaceEmbeddedBoard(Params, RequestId);
         'fillet_corners':          Result := PCB_FilletCorners(Params, RequestId);
+        'import_placement':        Result := PCB_ImportPlacement(Params, RequestId);
+        'teardrops':               Result := PCB_Teardrops(Params, RequestId);
+        'autoplace_silkscreen':    Result := PCB_AutoplaceSilkscreen(Params, RequestId);
+        'tune_length':             Result := PCB_TuneLength(Params, RequestId);
+        'panelize':                Result := PCB_Panelize(Params, RequestId);
     Else
         Result := BuildErrorResponse(RequestId, 'UNKNOWN_ACTION', 'Unknown PCB action: ' + Action);
     End;

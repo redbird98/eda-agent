@@ -291,7 +291,7 @@ These six tools cover most day-to-day work. They accept any object type supporte
 | `diag_workspace` | Diagnostic: enumerate the IPC workspace directory and report pending request files. Useful when investigating IPC plumbing |
 | `set_intent` | Record the current conversation's intent so the web dashboard can display what the agent is working on |
 
-### Project (50 tools)
+### Project (51 tools)
 
 Lifecycle, parameters, compilation, analysis, outputs, ECO sync, variants.
 
@@ -314,6 +314,7 @@ Lifecycle, parameters, compilation, analysis, outputs, ECO sync, variants.
 | `get_variants` / `get_active_variant` / `set_active_variant` / `create_variant` | Variant management |
 | `export_pdf` / `export_step` / `export_dxf` / `export_image` / `generate_output` | Output generation |
 | `get_outjob_containers` / `run_outjob` / `run_outjob_all` | OutJob execution (`run_outjob_all` fires every container in one pass) |
+| `generate_fab_package` | Run every OutJob container (Gerber / NC drill / IPC-356 / P&P / assembly / BOM) and return a consolidated manifest of produced files; optional STEP / DXF |
 
 ### Library (31 tools)
 
@@ -370,7 +371,7 @@ Schematic-side operations plus viewport and sheet management.
 | `crossref_net` | Sch pin list vs PCB pad list for a named net: diff + `in_sync` flag |
 | `generic_run_process` | Run any Altium process command |
 
-### PCB (78 tools)
+### PCB (84 tools)
 
 Queries and modifications on the active PCB document.
 
@@ -414,6 +415,11 @@ Queries and modifications on the active PCB document.
 | `pcb_add_testpoints_for_net_class` | Auto-place SMD or through-hole testpoints above the board for every net in a netclass without existing coverage |
 | `pcb_calc_track_current_capacity` | IPC-2221 current capacity at multiple ΔT (pure Python, no Altium hit) |
 | `pcb_calc_impedance` | IPC-2141 microstrip / stripline + Wadell differential variants — pick the right track width for USB/HDMI/PCIe target impedance |
+| `pcb_import_placement` | Position components from a coordinate list (designator / x / y / rotation / side) — the inverse of `pcb_export_coordinates` |
+| `pcb_autoplace_silkscreen` | Reposition component designators to clear pads and other silk (first-fit auto-position sweep); pair with the silk audits and `design_visual_review` |
+| `pcb_panelize` | Build a production panel on a blank board: embedded-board array of a source `.PcbDoc` + rectangular outline + corner tooling holes + fiducials |
+| `pcb_add_teardrops` / `pcb_remove_teardrops` | Launch Altium's board-wide Teardrop command (modal, non-suppressible dialog; choose Add/Remove and confirm in Altium) |
+| `pcb_tune_length` | Add approximate routed length to a net with a square serpentine; reports routed length before/after. Open-loop, not DRC-checked (no scriptable interactive tuner exists) |
 
 ### Design agent (8 tools)
 
