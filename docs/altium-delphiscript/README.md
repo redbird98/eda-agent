@@ -25,8 +25,7 @@ structure.
 | Identifiers resolve strictly top-to-bottom within a unit; there is no `Forward;`. | A callee must be defined above its caller in the same file. |
 | Functions are compiled lazily, on first call. | A latent compile error in an uncalled function stays hidden until something calls it, then surfaces mid-run. |
 | Compiled units are cached. | Editing a `.pas` file has no effect until the script project (`.PrjScr`) is reopened or Altium is restarted. |
-| Low-level RTL I/O errors surface as a modal dialog raised by the engine before `Try/Except` runs. | File reads with `Reset`/`ReadLn` can stall the engine on a sharing violation. Use `TStringList` instead. |
-| `Try/Except` catches runtime exceptions only. | It cannot catch "Undeclared identifier", which is a compile error and aborts the unit regardless of any `Try`. |
+| Low-level RTL I/O errors surface as a modal dialog raised by the engine before `Try/Except` runs. | File reads with `Reset`/`ReadLn` stall the engine on a sharing violation. Use `TStringList` instead. |
 | The scripting engine is single-threaded and shares Altium's UI thread. | A long loop freezes the UI unless it periodically calls `Application.ProcessMessages`. |
 
 ### Running a script
@@ -78,7 +77,7 @@ structure.
 | 2 | [`02-types-and-data-structures.md`](02-types-and-data-structures.md) | Typed constants, `Var` initialisers, fixed arrays in functions, `TStringList` limits, open arrays, `MaxInt`, Variant→OleStr. |
 | 3 | [`03-functions-scope-and-compilation.md`](03-functions-scope-and-compilation.md) | No `Forward;`, top-down resolution, lazy compile, `{$I}` ignored, return-value clobbering, the unit cache. |
 | 4 | [`04-strings-and-text.md`](04-strings-and-text.md) | Encoding (Latin-1/CP1252), JSON escaping, char-by-char unescape, locale-safe float formatting. |
-| 5 | [`05-error-handling-and-runtime.md`](05-error-handling-and-runtime.md) | What `Try/Except` can and cannot catch, the EInOutError file-I/O modal, `Application.ProcessMessages`. |
+| 5 | [`05-error-handling-and-runtime.md`](05-error-handling-and-runtime.md) | The EInOutError file-I/O modal, the single-threaded engine, the sandboxed Win32 surface. |
 | 6 | [`06-interfaces-and-type-narrowing.md`](06-interfaces-and-type-narrowing.md) | Narrowing at iterator-return vs typed-local, no inline casts, subtype-on-base, constraint-property writes. |
 | 7 | [`07-schematic-api.md`](07-schematic-api.md) | `SchServer`, iterators vs `CompInfoReader`, modify transactions, pin geometry, parameter buckets, placement, labels/fonts, probes, footprint model name. |
 | 8 | [`08-pcb-api.md`](08-pcb-api.md) | `PCBServer`, board/spatial/group iterators, board resolution, rules, polygons, vias, coordinates, layers, the ECO limitation. |
@@ -93,7 +92,5 @@ structure.
 - **Incorrect** blocks are code that appears correct but fails (compile error,
   silent corruption, or engine crash).
 - **Correct** blocks are the working idiom.
-- "Uncatchable" means `Try/Except` does not apply — the failure is a
-  compile-time error or an engine-level modal, not a runtime exception.
 - Coordinates are in Altium internal units (1 unit = 1/10000 mil = 10⁻⁷ mm)
   unless stated otherwise.
