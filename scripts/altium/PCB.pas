@@ -4143,6 +4143,7 @@ Var
     Board : IPCB_Board;
     Iterator : IPCB_BoardIterator;
     Obj : IPCB_Primitive;
+    TrkObj : IPCB_Track;
     XStr, YStr, LayerStr, ObjTypeStr : String;
     TargetX, TargetY, ObjX, ObjY : Integer;
     TargetLayer : TLayer;
@@ -4223,8 +4224,9 @@ Begin
         // Get object position based on type
         If ObjFilter = eTrackObject Then
         Begin
-            ObjX := CoordToMils((Obj.x1 + Obj.x2) Div 2);
-            ObjY := CoordToMils((Obj.y1 + Obj.y2) Div 2);
+            TrkObj := Obj;
+            ObjX := CoordToMils((TrkObj.X1 + TrkObj.X2) Div 2);
+            ObjY := CoordToMils((TrkObj.Y1 + TrkObj.Y2) Div 2);
         End
         Else If (ObjFilter = eViaObject) Or (ObjFilter = ePadObject) Then
         Begin
@@ -4999,6 +5001,7 @@ Var
     Board : IPCB_Board;
     Iterator : IPCB_BoardIterator;
     Obj : IPCB_Primitive;
+    TrkObj : IPCB_Track;
     Outline : IPCB_BoardOutline;
     LayerStack : IPCB_LayerStack_V7;
     LayerObj : IPCB_LayerObject_V7;
@@ -5039,8 +5042,9 @@ Begin
         If Obj.ObjectId = eTrackObject Then
         Begin
             Inc(TrackCount);
-            DX := CoordToMils(Obj.x2) - CoordToMils(Obj.x1);
-            DY := CoordToMils(Obj.y2) - CoordToMils(Obj.y1);
+            TrkObj := Obj;
+            DX := CoordToMils(TrkObj.X2) - CoordToMils(TrkObj.X1);
+            DY := CoordToMils(TrkObj.Y2) - CoordToMils(TrkObj.Y1);
             TotalTraceLen := TotalTraceLen + Sqrt(DX * DX + DY * DY);
         End
         Else If Obj.ObjectId = eViaObject Then Inc(ViaCount)

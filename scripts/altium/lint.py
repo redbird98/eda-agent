@@ -223,6 +223,31 @@ RULE_UNDECLARED_DELPHI_CONST = LineRule(
     description="DelphiScript doesn't predefine MaxInt/MinInt/MaxLongInt; use a literal or the MAX_INT const.",
 )
 
+# Subtype-only PCB property read/written on a base IPCB_Primitive variable.
+# DelphiScript resolves members against the DECLARED type, so Obj.X1 (only on
+# IPCB_Track) is "Undeclared identifier" when Obj : IPCB_Primitive. The
+# codebase names base primitives Obj / Prim and narrows subtype locals as
+# Track / Arc / Pad / Via / Comp / Txt. Flag the base names touching a member
+# that exists only on a PCB subtype (no schematic equivalent, so no SCH false
+# positive). Fix: narrow via ObjectId into a typed local first.
+RULE_PCB_SUBTYPE_ON_BASE = LineRule(
+    name="pcb-subtype-prop-on-base",
+    pattern=re.compile(
+        # PCB-exclusive members only: no schematic interface has these, so a
+        # match on a base-named var is unambiguously a PCB narrowing bug.
+        # Width / XCenter / Radius / StartAngle / EndAngle are deliberately
+        # NOT here -- they exist on schematic subtypes too, and GetSchProperty
+        # reads Obj.Width on a working ISch base.
+        r"\b(?:Obj|Prim|Prim1|Prim2)\.(x1|y1|x2|y2|StartX|StartY|EndX|EndY"
+        r"|TopXSize|TopYSize|TopShape|HoleSize|Pattern|SourceDesignator"
+        r"|SizeOnLayer|IsPadRemoved|IntersectLayer)\b",
+        re.IGNORECASE,
+    ),
+    severity="error",
+    memory="delphiscript_interface_narrowing.md",
+    description="Subtype-only PCB property on a base IPCB_Primitive var; narrow to a typed local (Track/Arc/Pad/...) via ObjectId.",
+)
+
 # IPCB_Rule.Priority is a read-only function, not a property.
 RULE_RULE_PRIORITY_WRITE = LineRule(
     name="rule-priority-readonly-write",
@@ -392,6 +417,7 @@ LINE_RULES = [
     RULE_RESERVED_IDENT,
     RULE_TYPED_CONSTANT,
     RULE_UNDECLARED_DELPHI_CONST,
+    RULE_PCB_SUBTYPE_ON_BASE,
     RULE_FOOTPRINT_NAME_WRITE,
     RULE_RULE_PRIORITY_WRITE,
     RULE_PROBE_TEXT_WRITE,

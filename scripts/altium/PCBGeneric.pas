@@ -26,55 +26,126 @@ End;
 {..............................................................................}
 
 Function GetPCBProperty(Obj : IPCB_Primitive; PropName : String) : String;
+Var
+    Track : IPCB_Track;
+    Arc   : IPCB_Arc;
+    Pad   : IPCB_Pad;
+    Via   : IPCB_Via;
+    Comp  : IPCB_Component;
+    Txt   : IPCB_Text;
+    Oid   : Integer;
 Begin
     Result := '';
     Try
-        If PropName = 'ObjectId'    Then Result := IntToStr(Obj.ObjectId)
-        Else If PropName = 'X'      Then Result := IntToStr(CoordToMils(Obj.x))
-        Else If PropName = 'Y'      Then Result := IntToStr(CoordToMils(Obj.y))
-        Else If PropName = 'X1'     Then Result := IntToStr(CoordToMils(Obj.x1))
-        Else If PropName = 'Y1'     Then Result := IntToStr(CoordToMils(Obj.y1))
-        Else If PropName = 'X2'     Then Result := IntToStr(CoordToMils(Obj.x2))
-        Else If PropName = 'Y2'     Then Result := IntToStr(CoordToMils(Obj.y2))
-        Else If PropName = 'Layer'  Then Result := GetLayerString(Obj.Layer)
-        Else If PropName = 'Net'    Then
+        Oid := Obj.ObjectId;
+        { Base IPCB_Primitive members, valid to read on ANY primitive. }
+        If PropName = 'ObjectId'        Then Result := IntToStr(Oid)
+        Else If PropName = 'X'          Then Result := IntToStr(CoordToMils(Obj.x))
+        Else If PropName = 'Y'          Then Result := IntToStr(CoordToMils(Obj.y))
+        Else If PropName = 'Layer'      Then Result := GetLayerString(Obj.Layer)
+        Else If PropName = 'Descriptor' Then Result := Obj.Descriptor
+        Else If PropName = 'Selected'   Then Result := BoolToJsonStr(Obj.Selected)
+        Else If PropName = 'Net'        Then
         Begin
-            If Obj.Net <> Nil Then Result := Obj.Net.Name Else Result := '';
+            If Obj.Net <> Nil Then Result := Obj.Net.Name;
         End
-        Else If PropName = 'Width'     Then Result := IntToStr(CoordToMils(Obj.Width))
-        Else If PropName = 'Name'      Then
+        { Subtype members. DelphiScript resolves members against the DECLARED }
+        { type, so Obj.X1 on an IPCB_Primitive is "Undeclared identifier".    }
+        { Narrow to a typed local via ObjectId (no Forward casts in script).  }
+        Else If PropName = 'X1' Then
         Begin
-            { For a component, Obj.Name is an IPCB_Text interface, not a    }
-            { string. Returning it raised "Could not convert variant of     }
-            { type (Dispatch) into type (OleStr)" in EscapeJsonString and   }
-            { popped a modal that escaped the Try/Except. Use .Text.        }
-            If Obj.ObjectId = eComponentObject Then Result := Obj.Name.Text
-            Else Result := Obj.Name;
+            If Oid = eTrackObject Then Begin Track := Obj; Result := IntToStr(CoordToMils(Track.X1)); End;
+        End
+        Else If PropName = 'Y1' Then
+        Begin
+            If Oid = eTrackObject Then Begin Track := Obj; Result := IntToStr(CoordToMils(Track.Y1)); End;
+        End
+        Else If PropName = 'X2' Then
+        Begin
+            If Oid = eTrackObject Then Begin Track := Obj; Result := IntToStr(CoordToMils(Track.X2)); End;
+        End
+        Else If PropName = 'Y2' Then
+        Begin
+            If Oid = eTrackObject Then Begin Track := Obj; Result := IntToStr(CoordToMils(Track.Y2)); End;
+        End
+        Else If PropName = 'Width' Then
+        Begin
+            If Oid = eTrackObject Then Begin Track := Obj; Result := IntToStr(CoordToMils(Track.Width)); End
+            Else If Oid = eArcObject Then Begin Arc := Obj; Result := IntToStr(CoordToMils(Arc.Width)); End;
+        End
+        Else If PropName = 'XCenter' Then
+        Begin
+            If Oid = eArcObject Then Begin Arc := Obj; Result := IntToStr(CoordToMils(Arc.XCenter)); End;
+        End
+        Else If PropName = 'YCenter' Then
+        Begin
+            If Oid = eArcObject Then Begin Arc := Obj; Result := IntToStr(CoordToMils(Arc.YCenter)); End;
+        End
+        Else If PropName = 'Radius' Then
+        Begin
+            If Oid = eArcObject Then Begin Arc := Obj; Result := IntToStr(CoordToMils(Arc.Radius)); End;
+        End
+        Else If PropName = 'StartAngle' Then
+        Begin
+            If Oid = eArcObject Then Begin Arc := Obj; Result := FloatToStr(Arc.StartAngle); End;
+        End
+        Else If PropName = 'EndAngle' Then
+        Begin
+            If Oid = eArcObject Then Begin Arc := Obj; Result := FloatToStr(Arc.EndAngle); End;
+        End
+        Else If PropName = 'HoleSize' Then
+        Begin
+            If Oid = ePadObject Then Begin Pad := Obj; Result := IntToStr(CoordToMils(Pad.HoleSize)); End
+            Else If Oid = eViaObject Then Begin Via := Obj; Result := IntToStr(CoordToMils(Via.HoleSize)); End;
+        End
+        Else If PropName = 'TopXSize' Then
+        Begin
+            If Oid = ePadObject Then Begin Pad := Obj; Result := IntToStr(CoordToMils(Pad.TopXSize)); End;
+        End
+        Else If PropName = 'TopYSize' Then
+        Begin
+            If Oid = ePadObject Then Begin Pad := Obj; Result := IntToStr(CoordToMils(Pad.TopYSize)); End;
+        End
+        Else If PropName = 'TopShape' Then
+        Begin
+            If Oid = ePadObject Then Begin Pad := Obj; Result := IntToStr(Pad.TopShape); End;
+        End
+        Else If PropName = 'Size' Then
+        Begin
+            If Oid = eViaObject Then Begin Via := Obj; Result := IntToStr(CoordToMils(Via.Size)); End;
+        End
+        Else If PropName = 'Rotation' Then
+        Begin
+            If Oid = eComponentObject Then Begin Comp := Obj; Result := FloatToStr(Comp.Rotation); End
+            Else If Oid = ePadObject Then Begin Pad := Obj; Result := FloatToStr(Pad.Rotation); End
+            Else If Oid = eTextObject Then Begin Txt := Obj; Result := FloatToStr(Txt.Rotation); End;
+        End
+        Else If PropName = 'Pattern' Then
+        Begin
+            If Oid = eComponentObject Then Begin Comp := Obj; Result := Comp.Pattern; End;
+        End
+        Else If PropName = 'SourceDesignator' Then
+        Begin
+            If Oid = eComponentObject Then Begin Comp := Obj; Result := Comp.SourceDesignator; End;
+        End
+        Else If PropName = 'Name' Then
+        Begin
+            { Component Name is an IPCB_Text; return its .Text, not the object }
+            { (Dispatch->OleStr otherwise crashed EscapeJsonString via modal). }
+            If Oid = eComponentObject Then Begin Comp := Obj; Result := Comp.Name.Text; End;
         End
         Else If (PropName = 'Designator') Or (PropName = 'Designator.Text') Then
         Begin
-            If Obj.ObjectId = eComponentObject Then Result := Obj.Name.Text;
+            If Oid = eComponentObject Then Begin Comp := Obj; Result := Comp.Name.Text; End;
         End
         Else If (PropName = 'Comment') Or (PropName = 'Comment.Text') Then
         Begin
-            If Obj.ObjectId = eComponentObject Then Result := Obj.Comment.Text;
+            If Oid = eComponentObject Then Begin Comp := Obj; Result := Comp.Comment.Text; End;
         End
-        Else If PropName = 'Rotation'  Then Result := FloatToStr(Obj.Rotation)
-        Else If PropName = 'HoleSize'  Then Result := IntToStr(CoordToMils(Obj.HoleSize))
-        Else If PropName = 'TopXSize'  Then Result := IntToStr(CoordToMils(Obj.TopXSize))
-        Else If PropName = 'TopYSize'  Then Result := IntToStr(CoordToMils(Obj.TopYSize))
-        Else If PropName = 'TopShape'  Then Result := IntToStr(Obj.TopShape)
-        Else If PropName = 'Size'      Then Result := IntToStr(CoordToMils(Obj.Size))
-        Else If PropName = 'Pattern'   Then Result := Obj.Pattern
-        Else If PropName = 'SourceDesignator' Then Result := Obj.SourceDesignator
-        Else If PropName = 'XCenter'   Then Result := IntToStr(CoordToMils(Obj.XCenter))
-        Else If PropName = 'YCenter'   Then Result := IntToStr(CoordToMils(Obj.YCenter))
-        Else If PropName = 'Radius'    Then Result := IntToStr(CoordToMils(Obj.Radius))
-        Else If PropName = 'StartAngle' Then Result := FloatToStr(Obj.StartAngle)
-        Else If PropName = 'EndAngle'  Then Result := FloatToStr(Obj.EndAngle)
-        Else If PropName = 'Text'      Then Result := Obj.Text
-        Else If PropName = 'Descriptor' Then Result := Obj.Descriptor
-        Else If PropName = 'Selected'  Then Result := BoolToJsonStr(Obj.Selected);
+        Else If PropName = 'Text' Then
+        Begin
+            If Oid = eTextObject Then Begin Txt := Obj; Result := Txt.Text; End;
+        End;
     Except
         Result := '';
     End;
@@ -85,23 +156,62 @@ End;
 {..............................................................................}
 
 Procedure SetPCBProperty(Obj : IPCB_Primitive; PropName : String; Value : String);
+Var
+    Track : IPCB_Track;
+    Pad   : IPCB_Pad;
+    Comp  : IPCB_Component;
+    Txt   : IPCB_Text;
+    Oid   : Integer;
 Begin
     Try
-        If PropName = 'X'       Then Obj.x := MilsToCoord(StrToIntDef(Value, 0))
-        Else If PropName = 'Y'  Then Obj.y := MilsToCoord(StrToIntDef(Value, 0))
-        Else If PropName = 'X1' Then Obj.x1 := MilsToCoord(StrToIntDef(Value, 0))
-        Else If PropName = 'Y1' Then Obj.y1 := MilsToCoord(StrToIntDef(Value, 0))
-        Else If PropName = 'X2' Then Obj.x2 := MilsToCoord(StrToIntDef(Value, 0))
-        Else If PropName = 'Y2' Then Obj.y2 := MilsToCoord(StrToIntDef(Value, 0))
+        Oid := Obj.ObjectId;
+        { Base members, settable on any primitive. }
+        If PropName = 'X'             Then Obj.x := MilsToCoord(StrToIntDef(Value, 0))
+        Else If PropName = 'Y'        Then Obj.y := MilsToCoord(StrToIntDef(Value, 0))
         Else If PropName = 'Layer'    Then Obj.Layer := GetLayerFromString(Value)
-        Else If PropName = 'Width'    Then Obj.Width := MilsToCoord(StrToIntDef(Value, 0))
-        Else If PropName = 'Rotation' Then Obj.Rotation := StrToFloatDef(Value, 0)
-        Else If PropName = 'Name'     Then Obj.Name := Value
-        Else If PropName = 'Text'     Then Obj.Text := Value
-        Else If PropName = 'HoleSize' Then Obj.HoleSize := MilsToCoord(StrToIntDef(Value, 0))
-        Else If PropName = 'TopXSize' Then Obj.TopXSize := MilsToCoord(StrToIntDef(Value, 0))
-        Else If PropName = 'TopYSize' Then Obj.TopYSize := MilsToCoord(StrToIntDef(Value, 0))
-        Else If PropName = 'Selected' Then Obj.Selected := StrToBool(Value);
+        Else If PropName = 'Selected' Then Obj.Selected := StrToBool(Value)
+        { Subtype members: narrow to a typed local via ObjectId first. }
+        Else If PropName = 'X1' Then
+        Begin
+            If Oid = eTrackObject Then Begin Track := Obj; Track.X1 := MilsToCoord(StrToIntDef(Value, 0)); End;
+        End
+        Else If PropName = 'Y1' Then
+        Begin
+            If Oid = eTrackObject Then Begin Track := Obj; Track.Y1 := MilsToCoord(StrToIntDef(Value, 0)); End;
+        End
+        Else If PropName = 'X2' Then
+        Begin
+            If Oid = eTrackObject Then Begin Track := Obj; Track.X2 := MilsToCoord(StrToIntDef(Value, 0)); End;
+        End
+        Else If PropName = 'Y2' Then
+        Begin
+            If Oid = eTrackObject Then Begin Track := Obj; Track.Y2 := MilsToCoord(StrToIntDef(Value, 0)); End;
+        End
+        Else If PropName = 'Width' Then
+        Begin
+            If Oid = eTrackObject Then Begin Track := Obj; Track.Width := MilsToCoord(StrToIntDef(Value, 0)); End;
+        End
+        Else If PropName = 'Rotation' Then
+        Begin
+            If Oid = eComponentObject Then Begin Comp := Obj; Comp.Rotation := StrToFloatDef(Value, 0); End
+            Else If Oid = ePadObject Then Begin Pad := Obj; Pad.Rotation := StrToFloatDef(Value, 0); End;
+        End
+        Else If PropName = 'HoleSize' Then
+        Begin
+            If Oid = ePadObject Then Begin Pad := Obj; Pad.HoleSize := MilsToCoord(StrToIntDef(Value, 0)); End;
+        End
+        Else If PropName = 'TopXSize' Then
+        Begin
+            If Oid = ePadObject Then Begin Pad := Obj; Pad.TopXSize := MilsToCoord(StrToIntDef(Value, 0)); End;
+        End
+        Else If PropName = 'TopYSize' Then
+        Begin
+            If Oid = ePadObject Then Begin Pad := Obj; Pad.TopYSize := MilsToCoord(StrToIntDef(Value, 0)); End;
+        End
+        Else If PropName = 'Text' Then
+        Begin
+            If Oid = eTextObject Then Begin Txt := Obj; Txt.Text := Value; End;
+        End;
     Except
     End;
 End;

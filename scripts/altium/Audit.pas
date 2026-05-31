@@ -735,6 +735,9 @@ Var
     BIter : IPCB_BoardIterator;
     SIter : IPCB_SpatialIterator;
     Prim1, Prim2 : IPCB_Primitive;
+    Trk : IPCB_Track;
+    ArcObj : IPCB_Arc;
+    ViaObj : IPCB_Via;
     Tolerance : TCoord;
     ToleranceMils : Double;
     EndIdx, X, Y : Integer;
@@ -778,12 +781,14 @@ Begin
                     Prim1 := BIter.NextPCBObject;
                     Continue;
                 End;
-                If (Prim1.ObjectId = eArcObject)
-                   And (Prim1.StartAngle = 0)
-                   And (Prim1.EndAngle = 360) Then
+                If Prim1.ObjectId = eArcObject Then
                 Begin
-                    Prim1 := BIter.NextPCBObject;
-                    Continue;
+                    ArcObj := Prim1;
+                    If (ArcObj.StartAngle = 0) And (ArcObj.EndAngle = 360) Then
+                    Begin
+                        Prim1 := BIter.NextPCBObject;
+                        Continue;
+                    End;
                 End;
 
                 Inc(Checked);
@@ -799,13 +804,15 @@ Begin
                 Begin
                     If Prim1.ObjectId = eTrackObject Then
                     Begin
-                        If EndIdx = 1 Then Begin X := Prim1.x1; Y := Prim1.y1; End
-                        Else Begin X := Prim1.x2; Y := Prim1.y2; End;
+                        Trk := Prim1;
+                        If EndIdx = 1 Then Begin X := Trk.x1; Y := Trk.y1; End
+                        Else Begin X := Trk.x2; Y := Trk.y2; End;
                     End
                     Else  { eArcObject }
                     Begin
-                        If EndIdx = 1 Then Begin X := Prim1.StartX; Y := Prim1.StartY; End
-                        Else Begin X := Prim1.EndX; Y := Prim1.EndY; End;
+                        ArcObj := Prim1;
+                        If EndIdx = 1 Then Begin X := ArcObj.StartX; Y := ArcObj.StartY; End
+                        Else Begin X := ArcObj.EndX; Y := ArcObj.EndY; End;
                     End;
 
                     Found := False;
@@ -828,15 +835,17 @@ Begin
                                     If (Prim2.ObjectId = eTrackObject)
                                        And (Prim2.Layer = Prim1.Layer) Then
                                     Begin
-                                        If PointsCloseEnough(Prim2.x1, Prim2.y1, X, Y, Tolerance)
-                                           Or PointsCloseEnough(Prim2.x2, Prim2.y2, X, Y, Tolerance) Then
+                                        Trk := Prim2;
+                                        If PointsCloseEnough(Trk.x1, Trk.y1, X, Y, Tolerance)
+                                           Or PointsCloseEnough(Trk.x2, Trk.y2, X, Y, Tolerance) Then
                                             Found := True;
                                     End
                                     Else If (Prim2.ObjectId = eArcObject)
                                             And (Prim2.Layer = Prim1.Layer) Then
                                     Begin
-                                        If PointsCloseEnough(Prim2.StartX, Prim2.StartY, X, Y, Tolerance)
-                                           Or PointsCloseEnough(Prim2.EndX, Prim2.EndY, X, Y, Tolerance) Then
+                                        ArcObj := Prim2;
+                                        If PointsCloseEnough(ArcObj.StartX, ArcObj.StartY, X, Y, Tolerance)
+                                           Or PointsCloseEnough(ArcObj.EndX, ArcObj.EndY, X, Y, Tolerance) Then
                                             Found := True;
                                     End
                                     Else If Prim2.ObjectId = ePadObject Then
@@ -847,8 +856,9 @@ Begin
                                     End
                                     Else If Prim2.ObjectId = eViaObject Then
                                     Begin
-                                        If Prim2.IntersectLayer(Prim1.Layer)
-                                           And PointsCloseEnough(Prim2.x, Prim2.y, X, Y, Tolerance) Then
+                                        ViaObj := Prim2;
+                                        If ViaObj.IntersectLayer(Prim1.Layer)
+                                           And PointsCloseEnough(ViaObj.x, ViaObj.y, X, Y, Tolerance) Then
                                             Found := True;
                                     End;
                                 End;
@@ -1714,6 +1724,8 @@ Var
     Stack : IPCB_LayerStack;
     Iter : IPCB_BoardIterator;
     Obj : IPCB_Primitive;
+    ViaObj : IPCB_Via;
+    PadObj : IPCB_Pad;
     Layer : IPCB_LayerObject;
     LayerId : Integer;
     Checked, Violations : Integer;
@@ -1775,14 +1787,16 @@ Begin
                         Removed := False;
                         If Obj.ObjectId = eViaObject Then
                         Begin
-                            If Obj.IntersectLayer(LayerId)
-                               And (Obj.SizeOnLayer(LayerId) <= Obj.HoleSize) Then
+                            ViaObj := Obj;
+                            If ViaObj.IntersectLayer(LayerId)
+                               And (ViaObj.SizeOnLayer(LayerId) <= ViaObj.HoleSize) Then
                                 Removed := True;
                         End
                         Else
                         Begin
                             Try
-                                If Obj.IsPadRemoved(LayerId) Then
+                                PadObj := Obj;
+                                If PadObj.IsPadRemoved(LayerId) Then
                                     Removed := True;
                             Except End;
                         End;
