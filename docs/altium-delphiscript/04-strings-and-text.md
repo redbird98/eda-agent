@@ -83,11 +83,11 @@ double-escaped.
 
 The inverse — turning `\n`, `\"`, `\\`, `\uXXXX` back into bytes — cannot be done
 with a sequence of `StringReplace` calls. Left-to-right replacement collapses
-`\\` to `\` before it evaluates the following character, so a string like `\\nlc`
-(a literal backslash followed by `nlc`) is mis-decoded into a newline + `lc`.
-Real-world identifiers exhibit this: active-low signal names (`\RESET`,
-`\WD_OUT`) and Windows path segments (`\nlc_480`, `\tmp`, `\reports`) all contain
-backslash sequences that a cascade mangles.
+`\\` to `\` before it evaluates the following character, so an escaped literal
+such as `\\temp` (the JSON form of `\temp`) is mis-decoded — the `\\t` run is
+read as a tab. Any backslash that precedes a letter naming an escape triggers
+it: escaped Windows paths (`C:\\temp\\report`) and active-low signal names
+(`\RESET`) both hit this.
 
 **Correct** — walk the string once, handling each escape in place:
 ```pascal

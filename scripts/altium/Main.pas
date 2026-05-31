@@ -651,7 +651,7 @@ Var
 Begin
     // Char-by-char JSON unescape with full \uXXXX support. The naive
     // StringReplace cascade (\t -> tab, \n -> LF, ..., \\ -> \) is broken
-    // for sequences like \\nlc, handles escapes left-to-right so \\
+    // for sequences like \\temp, handles escapes left-to-right so \\
     // collapses to \ before evaluating the following char.
     Result := '';
     I := 1;
