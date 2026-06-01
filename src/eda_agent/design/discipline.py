@@ -317,6 +317,23 @@ one design. They apply in every session.
    schematic. (`update_pcb` / a real attended ECO remains the canonical
    path when a human can click the dialog.)
 
+8. **Connectivity review uses the netlist, never the render.** The FIRST
+   priority for any review or check that concerns electrical connection (what
+   sits on a net, what a pin connects to, missing or extra connections,
+   single-pin or no-driver nets, schematic-to-PCB drift) is the actual net
+   data, read from the compiled design: `get_nets`, `get_connectivity` /
+   `get_connectivity_many`, `crossref_net`, `compare_sch_pcb`,
+   `get_unconnected_pins`, `get_erc_violations`. Read the connections; do not
+   infer them from a picture.
+
+   The SVG renders (`sch_render_svg`, `pcb_render_svg`, `design_visual_review`)
+   are for VISUAL and PLACEMENT review ONLY: schematic layout and readability,
+   PCB part placement, silkscreen, spacing, overlaps. They MUST NEVER be used
+   to judge connectivity. A wire that looks joined in an image may not share a
+   net, and a net can be electrically correct while the drawing looks messy.
+   Connectivity comes from the netlist; the render comes from the geometry.
+   Do not substitute one for the other.
+
 ## Autonomous design workflow
 
 The agent is the planner. There is no hardcoded topology library, no
