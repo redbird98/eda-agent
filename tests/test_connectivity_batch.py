@@ -23,43 +23,43 @@ def _reset_tracker():
 class TestExpensiveThreshold:
     def test_expensive_tools_registered(self):
         for name in (
-            "get_nets",
-            "get_connectivity",
-            "get_component_info",
-            "get_bom",
+            "proj_get_nets",
+            "proj_get_connectivity",
+            "proj_get_component_info",
+            "proj_get_bom",
         ):
             assert name in BulkHintTracker._EXPENSIVE
 
     def test_get_connectivity_trips_at_second_call(self):
-        first = BulkHintTracker.record_and_hint("get_connectivity")
+        first = BulkHintTracker.record_and_hint("proj_get_connectivity")
         assert first is None
-        second = BulkHintTracker.record_and_hint("get_connectivity")
+        second = BulkHintTracker.record_and_hint("proj_get_connectivity")
         assert second is not None
-        assert second["bulk_tool"] == "get_connectivity_many"
-        assert "get_connectivity_many" in second["hint"]
+        assert second["bulk_tool"] == "proj_get_connectivity_many"
+        assert "proj_get_connectivity_many" in second["hint"]
 
     def test_get_component_info_trips_at_second_call(self):
-        first = BulkHintTracker.record_and_hint("get_component_info")
+        first = BulkHintTracker.record_and_hint("proj_get_component_info")
         assert first is None
-        second = BulkHintTracker.record_and_hint("get_component_info")
+        second = BulkHintTracker.record_and_hint("proj_get_component_info")
         assert second is not None
-        assert second["bulk_tool"] == "get_component_info_many"
-        assert "get_component_info_many" in second["hint"]
+        assert second["bulk_tool"] == "proj_get_component_info_many"
+        assert "proj_get_component_info_many" in second["hint"]
 
     def test_get_nets_trips_at_second_call_and_points_to_unfiltered(self):
-        BulkHintTracker.record_and_hint("get_nets")
-        hint = BulkHintTracker.record_and_hint("get_nets")
+        BulkHintTracker.record_and_hint("proj_get_nets")
+        hint = BulkHintTracker.record_and_hint("proj_get_nets")
         assert hint is not None
         # get_nets' "bulk" is itself, the nudge is to call it ONCE
         # unfiltered and filter locally.
-        assert hint["bulk_tool"] == "get_nets"
+        assert hint["bulk_tool"] == "proj_get_nets"
         assert "no filters" in hint["hint"].lower() or "once" in hint["hint"].lower()
 
     def test_non_expensive_singular_still_threshold_3(self):
         # create_object is non-expensive, should still need 3 calls.
-        assert BulkHintTracker.record_and_hint("create_object") is None
-        assert BulkHintTracker.record_and_hint("create_object") is None
-        tripped = BulkHintTracker.record_and_hint("create_object")
+        assert BulkHintTracker.record_and_hint("obj_create") is None
+        assert BulkHintTracker.record_and_hint("obj_create") is None
+        tripped = BulkHintTracker.record_and_hint("obj_create")
         assert tripped is not None
 
 
@@ -97,7 +97,7 @@ class TestGetConnectivityManyOrchestration:
                 return decorator
 
         project.register_project_tools(DummyMcp())
-        result = await captured_tools["get_connectivity_many"](
+        result = await captured_tools["proj_get_connectivity_many"](
             designators=["U1", "R1", "Q99"],
         )
         assert captured["command"] == "project.get_connectivity_batch"
@@ -126,7 +126,7 @@ class TestGetConnectivityManyOrchestration:
                 return decorator
 
         project.register_project_tools(DummyMcp())
-        result = await captured_tools["get_connectivity_many"](designators=[])
+        result = await captured_tools["proj_get_connectivity_many"](designators=[])
         assert "error" in result
 
     @pytest.mark.asyncio
@@ -153,7 +153,7 @@ class TestGetConnectivityManyOrchestration:
                 return decorator
 
         project.register_project_tools(DummyMcp())
-        await captured_tools["get_connectivity_many"](
+        await captured_tools["proj_get_connectivity_many"](
             designators=["U1", "", "  ", "R1 "]
         )
         # Whitespace stripped, empties dropped.
@@ -195,7 +195,7 @@ class TestGetComponentInfoManyOrchestration:
                 return decorator
 
         project.register_project_tools(DummyMcp())
-        result = await captured_tools["get_component_info_many"](
+        result = await captured_tools["proj_get_component_info_many"](
             designators=["U1", "R1", "Q99"],
         )
         assert captured["command"] == "project.get_component_info_batch"
@@ -227,7 +227,7 @@ class TestGetComponentInfoManyOrchestration:
                 return decorator
 
         project.register_project_tools(DummyMcp())
-        result = await captured_tools["get_component_info_many"](designators=[])
+        result = await captured_tools["proj_get_component_info_many"](designators=[])
         assert "error" in result
 
     @pytest.mark.asyncio
@@ -255,7 +255,7 @@ class TestGetComponentInfoManyOrchestration:
                 return decorator
 
         project.register_project_tools(DummyMcp())
-        await captured_tools["get_component_info_many"](
+        await captured_tools["proj_get_component_info_many"](
             designators=["U1", "", "  ", "R1 "],
             with_pin_nets=False,
             with_parameters=False,

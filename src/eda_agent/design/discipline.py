@@ -212,8 +212,8 @@ these rules before producing a plan; they bound your choices.
 15. **All pin locations AND rectangle corners must lie on the 100-mil
     grid.** Off-grid coordinates break Altium's snap mechanism and
     make wires look frayed when placed instances are dragged. The
-    `tools/library.py` helpers (`lib_add_pin`, `lib_add_pins`,
-    `lib_add_symbol_rectangle`, `lib_add_symbol_line`,
+    `tools/library.py` helpers (`lib_add_pins`,
+    `lib_add_symbol_rectangle`, `lib_add_symbol_lines`,
     `lib_add_symbol_arc`, `lib_add_symbol_polygon`) round every coord
     to the nearest 100 before sending to the bridge, so callers can
     pass approximate values and trust the snap — but never deliberately
@@ -282,48 +282,48 @@ one design. They apply in every session.
    rating). NEVER hard-code or regex against one library's `lib_ref` naming
    layout — the planner is the matcher, not a string template.
 
-4. **Prefer bulk tools over looping.** `batch_modify`, `pcb_move_components`,
-   `place_sch_components_from_library`, `place_wires`, `set_sch_components_parameters`,
+4. **Prefer bulk tools over looping.** `obj_batch_modify`, `pcb_move_components`,
+   `sch_place_components`, `sch_place_wires`, `sch_set_components_parameters`,
    etc. do N operations in one IPC round-trip. Looping the singular variant
    costs one LLM turn each — 10–100× slower wall-clock. Plan the whole set,
    then issue one batch.
 
 5. **Target the document explicitly.** Schematic placement and most
-   mutations act on the ACTIVE document, and a freshly `create_document`'d
+   mutations act on the ACTIVE document, and a freshly `app_create_document`'d
    sheet is NOT auto-focused — parts can silently land on the wrong open
-   sheet. Pass `document_path` to `place_sch_components_from_library` (it
+   sheet. Pass `document_path` to `sch_place_components` (it
    focuses the sheet first and aborts if focus fails), or
-   `set_active_document` before any active-doc mutation. For deterministic
-   reads, prefer `scope=doc:<path>` (e.g. `query_objects`) over active-doc
+   `app_set_active_document` before any active-doc mutation. For deterministic
+   reads, prefer `scope=doc:<path>` (e.g. `obj_query`) over active-doc
    tools.
 
-6. **ECO (schematic → PCB) is not headless.** `update_pcb` fires the real
+6. **ECO (schematic → PCB) is not headless.** `proj_sync_pcb` fires the real
    Engineering Change Order, but Altium's change-review dialog is
    non-suppressible by design — a human must click **Execute Changes**.
-   Don't call `update_pcb` in an unattended run; it blocks until someone
+   Don't call `proj_sync_pcb` in an unattended run; it blocks until someone
    interacts. After an attended ECO, the rest of the PCB tools work
    normally.
 
-7. **`pcb_place_component` has two modes.** *Geometry only* (footprint +
+7. **`pcb_place_components` has two modes.** *Geometry only* (footprint +
    designator) leaves the board UNSYNCED — no link, no pad nets; pads are
    unconnected (DRC flags them) and a later ECO treats the parts as "extra
    in PCB". Fine for artwork, panelization, or testing. *Synced* — also
    pass `unique_id` (the schematic component's UniqueId, from
    `query_objects(eSchComponent, "Designator.Text,UniqueId")`) and
    `pad_nets` `{pad: net}` (from the compiled netlist via
-   `get_connectivity_many`). That stamps the sch↔PCB link AND creates +
+   `proj_get_connectivity_many`). That stamps the sch↔PCB link AND creates +
    assigns each pad's net, giving real connectivity (ratsnest + DRC) with
    NO ECO dialog — the headless way to populate a board from a compiled
-   schematic. (`update_pcb` / a real attended ECO remains the canonical
+   schematic. (`proj_sync_pcb` / a real attended ECO remains the canonical
    path when a human can click the dialog.)
 
 8. **Connectivity review uses the netlist, never the render.** The FIRST
    priority for any review or check that concerns electrical connection (what
    sits on a net, what a pin connects to, missing or extra connections,
    single-pin or no-driver nets, schematic-to-PCB drift) is the actual net
-   data, read from the compiled design: `get_nets`, `get_connectivity` /
-   `get_connectivity_many`, `crossref_net`, `compare_sch_pcb`,
-   `get_unconnected_pins`, `get_erc_violations`. Read the connections; do not
+   data, read from the compiled design: `proj_get_nets`, `proj_get_connectivity` /
+   `proj_get_connectivity_many`, `obj_crossref_net`, `proj_compare_sch_pcb`,
+   `proj_get_unconnected_pins`, `proj_get_erc_violations`. Read the connections; do not
    infer them from a picture.
 
    The SVG renders (`sch_render_svg`, `pcb_render_svg`, `design_visual_review`)
@@ -460,12 +460,12 @@ buck, an LDO, an MCU board, an audio amp, or a sensor frontend.
   match what the symbol exposes; query the inventory or look up the
   symbol to confirm the pin identifiers.
 - Power vs ground:
-  - `is_power=true` -> `place_power_port` with a circle glyph (or a GND
+  - `is_power=true` -> `sch_place_power_port` with a circle glyph (or a GND
     glyph variant if the net name contains `GND`).
-  - `is_ground=true` -> `place_power_port` with a GND glyph; `AGND` /
+  - `is_ground=true` -> `sch_place_power_port` with a GND glyph; `AGND` /
     `ANALOG` net names get the signal-ground variant; `EARTH` / `PE`
     get the earth glyph.
-  - Plain net (neither flag) -> `place_net_label`.
+  - Plain net (neither flag) -> `sch_place_net_label`.
 - Cross-sheet nets get a label on each sheet where a participating pin
   lives. The executor handles this automatically as long as each Part's
   `sheet` field is set correctly.
@@ -478,8 +478,7 @@ buck, an LDO, an MCU board, an audio amp, or a sensor frontend.
 
 Once parts are on the PCB, moving them is a separate concern from the
 DesignPlan executor above. The same agent often drives both phases.
-Apply these rules whenever calling `pcb_move_component` /
-`pcb_move_components`.
+Apply these rules whenever calling `pcb_move_components`.
 
 1. **Plan the whole cluster before moving anything.** Call
    `pcb_get_components` once and read the full layout state: each
@@ -513,11 +512,11 @@ Apply these rules whenever calling `pcb_move_component` /
 5. **Prefer bulk-batch moves when you've planned a whole cluster.**
    `pcb_move_components` accepts a list of moves in one IPC call.
    Use it once per cluster after you've collision-checked every move
-   individually. Don't loop `pcb_move_component` if you have N
-   pre-computed positions.
+   individually, passing a single-element list when you only have one
+   pre-computed position.
 
 6. **Mils, not millimetres, in the move tools.** Coordinates in
-   `pcb_move_component(s)` and `pcb_check_placement_collision` are
+   `pcb_move_components` and `pcb_check_placement_collision` are
    mils unless explicitly documented otherwise. Bounding boxes
    returned by `pcb_get_components` are also mils.
 

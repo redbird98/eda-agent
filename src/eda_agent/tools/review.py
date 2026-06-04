@@ -550,7 +550,7 @@ def register_review_tools(mcp):
         }
 
     @mcp.tool()
-    async def datasheet_checklist() -> dict[str, Any]:
+    async def design_datasheet_checklist() -> dict[str, Any]:
         """Return the datasheet-first discipline checklist for design review.
 
         Use this when you need the rules without pulling the full

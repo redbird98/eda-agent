@@ -138,16 +138,6 @@ Begin
         Result := False;
         Exit;
     End;
-    If OnlySlowFlag Then
-    Begin
-        { Slow tag is in the "[SLOW]" or "[WARN]" or "[ERR ]" prefix. }
-        If (Pos('[SLOW]', LogLine) = 0) And (Pos('[WARN]', LogLine) = 0) And
-           (Pos('[ERR ', LogLine) = 0) Then
-        Begin
-            Result := False;
-            Exit;
-        End;
-    End;
     If FilterText <> '' Then
     Begin
         UpperLine := UpperCase(LogLine);
@@ -307,31 +297,25 @@ End;
 
 
 { Visible severity tag for a log row. ERR has the loudest visual weight.   }
-Function SeverityTag(DurationMs : Cardinal; IsError : Boolean) : String;
-Begin
-    If IsError Then Result := 'ERR '
-    Else If DurationMs >= 500 Then Result := 'SLOW'
-    Else If DurationMs >= 100 Then Result := 'WARN'
-    Else Result := 'OK  ';
-End;
-
-
 { Public entry point called from Dispatcher.ProcessSingleRequest after every }
 { command. RequestId is the 32-char hex; we show first 8 in the log so the   }
 { user can grep bridge_trace.log for the exact call.                         }
 Procedure AppendLogLine(Command : String; DurationMs : Cardinal; IsError : Boolean;
                         RequestId : String; ErrorDetail : String);
 Var
-    Tag, Line, IdShort : String;
+    Line, IdShort : String;
 Begin
     EnsureStatusBuffers;
     TrackPerf(Command, DurationMs);
 
-    Tag := SeverityTag(DurationMs, IsError);
+    { "Only slow" hides fast (<100 ms) non-error calls. Done here against the }
+    { raw duration/error rather than by string-searching a tag prefix.        }
+    If OnlySlowFlag And (Not IsError) And (DurationMs < 100) Then Exit;
+
     IdShort := Copy(RequestId, 1, 8);
     If IdShort = '' Then IdShort := '--------';
 
-    Line := '[' + Tag + ']  ' + PadLeft(IntToStr(DurationMs), 5) + ' ms  '
+    Line := PadLeft(IntToStr(DurationMs), 5) + ' ms  '
           + IdShort + '  ' + Command;
 
     { Apply the filter at write time. The committed pattern wrote straight  }

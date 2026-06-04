@@ -3761,6 +3761,114 @@ End;
 
 
 {..............................................................................}
+{ Lib_SplitPinFunctions - parse each pin's slash-delimited name into its       }
+{ function list (the alt-function popup). A pin named "PA0/TX/CTS" becomes     }
+{ name "PA0" with functions TX, CTS. Operates on the current library symbol.   }
+{..............................................................................}
+Function Lib_SplitPinFunctions(Params : String; RequestId : String) : String;
+Var
+    SchLib : ISch_Lib;
+    Component : ISch_Component;
+    Iter : ISch_Iterator;
+    Pin : ISch_Pin;
+    Processed : Integer;
+Begin
+    SchLib := SchServer.GetCurrentSchDocument;
+    If SchLib = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_SCHLIB', 'No schematic library is active');
+        Exit;
+    End;
+    Component := GetTargetLibComponent(SchLib);
+    If Component = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_COMPONENT', 'No current library component');
+        Exit;
+    End;
+
+    Processed := 0;
+    SchServer.ProcessControl.PreProcess(SchLib, '');
+    Try
+        Iter := Component.SchIterator_Create;
+        Try
+            Iter.AddFilter_ObjectSet(MkSet(ePin));
+            Pin := Iter.FirstSchObject;
+            While Pin <> Nil Do
+            Begin
+                Try
+                    Pin.SetState_FunctionsFromName;
+                    Processed := Processed + 1;
+                Except End;
+                Pin := Iter.NextSchObject;
+            End;
+        Finally
+            Component.SchIterator_Destroy(Iter);
+        End;
+    Finally
+        SchServer.ProcessControl.PostProcess(SchLib, '');
+    End;
+
+    Result := BuildSuccessResponse(RequestId,
+        '{"pins_processed":' + IntToStr(Processed) + '}');
+End;
+
+{..............................................................................}
+{ Lib_InstallLibrary / Lib_UninstallLibrary - register or unregister a library }
+{ (.IntLib / .SchLib / .PcbLib) with the environment's Available Libraries.    }
+{..............................................................................}
+Function Lib_InstallLibrary(Params : String; RequestId : String) : String;
+Var
+    Path : String;
+    Ok : Boolean;
+Begin
+    Path := StringReplace(ExtractJsonValue(Params, 'library_path'), '\\', '\', -1);
+    If Path = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAM', 'library_path is required');
+        Exit;
+    End;
+    If IntegratedLibraryManager = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_MANAGER', 'IntegratedLibraryManager unavailable');
+        Exit;
+    End;
+    Ok := False;
+    Try
+        IntegratedLibraryManager.InstallLibrary(Path);
+        Ok := True;
+    Except End;
+    Result := BuildSuccessResponse(RequestId,
+        '{"installed":' + BoolToJsonStr(Ok) + ',"library_path":"'
+        + EscapeJsonString(Path) + '"}');
+End;
+
+Function Lib_UninstallLibrary(Params : String; RequestId : String) : String;
+Var
+    Path : String;
+    Ok : Boolean;
+Begin
+    Path := StringReplace(ExtractJsonValue(Params, 'library_path'), '\\', '\', -1);
+    If Path = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAM', 'library_path is required');
+        Exit;
+    End;
+    If IntegratedLibraryManager = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_MANAGER', 'IntegratedLibraryManager unavailable');
+        Exit;
+    End;
+    Ok := False;
+    Try
+        IntegratedLibraryManager.UnInstallLibrary(Path);
+        Ok := True;
+    Except End;
+    Result := BuildSuccessResponse(RequestId,
+        '{"uninstalled":' + BoolToJsonStr(Ok) + ',"library_path":"'
+        + EscapeJsonString(Path) + '"}');
+End;
+
+{..............................................................................}
 { Command Handler - must be at end                                             }
 {..............................................................................}
 
@@ -3798,6 +3906,9 @@ Begin
         'set_label_formats':  Result := Lib_SetLabelFormats(Params, RequestId);
         'set_current_component': Result := Lib_SetCurrentComponent(Params, RequestId);
         'update_footprint_heights_from_3d': Result := Lib_UpdateFootprintHeightsFrom3D(Params, RequestId);
+        'split_pin_functions':  Result := Lib_SplitPinFunctions(Params, RequestId);
+        'install_library':      Result := Lib_InstallLibrary(Params, RequestId);
+        'uninstall_library':    Result := Lib_UninstallLibrary(Params, RequestId);
     Else
         Result := BuildErrorResponse(RequestId, 'UNKNOWN_ACTION', 'Unknown library action: ' + Action);
     End;

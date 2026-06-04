@@ -17,7 +17,7 @@ def register_generic_tools(mcp):
     """Register generic primitive tools with the MCP server."""
 
     @mcp.tool()
-    async def query_objects(
+    async def obj_query(
         object_type: str,
         properties: str,
         scope: str = "active_doc",
@@ -70,7 +70,7 @@ def register_generic_tools(mcp):
         return result
 
     @mcp.tool()
-    async def modify_objects(
+    async def obj_modify(
         object_type: str,
         set: str,
         scope: str = "active_doc",
@@ -80,10 +80,10 @@ def register_generic_tools(mcp):
 
         IMPORTANT, if every target object needs a DIFFERENT value (move 10
         pins to 10 different positions, rename 5 nets to 5 different names,
-        set distinct designators per component), use `batch_modify` instead.
+        set distinct designators per component), use `obj_batch_modify` instead.
         Each call to this tool is a full LLM round-trip; doing that in a
         loop is the single biggest wall-time cost in the server. One
-        `batch_modify` with a list of operations does the same work in one
+        `obj_batch_modify` with a list of operations does the same work in one
         turn.
 
         Use this tool when the SAME set string applies to every match
@@ -138,13 +138,13 @@ def register_generic_tools(mcp):
                 "set": set,
             },
         )
-        hint = BulkHintTracker.record_and_hint("modify_objects")
+        hint = BulkHintTracker.record_and_hint("obj_modify")
         if hint and isinstance(result, dict):
             result["_hint_bulk"] = hint
         return result
 
     @mcp.tool()
-    async def create_object(
+    async def obj_create(
         object_type: str,
         properties: str,
         container: str = "document",
@@ -170,13 +170,13 @@ def register_generic_tools(mcp):
                 "container": container,
             },
         )
-        hint = BulkHintTracker.record_and_hint("create_object")
+        hint = BulkHintTracker.record_and_hint("obj_create")
         if hint and isinstance(result, dict):
             result["_hint_bulk"] = hint
         return result
 
     @mcp.tool()
-    async def delete_objects(
+    async def obj_delete(
         object_type: str,
         scope: str = "active_doc",
         filter: str = "",
@@ -211,13 +211,13 @@ def register_generic_tools(mcp):
                 "filter": filter,
             },
         )
-        hint = BulkHintTracker.record_and_hint("delete_objects")
+        hint = BulkHintTracker.record_and_hint("obj_delete")
         if hint and isinstance(result, dict):
             result["_hint_bulk"] = hint
         return result
 
     @mcp.tool()
-    async def get_font_spec(
+    async def obj_get_font_spec(
         font_id: int,
     ) -> dict[str, Any]:
         """Get font properties for a given font ID.
@@ -241,7 +241,7 @@ def register_generic_tools(mcp):
         return result
 
     @mcp.tool()
-    async def get_font_id(
+    async def obj_get_font_id(
         size: int,
         font_name: str = "Arial",
         bold: bool = False,
@@ -284,7 +284,7 @@ def register_generic_tools(mcp):
         return result
 
     @mcp.tool()
-    async def select_objects(
+    async def obj_select(
         object_type: str,
         filter: str = "",
     ) -> dict[str, Any]:
@@ -308,7 +308,7 @@ def register_generic_tools(mcp):
         return result
 
     @mcp.tool()
-    async def deselect_all() -> dict[str, Any]:
+    async def obj_deselect_all() -> dict[str, Any]:
         """Clear all object selection on the active document.
 
         Returns:
@@ -319,7 +319,7 @@ def register_generic_tools(mcp):
         return result
 
     @mcp.tool()
-    async def zoom(action: str = "fit") -> dict[str, Any]:
+    async def obj_zoom(action: str = "fit") -> dict[str, Any]:
         """Control the viewport zoom level.
 
         Args:
@@ -335,16 +335,16 @@ def register_generic_tools(mcp):
         return result
 
     @mcp.tool()
-    async def batch_modify(
+    async def obj_batch_modify(
         operations: list[dict[str, str]],
     ) -> dict[str, Any]:
         """Apply many filter+set operations in ONE IPC round-trip.
 
-        PREFER THIS over looping `modify_objects` whenever you have more
+        PREFER THIS over looping `obj_modify` whenever you have more
         than one change to make, especially when each change targets a
         different object (different designator, different pin name,
-        different sheet). A single `batch_modify` call touches N objects
-        in the same Altium transaction; N separate `modify_objects` calls
+        different sheet). A single `obj_batch_modify` call touches N objects
+        in the same Altium transaction; N separate `obj_modify` calls
         cost N LLM round-trips plus N IPC round-trips. The wall-time
         difference is typically 10-100x on a multi-item edit.
 
@@ -439,7 +439,7 @@ def register_generic_tools(mcp):
         return result
 
     @mcp.tool()
-    async def generic_run_process(
+    async def obj_run_process(
         process_name: str,
         parameters: str = "",
     ) -> dict[str, Any]:
@@ -472,11 +472,11 @@ def register_generic_tools(mcp):
             return {"success": True, "process": process_name}
 
     @mcp.tool()
-    async def run_erc() -> dict[str, Any]:
+    async def proj_run_erc() -> dict[str, Any]:
         """Run Electrical Rules Check on the focused project.
 
         Compiles the project first (required), then runs ERC.
-        Call ``get_erc_violations()`` afterwards to retrieve the
+        Call ``proj_get_erc_violations()`` afterwards to retrieve the
         structured list of violations.
 
         Returns:
@@ -487,7 +487,7 @@ def register_generic_tools(mcp):
         return result
 
     @mcp.tool()
-    async def set_sch_components_parameters(
+    async def sch_set_components_parameters(
         stamps: list[dict[str, str]],
         sheet_path: str = "",
     ) -> dict[str, Any]:
@@ -550,11 +550,11 @@ def register_generic_tools(mcp):
             "generic.set_sch_components_parameters", params, timeout=60.0)
 
     @mcp.tool()
-    async def get_erc_violations() -> dict[str, Any]:
+    async def proj_get_erc_violations() -> dict[str, Any]:
         """Return the ERC violation list produced by the last
-        ``run_erc()`` invocation.
+        ``proj_run_erc()`` invocation.
 
-        Two-step pattern by design: ``run_erc()`` performs the
+        Two-step pattern by design: ``proj_run_erc()`` performs the
         compile-and-check (slow, can be 30+ s on a large project);
         this tool reads back the violations cheaply so the agent can
         re-query without re-running ERC. Each violation carries the
@@ -569,7 +569,7 @@ def register_generic_tools(mcp):
             "generic.get_erc_violations", {})
 
     @mcp.tool()
-    async def highlight_net(
+    async def obj_highlight_net(
         net_name: str,
         clear_existing: bool = True,
     ) -> dict[str, Any]:
@@ -605,7 +605,7 @@ def register_generic_tools(mcp):
         return result
 
     @mcp.tool()
-    async def crossref_net(net_name: str) -> dict[str, Any]:
+    async def obj_crossref_net(net_name: str) -> dict[str, Any]:
         """Compare the schematic vs PCB membership of a named net.
 
         Returns the full pin list the SCHEMATIC assigns to this net
@@ -613,7 +613,7 @@ def register_generic_tools(mcp):
         the diff in each direction.
 
         USE THIS when:
-          - `get_nets` / `get_connectivity` returns an answer that
+          - `proj_get_nets` / `proj_get_connectivity` returns an answer that
             surprises you or the user (e.g. a net appears to be missing
             a pin you expect on it, or appears to be disconnected from
             a component you know is wired).
@@ -649,7 +649,7 @@ def register_generic_tools(mcp):
         )
 
     @mcp.tool()
-    async def clear_highlights() -> dict[str, Any]:
+    async def obj_clear_highlights() -> dict[str, Any]:
         """Clear all net highlights in the active schematic or PCB document.
 
         Returns:
@@ -660,7 +660,7 @@ def register_generic_tools(mcp):
         return result
 
     @mcp.tool()
-    async def add_sheet(
+    async def proj_add_sheet(
         name: str = "NewSheet",
     ) -> dict[str, Any]:
         """Create a new schematic sheet and add it to the focused project.
@@ -682,7 +682,7 @@ def register_generic_tools(mcp):
         return result
 
     @mcp.tool()
-    async def delete_sheet(
+    async def proj_delete_sheet(
         file_path: str,
     ) -> dict[str, Any]:
         """Remove a schematic sheet from the focused project.
@@ -704,7 +704,7 @@ def register_generic_tools(mcp):
         return result
 
     @mcp.tool()
-    async def switch_view(
+    async def obj_switch_view(
         mode: str = "3d",
     ) -> dict[str, Any]:
         """Toggle between 2D and 3D view for PCB documents.
@@ -723,7 +723,7 @@ def register_generic_tools(mcp):
         return result
 
     @mcp.tool()
-    async def refresh_document() -> dict[str, Any]:
+    async def obj_refresh_document() -> dict[str, Any]:
         """Force a redraw/refresh of the current document.
 
         For schematics, calls GraphicallyInvalidate. For PCB, sends a
@@ -737,7 +737,7 @@ def register_generic_tools(mcp):
         return result
 
     @mcp.tool()
-    async def get_unconnected_pins() -> dict[str, Any]:
+    async def proj_get_unconnected_pins() -> dict[str, Any]:
         """Find unconnected/floating pins in the focused project.
 
         Compiles the project first (required for connectivity data), then
@@ -754,35 +754,58 @@ def register_generic_tools(mcp):
         return result
 
     @mcp.tool()
-    async def place_wire(
-        x1: int,
-        y1: int,
-        x2: int,
-        y2: int,
+    async def sch_stub_pins(
+        stub_length_mils: int = 100,
+        only_designators: Optional[list[str]] = None,
     ) -> dict[str, Any]:
-        """Place a wire segment between two XY coordinates on the active schematic.
+        """Draw a short wire stub + net label on every unconnected schematic pin.
+
+        Finds floating pins (via the same connectivity check as
+        get_unconnected_pins), then for each one places a wire extending from
+        the pin's electrical end outward along its orientation, terminated by a
+        net label named "<designator>_<pin_number>". This makes dangling pins
+        explicit so ERC reports them as named single-pin nets rather than silent
+        floats, and gives a labelled anchor to wire up later.
 
         Args:
-            x1: Start X coordinate in mils
-            y1: Start Y coordinate in mils
-            x2: End X coordinate in mils
-            y2: End Y coordinate in mils
+            stub_length_mils: Length of each stub wire in mils (default 100)
+            only_designators: If given, only stub pins on these components
 
         Returns:
-            Dictionary confirming wire placement with coordinates
+            Dictionary with "stubbed" and "failed" counts, plus the pin list
+            that was acted on
         """
         bridge = get_bridge()
-        result = await bridge.send_command_async(
-            "generic.place_wire",
-            {"x1": str(x1), "y1": str(y1), "x2": str(x2), "y2": str(y2)},
+        floating = await bridge.send_command_async(
+            "generic.get_unconnected_pins", {}, timeout=60.0
         )
-        hint = BulkHintTracker.record_and_hint("place_wire")
-        if hint and isinstance(result, dict):
-            result["_hint_bulk"] = hint
+        pins = floating.get("unconnected_pins", []) if isinstance(floating, dict) else []
+        if only_designators:
+            wanted = {d.upper() for d in only_designators}
+            pins = [p for p in pins if str(p.get("designator", "")).upper() in wanted]
+        if not pins:
+            return {"stubbed": 0, "failed": 0, "pins": [], "note": "no unconnected pins found"}
+
+        records = []
+        for p in pins:
+            desig = str(p.get("designator", "")).strip()
+            pin_num = str(p.get("pin_number", "")).strip()
+            if not desig or not pin_num:
+                continue
+            label = f"{desig}_{pin_num}"
+            records.append(f"{desig},{pin_num},{label}")
+
+        result = await bridge.send_command_async(
+            "generic.stub_pins",
+            {"pins": "|".join(records), "stub_length_mils": str(stub_length_mils)},
+            timeout=120.0,
+        )
+        if isinstance(result, dict):
+            result["pins"] = records
         return result
 
     @mcp.tool()
-    async def place_rectangle(
+    async def sch_place_rectangle(
         x1: int,
         y1: int,
         x2: int,
@@ -815,7 +838,7 @@ def register_generic_tools(mcp):
         return result
 
     @mcp.tool()
-    async def place_line(
+    async def sch_place_line(
         x1: int,
         y1: int,
         x2: int,
@@ -849,7 +872,7 @@ def register_generic_tools(mcp):
         return result
 
     @mcp.tool()
-    async def place_note(
+    async def sch_place_note(
         x1: int,
         y1: int,
         x2: int,
@@ -883,7 +906,7 @@ def register_generic_tools(mcp):
         return result
 
     @mcp.tool()
-    async def place_sheet_symbol(
+    async def sch_place_sheet_symbol(
         x1: int,
         y1: int,
         x2: int,
@@ -924,7 +947,7 @@ def register_generic_tools(mcp):
         return result
 
     @mcp.tool()
-    async def place_sheet_entry(
+    async def sch_place_sheet_entry(
         sheet_name: str,
         entry_name: str,
         io_type: str = "unspecified",
@@ -961,7 +984,7 @@ def register_generic_tools(mcp):
         return result
 
     @mcp.tool()
-    async def place_bus_entry(
+    async def sch_place_bus_entry(
         x1: int,
         y1: int,
         x2: int,
@@ -1019,95 +1042,7 @@ def register_generic_tools(mcp):
         return result
 
     @mcp.tool()
-    async def place_sch_component_from_library(
-        lib_reference: str,
-        x: int,
-        y: int,
-        library_path: str = "",
-        designator: str = "",
-        rotation: int = 0,
-        footprint: str = "",
-    ) -> dict[str, Any]:
-        """Place a schematic component instance from a library at (x, y).
-
-        Calls ISch_Document.PlaceSchComponent with the given library path
-        and component name. If library_path is empty, Altium searches
-        already-open libraries and the integrated library chain.
-
-        Args:
-            lib_reference: Component name inside the library (e.g. "Res1")
-            x, y: Placement coordinates in mils
-            library_path: Full path to .SchLib (optional if library already open)
-            designator: Override designator (e.g. "R1"). Empty = keep default.
-            rotation: 0, 90, 180, or 270 degrees
-            footprint: Override current footprint model name (optional)
-
-        Returns:
-            Dictionary confirming component placement
-        """
-        bridge = get_bridge()
-        result = await bridge.send_command_async(
-            "generic.place_sch_component_from_library",
-            {
-                "library_path": library_path,
-                "lib_reference": lib_reference,
-                "x": str(x),
-                "y": str(y),
-                "designator": designator,
-                "rotation": str(rotation),
-                "footprint": footprint,
-            },
-        )
-        hint = BulkHintTracker.record_and_hint("place_sch_component_from_library")
-        if hint and isinstance(result, dict):
-            result["_hint_bulk"] = hint
-        return result
-
-    @mcp.tool()
-    async def set_sch_component_parameters(
-        designator: str,
-        sheet_path: str,
-        parameters: dict[str, str],
-    ) -> dict[str, Any]:
-        """Stamp BOM/value/footprint metadata onto a placed schematic component.
-
-        Convention for well-known keys:
-        - ``Value`` writes to the component's Comment field (Altium uses the
-          Comment as the canonical Value column).
-        - ``Footprint`` updates the current footprint model name on the placed
-          component instance.
-        - All other keys become first-class ``ISch_Parameter`` entries; an
-          existing parameter with the same name is updated in place, otherwise
-          a new one is created via ``SchObjectFactory(eParameter)``.
-
-        Empty string values are skipped, so callers can pass partially-filled
-        payloads (e.g. ``{"Manufacturer": "TI", "Manufacturer Part Number": ""}``
-        only stamps Manufacturer).
-
-        Args:
-            designator: Refdes of the placed component (e.g. ``"R1"``).
-            sheet_path: Absolute path to the SchDoc the component lives on.
-            parameters: Dict of parameter-name -> string-value pairs.
-
-        Returns:
-            ``{"designator", "applied", "created"}`` where applied is the total
-            number of fields written and created is the count of brand-new
-            parameters (existing fields modified in place are counted in
-            applied but not in created).
-        """
-        bridge = get_bridge()
-        result = await bridge.send_command_async(
-            "generic.set_sch_component_parameters",
-            {
-                "designator": designator,
-                "sheet_path": sheet_path,
-                "parameters": parameters,
-            },
-        )
-        return result
-
-    @mcp.tool()
-    async def place_bus(
+    async def sch_place_bus(
         x1: int,
         y1: int,
         x2: int,
@@ -1137,7 +1072,7 @@ def register_generic_tools(mcp):
         return result
 
     @mcp.tool()
-    async def place_net_label(
+    async def sch_place_net_label(
         text: str,
         x: int,
         y: int,
@@ -1167,7 +1102,7 @@ def register_generic_tools(mcp):
         return result
 
     @mcp.tool()
-    async def place_port(
+    async def sch_place_port(
         name: str,
         x: int,
         y: int,
@@ -1200,7 +1135,7 @@ def register_generic_tools(mcp):
         return result
 
     @mcp.tool()
-    async def place_power_port(
+    async def sch_place_power_port(
         text: str,
         x: int,
         y: int,
@@ -1237,7 +1172,7 @@ def register_generic_tools(mcp):
         return result
 
     @mcp.tool()
-    async def get_sheet_parameters(
+    async def sch_get_sheet_parameters(
         file_path: str = "",
     ) -> dict[str, Any]:
         """Get title block parameters (title, revision, date, etc.) from a schematic sheet.
@@ -1262,7 +1197,7 @@ def register_generic_tools(mcp):
         return result
 
     @mcp.tool()
-    async def copy_objects(
+    async def obj_copy(
         object_type: str,
         filter: str = "",
     ) -> dict[str, Any]:
@@ -1286,7 +1221,7 @@ def register_generic_tools(mcp):
         return result
 
     @mcp.tool()
-    async def get_object_count(
+    async def obj_count(
         object_type: str,
         scope: str = "active_doc",
         filter: str = "",
@@ -1310,7 +1245,7 @@ def register_generic_tools(mcp):
         return result
 
     @mcp.tool()
-    async def place_no_erc(
+    async def sch_place_no_erc(
         x: int,
         y: int,
     ) -> dict[str, Any]:
@@ -1334,7 +1269,7 @@ def register_generic_tools(mcp):
         return result
 
     @mcp.tool()
-    async def place_junction(
+    async def sch_place_junction(
         x: int,
         y: int,
     ) -> dict[str, Any]:
@@ -1357,7 +1292,7 @@ def register_generic_tools(mcp):
         return result
 
     @mcp.tool()
-    async def get_document_info() -> dict[str, Any]:
+    async def obj_get_document_info() -> dict[str, Any]:
         """Get comprehensive info about the active document.
 
         For schematics: file path, kind, sheet size, title block visibility,
@@ -1372,7 +1307,7 @@ def register_generic_tools(mcp):
         return result
 
     @mcp.tool()
-    async def set_grid(
+    async def obj_set_grid(
         snap_grid: int = 0,
         visible_grid: int = 0,
     ) -> dict[str, Any]:
@@ -1484,7 +1419,7 @@ def register_generic_tools(mcp):
         return result
 
     @mcp.tool()
-    async def place_image(
+    async def sch_place_image(
         image_path: str,
         x: int,
         y: int,
@@ -1517,7 +1452,7 @@ def register_generic_tools(mcp):
         return result
 
     @mcp.tool()
-    async def replace_component(
+    async def proj_replace_component(
         designator: str,
         new_lib_ref: str,
         new_library: str = "",
@@ -1663,6 +1598,93 @@ def register_generic_tools(mcp):
                 "text": text,
                 "align": align,
             },
+        )
+
+    @mcp.tool()
+    async def sch_generate_toc(
+        x1: int = 200,
+        y1: int = 200,
+        x2: int = 2400,
+        y2: int = 1800,
+        title: str = "Table of Contents",
+        project_path: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Place a table-of-contents note listing every schematic sheet.
+
+        Reads the project's document list, keeps the .SchDoc sheets in
+        project order, and drops a numbered text frame on the active sheet.
+        Run it on a dedicated cover/index sheet. Re-running does not remove a
+        prior frame, delete the old one first if you regenerate.
+
+        Args:
+            x1, y1, x2, y2: Frame corners in mils (default a tall left box).
+            title: Heading line above the list.
+            project_path: Optional project; uses active if omitted.
+
+        Returns:
+            Dict with sheet_count and the placement result, or an error if
+            no schematic sheets were found.
+        """
+        bridge = get_bridge()
+        params: dict[str, Any] = {}
+        if project_path:
+            params["project_path"] = project_path
+        docs = await bridge.send_command_async("project.get_documents", params)
+        if isinstance(docs, dict):
+            docs = docs.get("documents", docs.get("items", []))
+        if not isinstance(docs, list):
+            docs = []
+
+        sheets = [
+            d for d in docs
+            if str(d.get("file_name", "")).lower().endswith(".schdoc")
+        ]
+        if not sheets:
+            return {"success": False, "error": "no .SchDoc sheets found in project"}
+
+        lines = [title, ""]
+        for i, d in enumerate(sheets, start=1):
+            name = str(d.get("file_name", "")).strip()
+            if name.lower().endswith(".schdoc"):
+                name = name[: -len(".SchDoc")]
+            lines.append(f"{i}. {name}")
+        text = "\n".join(lines)
+
+        result = await bridge.send_command_async(
+            "generic.place_text_frame",
+            {
+                "x1": str(x1), "y1": str(y1), "x2": str(x2), "y2": str(y2),
+                "text": text, "align": "left",
+            },
+        )
+        if isinstance(result, dict):
+            result["sheet_count"] = len(sheets)
+        return result
+
+    @mcp.tool()
+    async def sch_set_net_tie(
+        designator: str,
+        mode: str = "nobom",
+    ) -> dict[str, Any]:
+        """Mark a placed schematic component as a net tie.
+
+        A net tie shorts the nets that land on its pins for routing while
+        keeping them as separate logical nets (so ERC/DRC treat the join as
+        intentional). Sets the component's ComponentKind. Use on a dedicated
+        net-tie footprint/symbol you have already placed and wired.
+
+        Args:
+            designator: Component to convert (e.g. "NT1").
+            mode: "nobom" (default, hidden from BOM, kept through sync) or
+                "bom" (appears in the BOM).
+
+        Returns:
+            {"designator", "component_kind"} or NOT_FOUND.
+        """
+        bridge = get_bridge()
+        return await bridge.send_command_async(
+            "generic.set_net_tie",
+            {"designator": designator, "mode": mode},
         )
 
     @mcp.tool()
@@ -1817,12 +1839,12 @@ def register_generic_tools(mcp):
     # --------------------------------------------------------------
 
     @mcp.tool()
-    async def batch_create(
+    async def obj_batch_create(
         operations: list[dict[str, str]],
     ) -> dict[str, Any]:
         """Create many schematic objects in ONE IPC round-trip.
 
-        PREFER THIS over looping `create_object`. Each create costs one
+        PREFER THIS over looping `obj_create`. Each create costs one
         LLM turn when done one at a time; batched it's a single
         PreProcess/PostProcess + one save for the whole set.
 
@@ -1833,7 +1855,7 @@ def register_generic_tools(mcp):
                 - object_type: Altium type name (e.g. "eNetLabel",
                   "eJunction", "eNoERC").
                 - properties: pipe-separated ``Name=Value`` list, same
-                  format as ``create_object`` accepts.
+                  format as ``obj_create`` accepts.
                 - container: "document" (default) or "component" (for
                   library-symbol contents when a lib is active).
 
@@ -1877,12 +1899,12 @@ def register_generic_tools(mcp):
         )
 
     @mcp.tool()
-    async def batch_delete(
+    async def obj_batch_delete(
         operations: list[dict[str, str]],
     ) -> dict[str, Any]:
         """Delete matching objects across many scope/type/filter operations.
 
-        PREFER THIS over looping `delete_objects`. Each op is evaluated
+        PREFER THIS over looping `obj_delete`. Each op is evaluated
         in one go, cleaning a mixed set of stale junctions, no-ERCs,
         and net labels costs one IPC round-trip instead of N.
 
@@ -1894,7 +1916,7 @@ def register_generic_tools(mcp):
                   "eNoERC", "eWire").
                 - filter: pipe-separated ``PropName=Value`` filter
                   conditions (AND logic), same format as
-                  ``delete_objects``.
+                  ``obj_delete``.
 
         Example, purge all no-ERCs on a specific sheet and every
         junction on the project:
@@ -1929,7 +1951,7 @@ def register_generic_tools(mcp):
         )
 
     @mcp.tool()
-    async def place_wires(
+    async def sch_place_wires(
         wires: list[dict[str, int]],
     ) -> dict[str, Any]:
         """Place MANY wire segments on the active schematic in ONE call.
@@ -1968,7 +1990,7 @@ def register_generic_tools(mcp):
         )
 
     @mcp.tool()
-    async def place_sch_components_from_library(
+    async def sch_place_components(
         placements: list[dict[str, Any]],
         document_path: Optional[str] = None,
     ) -> dict[str, Any]:
@@ -1979,10 +2001,10 @@ def register_generic_tools(mcp):
         done one-by-one it costs 50 LLM turns.
 
         TARGET DOCUMENT: placement lands on the ACTIVE schematic. Right
-        after `create_document` the new sheet is NOT auto-focused, so
+        after `app_create_document` the new sheet is NOT auto-focused, so
         without `document_path` parts can silently land on a *different*
         open sheet. Pass `document_path` (absolute .SchDoc path) and this
-        tool focuses that sheet first (`set_active_document`) before
+        tool focuses that sheet first (`app_set_active_document`) before
         placing — always set it when you have just created the target
         sheet.
 
@@ -2059,12 +2081,12 @@ def register_generic_tools(mcp):
         )
 
     @mcp.tool()
-    async def sch_attach_spice_primitives(
+    async def sim_attach_primitives(
         attachments: list[dict[str, str]],
     ) -> dict[str, Any]:
         """Attach SPICE primitives to MANY components in ONE call.
 
-        PREFER THIS after running `sch_get_simulation_readiness`, the
+        PREFER THIS after running `sim_get_readiness`, the
         readiness response typically lists 20-50 passives that all
         need the SpicePrefix + Value parameter pair. Looping
         `sch_attach_spice_primitive` costs one LLM turn per component;
@@ -2116,126 +2138,5 @@ def register_generic_tools(mcp):
             {"attachments": "~~".join(op_strs)},
         )
 
-    # =========================================================================
-    # Schematic-place ergonomics. Thin wrappers around create_object that name
-    # the common Altium SchObject creations the agent reaches for repeatedly.
-    # Lifted to MCP tools (text + x/y/rot/style call shape) so the agent
-    # can call them by name instead of learning the property-string protocol.
-    # =========================================================================
-
-    @mcp.tool()
-    async def sch_add_net_label(
-        text: str,
-        x: int,
-        y: int,
-        rotation: int = 0,
-    ) -> dict[str, Any]:
-        """Add a net-label to the active schematic.
-
-        Net labels carry the net name; placing one on a wire tags that
-        wire's net with the given text.
-
-        Args:
-            text: Net name to print (e.g. ``"SCL"``, ``"VCC_3V3"``).
-            x, y: Location in mils, in the schematic's coordinate space.
-            rotation: 0 / 90 / 180 / 270 degrees. Default 0 (horizontal).
-
-        Returns:
-            Dict confirming creation (same shape as ``create_object``).
-        """
-        bridge = get_bridge()
-        props = (f"Text={text}|"
-                 f"Location.X={int(x)}|"
-                 f"Location.Y={int(y)}|"
-                 f"Orientation={int(rotation) // 90}")
-        return await bridge.send_command_async(
-            "generic.create_object",
-            {"object_type": "eNetLabel", "properties": props,
-             "container": "document"},
-        )
-
-    @mcp.tool()
-    async def sch_add_text(
-        text: str,
-        x: int,
-        y: int,
-        rotation: int = 0,
-    ) -> dict[str, Any]:
-        """Add free text annotation to the active schematic.
-
-        For labelling regions, version stamps, design notes that aren't
-        net names. Use ``sch_add_net_label`` instead if the string is a
-        net name attached to a wire.
-
-        Args:
-            text: The annotation text.
-            x, y: Location in mils.
-            rotation: 0 / 90 / 180 / 270 degrees. Default 0.
-
-        Returns:
-            Dict confirming creation.
-        """
-        bridge = get_bridge()
-        props = (f"Text={text}|"
-                 f"Location.X={int(x)}|"
-                 f"Location.Y={int(y)}|"
-                 f"Orientation={int(rotation) // 90}")
-        return await bridge.send_command_async(
-            "generic.create_object",
-            {"object_type": "eLabel", "properties": props,
-             "container": "document"},
-        )
-
-    @mcp.tool()
-    async def sch_place_power_port(
-        net_name: str,
-        x: int,
-        y: int,
-        style: str = "bar",
-        rotation: int = 90,
-    ) -> dict[str, Any]:
-        """Place a power-port symbol (rail or ground) on the schematic.
-
-        Power ports carry a net assignment via their visible text. Ground
-        symbols use a ``gnd_*`` style and convention says they face down
-        (rotation=270); supply rails use ``bar``/``arrow``/``wave`` and
-        face up (rotation=90).
-
-        Args:
-            net_name: Net the port labels (e.g. ``"GND"``, ``"+3V3"``).
-                Becomes the port's visible Text.
-            x, y: Location in mils.
-            style: One of ``bar`` (default; horizontal supply rail),
-                ``arrow``, ``wave``, ``gnd_power``, ``gnd_signal``,
-                ``gnd_earth``, ``circle``. The audit_power_port_orientation
-                check expects ``gnd_*`` styles to face down (rotation=270)
-                and ``bar`` to face up (rotation=90).
-            rotation: 0 / 90 / 180 / 270 degrees. Default 90 (rail
-                pointing up).
-
-        Returns:
-            Dict confirming creation.
-        """
-        # Map the canonical style string to Altium's TPowerObjectStyle ordinal
-        # so the property-string protocol carries an integer rather than
-        # leaving Pascal to do the lookup. Order matches Utils.pas
-        # StrToPowerStyle / PowerStyleToStr.
-        style_ord = {
-            "circle": 0, "arrow": 1, "bar": 2, "wave": 3,
-            "gnd_power": 4, "gnd_signal": 5, "gnd_earth": 6,
-            "powerbar": 2, "rail": 2,
-            "powergnd": 4, "signalgnd": 5, "sgnd": 5,
-            "earth": 6, "egnd": 6,
-            "gnd": 4, "ground": 4,
-        }.get(style.lower(), 2)
-        bridge = get_bridge()
-        props = (f"Text={net_name}|"
-                 f"Style={style_ord}|"
-                 f"Location.X={int(x)}|"
-                 f"Location.Y={int(y)}|"
-                 f"Orientation={int(rotation) // 90}")
-        return await bridge.send_command_async(
-            "generic.create_object",
-            {"object_type": "ePowerObject", "properties": props,
-             "container": "document"},
-        )
+    # Schematic power ports, net labels, and free text are placed via the
+    # dedicated handlers place_power_port / place_net_label / place_note.

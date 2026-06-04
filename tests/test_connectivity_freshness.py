@@ -2,9 +2,9 @@
 # Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """Tests for the netlist-freshness surface:
 
-- `force_recompile` param threads through get_nets / get_connectivity /
+- `proj_force_recompile` param threads through get_nets / get_connectivity /
   get_connectivity_many / design_review_snapshot.
-- The new `force_recompile` and `get_compile_freshness` MCP tools wire
+- The new `proj_force_recompile` and `proj_get_compile_freshness` MCP tools wire
   to the right Pascal commands.
 - Every connectivity response carries `_connectivity_guidance` with the
   "don't double down" rule and the compile_was_forced flag.
@@ -49,13 +49,13 @@ class TestForceRecompileThreading:
         from eda_agent.tools import project
         tools = _capture(project, "register_project_tools")
 
-        await tools["get_nets"](force_recompile=True)
+        await tools["proj_get_nets"](force_recompile=True)
         assert fake.sent[0][0] == "project.get_nets"
-        assert fake.sent[0][1].get("force_recompile") == "true"
+        assert fake.sent[0][1].get("proj_force_recompile") == "true"
 
         # Default False must NOT send the flag (minimize payload).
-        await tools["get_nets"]()
-        assert "force_recompile" not in fake.sent[1][1]
+        await tools["proj_get_nets"]()
+        assert "proj_force_recompile" not in fake.sent[1][1]
 
     @pytest.mark.asyncio
     async def test_get_connectivity_threads_force_flag(self, monkeypatch):
@@ -66,10 +66,10 @@ class TestForceRecompileThreading:
         from eda_agent.tools import project
         tools = _capture(project, "register_project_tools")
 
-        await tools["get_connectivity"](
+        await tools["proj_get_connectivity"](
             designator="U1", force_recompile=True
         )
-        assert fake.sent[0][1].get("force_recompile") == "true"
+        assert fake.sent[0][1].get("proj_force_recompile") == "true"
 
     @pytest.mark.asyncio
     async def test_get_connectivity_many_threads_force_flag(self, monkeypatch):
@@ -82,10 +82,10 @@ class TestForceRecompileThreading:
         from eda_agent.tools import project
         tools = _capture(project, "register_project_tools")
 
-        await tools["get_connectivity_many"](
+        await tools["proj_get_connectivity_many"](
             designators=["U1", "R1"], force_recompile=True
         )
-        assert fake.sent[0][1].get("force_recompile") == "true"
+        assert fake.sent[0][1].get("proj_force_recompile") == "true"
 
 
 class TestNewFreshnessTools:
@@ -101,7 +101,7 @@ class TestNewFreshnessTools:
         from eda_agent.tools import project
         tools = _capture(project, "register_project_tools")
 
-        result = await tools["force_recompile"]()
+        result = await tools["proj_force_recompile"]()
         assert fake.sent[0][0] == "project.force_recompile"
         assert result["recompiled"] is True
 
@@ -122,7 +122,7 @@ class TestNewFreshnessTools:
         from eda_agent.tools import project
         tools = _capture(project, "register_project_tools")
 
-        result = await tools["get_compile_freshness"]()
+        result = await tools["proj_get_compile_freshness"]()
         assert fake.sent[0][0] == "project.get_compile_freshness"
         assert result["dirty_doc_count"] == 1
         assert "PoE.SchDoc" in result["dirty_docs"][0]

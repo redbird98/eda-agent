@@ -147,7 +147,7 @@ async def test_generate_fab_package_collects_files(monkeypatch, tmp_path):
 
     b = RecBridge(responder)
     tools = _project(monkeypatch, b)
-    out = await tools["generate_fab_package"]()
+    out = await tools["proj_generate_fab_package"]()
     assert out["ok"] is True
     assert out["containers_run"] == ["Fab"]
     assert any("top.gbr" in f for f in out["all_files"])
@@ -162,7 +162,7 @@ async def test_generate_fab_package_no_outjob(monkeypatch):
 
     b = RecBridge(responder)
     tools = _project(monkeypatch, b)
-    out = await tools["generate_fab_package"]()
+    out = await tools["proj_generate_fab_package"]()
     assert out["ok"] is False
     assert "OutJob" in out["reason"]
 
@@ -180,6 +180,6 @@ async def test_generate_fab_package_extras(monkeypatch, tmp_path):
 
     b = RecBridge(responder)
     tools = _project(monkeypatch, b)
-    out = await tools["generate_fab_package"](include_step=True)
+    out = await tools["proj_generate_fab_package"](include_step=True)
     assert "step" in out["extras"]
     assert any(c[0] == "project.export_step" for c in b.calls)

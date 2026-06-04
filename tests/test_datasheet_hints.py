@@ -195,7 +195,7 @@ class TestIntegrationWithRegisteredTools:
                 return decorator
 
         application.register_application_tools(DummyMcp())
-        result = await captured["attach_to_altium"]()
+        result = await captured["app_attach"]()
         reminder = result.get("_system_reminder")
         assert reminder is not None
         assert "datasheet" in reminder["title"].lower()

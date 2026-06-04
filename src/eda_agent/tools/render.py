@@ -340,7 +340,7 @@ def register_render_tools(mcp):
         return result
 
     @mcp.tool()
-    async def export_bom_html(
+    async def proj_export_bom_html(
         output_path: Optional[str] = None,
         title: str = "Bill of Materials",
         limit: int = 5000,

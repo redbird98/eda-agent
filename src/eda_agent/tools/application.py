@@ -61,7 +61,7 @@ def register_application_tools(mcp):
     """Register application tools with the MCP server."""
 
     @mcp.tool()
-    async def get_altium_status() -> dict[str, Any]:
+    async def app_get_status() -> dict[str, Any]:
         """Check if Altium Designer is running and get status information.
 
         Returns information about the Altium Designer process including:
@@ -77,7 +77,7 @@ def register_application_tools(mcp):
         return bridge.get_altium_status()
 
     @mcp.tool()
-    async def attach_to_altium() -> dict[str, Any]:
+    async def app_attach() -> dict[str, Any]:
         """Connect to a running Altium Designer instance.
 
         This verifies Altium is running and the polling script is responding.
@@ -107,7 +107,7 @@ def register_application_tools(mcp):
             }
 
     @mcp.tool()
-    async def save_all() -> dict[str, Any]:
+    async def app_save_all() -> dict[str, Any]:
         """Flush every dirty Altium document to disk.
 
         Mutation tools (pcb_place_tracks, move_component, modify_objects, ...)
@@ -129,7 +129,7 @@ def register_application_tools(mcp):
         return result
 
     @mcp.tool()
-    async def detach_from_altium() -> dict[str, Any]:
+    async def app_detach() -> dict[str, Any]:
         """Stop the Altium MCP polling loop. CALL THIS WHEN YOU'RE FINISHED.
 
         While the eda-agent MCP server is connected, a keep-alive thread pings
@@ -164,7 +164,7 @@ def register_application_tools(mcp):
         }
 
     @mcp.tool()
-    async def ping_altium() -> dict[str, Any]:
+    async def app_ping() -> dict[str, Any]:
         """Test if the Altium script is responding and report script version.
 
         Verifies that:
@@ -244,7 +244,76 @@ def register_application_tools(mcp):
         }
 
     @mcp.tool()
-    async def create_document(
+    async def app_get_report() -> dict[str, Any]:
+        """Report the health of the MCP bridge, workspace, and Altium link.
+
+        One call to diagnose the plumbing without touching the design:
+        package version, the script version on disk vs. what Altium has
+        compiled, whether Altium is up, the live IPC round-trip time, the
+        workspace location, and how many request/response/stop files are
+        sitting in it (a backlog of stale request_*.json usually means a
+        dead or wedged poller).
+
+        Returns:
+            Dictionary with mcp_server_version, bundled_script_version,
+            altium_running, altium_script_version, version_match,
+            round_trip_ms (None if Altium is down), workspace_dir,
+            workspace_exists, and a file_counts breakdown.
+        """
+        import time
+        from ..config import get_config
+
+        bridge = get_bridge()
+        ws = get_config().workspace_dir
+        ws_exists = ws.exists()
+
+        counts = {"request": 0, "response": 0, "progress": 0, "stop": 0, "other": 0}
+        if ws_exists:
+            try:
+                for entry in ws.iterdir():
+                    if not entry.is_file():
+                        continue
+                    n = entry.name
+                    if n.startswith("request_"):
+                        counts["request"] += 1
+                    elif n.startswith("response_"):
+                        counts["response"] += 1
+                    elif n.startswith("progress_"):
+                        counts["progress"] += 1
+                    elif n == "stop":
+                        counts["stop"] += 1
+                    else:
+                        counts["other"] += 1
+            except OSError:
+                pass
+
+        bundled = _bundled_script_version()
+        running = bridge.is_altium_running()
+        altium_ver: Optional[str] = None
+        match = False
+        round_trip_ms: Optional[float] = None
+        if running:
+            start = time.perf_counter()
+            ping = bridge.ping_with_version()
+            if ping is not None:
+                round_trip_ms = round((time.perf_counter() - start) * 1000.0, 1)
+                altium_ver = ping.get("script_version") or ""
+                match = bundled is not None and altium_ver == bundled
+
+        return {
+            "mcp_server_version": _mcp_server_version,
+            "bundled_script_version": bundled,
+            "altium_running": running,
+            "altium_script_version": altium_ver,
+            "version_match": match,
+            "round_trip_ms": round_trip_ms,
+            "workspace_dir": str(ws),
+            "workspace_exists": ws_exists,
+            "file_counts": counts,
+        }
+
+    @mcp.tool()
+    async def app_create_document(
         kind: str,
         file_path: str,
         name: Optional[str] = None,
@@ -284,7 +353,7 @@ def register_application_tools(mcp):
         return result
 
     @mcp.tool()
-    async def get_open_documents() -> list[dict[str, Any]]:
+    async def app_list_documents() -> list[dict[str, Any]]:
         """List all documents known to the current Altium workspace.
 
         Returns both project members and any free documents. Each entry
@@ -308,7 +377,7 @@ def register_application_tools(mcp):
         return result
 
     @mcp.tool()
-    async def diag_workspace(pattern: str = "request_*.json") -> dict[str, Any]:
+    async def app_diag_workspace(pattern: str = "request_*.json") -> dict[str, Any]:
         """Diagnostic: enumerate workspace files via Altium's FindFiles helper.
 
         Reports workspace_dir, the pattern used, match_count and the first
@@ -323,7 +392,7 @@ def register_application_tools(mcp):
         )
 
     @mcp.tool()
-    async def get_active_document() -> dict[str, Any]:
+    async def app_get_active_document() -> dict[str, Any]:
         """Get information about the currently active (focused) document.
 
         Returns:
@@ -339,7 +408,7 @@ def register_application_tools(mcp):
         return result
 
     @mcp.tool()
-    async def set_active_document(file_path: str) -> dict[str, Any]:
+    async def app_set_active_document(file_path: str) -> dict[str, Any]:
         """Set a specific document as the active (focused) document.
 
         Args:
@@ -360,7 +429,7 @@ def register_application_tools(mcp):
             return {"success": True, "file_path": file_path}
 
     @mcp.tool()
-    async def get_altium_version() -> dict[str, Any]:
+    async def app_get_version() -> dict[str, Any]:
         """Get the version of Altium Designer.
 
         Uses Client.GetProductVersion internally. If that API is unavailable
@@ -381,7 +450,7 @@ def register_application_tools(mcp):
     # ------------------------------------------------------------------
 
     @mcp.tool()
-    async def get_preferences() -> dict[str, Any]:
+    async def app_get_preferences() -> dict[str, Any]:
         """Get key Altium Designer preferences.
 
         Returns PCB preferences (snap grid, display unit) from the active board
@@ -397,7 +466,7 @@ def register_application_tools(mcp):
         return result
 
     @mcp.tool()
-    async def execute_menu(menu_path: str) -> dict[str, Any]:
+    async def app_run_menu(menu_path: str) -> dict[str, Any]:
         """Execute a menu command by its path.
 
         Supports common menu paths which are mapped to internal processes:
@@ -427,7 +496,7 @@ def register_application_tools(mcp):
         return result or {"success": True, "menu_path": menu_path}
 
     @mcp.tool()
-    async def set_intent(intent: str) -> dict[str, Any]:
+    async def app_set_intent(intent: str) -> dict[str, Any]:
         """Tell the dashboard what high-level task the agent is working on.
 
         The text is written to ``workspace/intent.txt`` where the web
@@ -470,7 +539,7 @@ def register_application_tools(mcp):
         return {"ok": True, "intent": text}
 
     @mcp.tool()
-    async def get_clipboard_text() -> dict[str, Any]:
+    async def app_get_clipboard() -> dict[str, Any]:
         """Get text content from the Windows clipboard.
 
         Returns whatever text is currently on the clipboard, which can be

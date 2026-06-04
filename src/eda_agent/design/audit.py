@@ -4,7 +4,7 @@
 
 Slice C.2 scope: visual layout checks on the active schematic. Reads the
 parts, wires, and power ports off each SchDoc via the generic
-`query_objects` primitive and computes three violation classes:
+`obj_query` primitive and computes three violation classes:
 
   1. Component-overlap            , bounding boxes intersect.
   2. Wire-through-component       , a wire segment crosses a component
@@ -15,7 +15,7 @@ parts, wires, and power ports off each SchDoc via the generic
 
 The report is LLM-readable: each violation carries enough geometry for
 the planner to revise the layout (target refdes / segment / centre /
-cluster members). No Altium round-trip beyond `query_objects`; all
+cluster members). No Altium round-trip beyond `obj_query`; all
 intelligence lives Python-side.
 
 Property-name uncertainty: as of this slice the Pascal `GetSchProperty`
@@ -309,7 +309,7 @@ def _list_sheets(bridge: Any, project_path: Optional[str]) -> list[str]:
         params["project_path"] = project_path
     try:
         # Pascal dispatcher exposes this as 'get_documents' (the Python
-        # MCP tool 'get_project_documents' wraps it). Using the wrong
+        # MCP tool 'proj_list_documents' wraps it). Using the wrong
         # action name surfaces as an UNKNOWN_ACTION error in the
         # activity feed.
         result = bridge.send_command("project.get_documents", params)

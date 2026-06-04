@@ -141,7 +141,7 @@ class TestSimToolsOrchestration:
                 return decorator
 
         sim_mod.register_sim_tools(DummyMcp())
-        result = await captured["sch_get_simulation_readiness"]()
+        result = await captured["sim_get_readiness"]()
 
         assert result["ready_count"] == 1
         assert result["needs_file_count"] == 1
@@ -149,43 +149,6 @@ class TestSimToolsOrchestration:
         assert len(guidance["search_hints"]) == 1
         assert len(guidance["primitive_hints"]) == 1
         assert guidance["search_hints"][0]["designator"] == "U1"
-
-    @pytest.mark.asyncio
-    async def test_attach_primitive_passes_only_nonempty(self, monkeypatch):
-        sent: dict = {}
-
-        class FakeBridge:
-            async def send_command_async(self, command, params=None, timeout=None):
-                sent["command"] = command
-                sent["params"] = params
-                return {"success": True}
-
-        monkeypatch.setattr(
-            "eda_agent.tools.sim.get_bridge", lambda: FakeBridge()
-        )
-
-        from eda_agent.tools import sim as sim_mod
-
-        captured = {}
-
-        class DummyMcp:
-            def tool(self):
-                def decorator(fn):
-                    captured[fn.__name__] = fn
-                    return fn
-                return decorator
-
-        sim_mod.register_sim_tools(DummyMcp())
-        await captured["sch_attach_spice_primitive"](
-            designator="R5", primitive="R", value="4.7k"
-        )
-        assert sent["command"] == "generic.attach_spice_primitive"
-        assert sent["params"]["designator"] == "R5"
-        assert sent["params"]["primitive"] == "R"
-        assert sent["params"]["value"] == "4.7k"
-        # Empty optional fields shouldn't leak through as empty strings
-        assert "spice_model" not in sent["params"]
-        assert "sim_kind" not in sent["params"]
 
     @pytest.mark.asyncio
     async def test_attach_model_requires_model_name(self, monkeypatch):
@@ -213,7 +176,7 @@ class TestSimToolsOrchestration:
                 return decorator
 
         sim_mod.register_sim_tools(DummyMcp())
-        await captured["sch_attach_spice_model"](
+        await captured["sim_attach_model"](
             designator="U3",
             file_path=r"C:\models\TL072.cir",
             model_name="TL072",

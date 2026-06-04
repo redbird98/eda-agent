@@ -5,7 +5,7 @@
 Lying-docstring bugs (caught in cron iteration #76) take this shape::
 
     @mcp.tool()
-    async def run_erc():
+    async def proj_run_erc():
         '''Compile and run ERC.
 
         Use ``get_erc_violations()`` afterwards to read the results.

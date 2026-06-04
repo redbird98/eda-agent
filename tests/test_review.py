@@ -287,7 +287,7 @@ class TestDesignReviewSnapshotOrchestration:
                 return decorator
 
         review_mod.register_review_tools(DummyMcp())
-        checklist = captured["datasheet_checklist"]
+        checklist = captured["design_datasheet_checklist"]
         result = await checklist()
         assert "datasheet_rules" in result
         assert result["datasheet_rules"] == DATASHEET_RULES

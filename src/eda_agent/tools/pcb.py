@@ -42,7 +42,7 @@ def register_pcb_tools(mcp):
         When several PcbDocs are open, the other PCB tools
         (`pcb_get_components`, `pcb_delete_object`, `pcb_delete_net`,
         `pcb_plan_placement`, `design_visual_review`, …) operate on the
-        *focused* board — and `set_active_document` does NOT reliably set
+        *focused* board — and `app_set_active_document` does NOT reliably set
         that for a PcbDoc. Call this first to point them all at the board
         you mean. (`pcb_place_component(s)` already accept `board_path`
         directly.)
@@ -250,7 +250,7 @@ def register_pcb_tools(mcp):
 
         Use ``primitive1.net`` and ``primitive2.net`` to spot the
         nets in conflict; use ``x_mils`` / ``y_mils`` to drive
-        ``cross_probe`` or the dashboard's Drawing tab to the site.
+        ``proj_cross_probe`` or the dashboard's Drawing tab to the site.
 
         Returns:
             Dict with ``violation_count`` (full count even if > 100)
@@ -278,46 +278,6 @@ def register_pcb_tools(mcp):
         bridge = get_bridge()
         result = await bridge.send_command_async("pcb.get_components", {})
         return tag_response(result, components=result, context="pcb_get_components")
-
-    @mcp.tool()
-    async def pcb_move_component(
-        designator: str,
-        x: int | None = None,
-        y: int | None = None,
-        rotation: float | None = None,
-    ) -> dict[str, Any]:
-        """Move and/or rotate ONE PCB component by its designator.
-
-        IMPORTANT, if you need to reposition more than one component,
-        use `pcb_move_components` (batch) instead. Looping this tool is
-        the single biggest wall-time cost: each call is a full LLM
-        round-trip, but the batch version does N moves in one turn.
-
-        Sets the absolute position/rotation. Only provided parameters are
-        changed; omitted parameters keep their current values.
-
-        Args:
-            designator: Component reference designator (e.g., "U1", "R5")
-            x: New X position in mils (optional)
-            y: New Y position in mils (optional)
-            rotation: New rotation angle in degrees (optional, 0-360)
-
-        Returns:
-            Dictionary with final designator, x, y, rotation values
-        """
-        bridge = get_bridge()
-        params: dict[str, Any] = {"designator": designator}
-        if x is not None:
-            params["x"] = str(x)
-        if y is not None:
-            params["y"] = str(y)
-        if rotation is not None:
-            params["rotation"] = str(rotation)
-        result = await bridge.send_command_async("pcb.move_component", params)
-        hint = BulkHintTracker.record_and_hint("pcb_move_component")
-        if hint and isinstance(result, dict):
-            result["_hint_bulk"] = hint
-        return result
 
     @mcp.tool()
     async def pcb_move_components(
@@ -561,6 +521,260 @@ def register_pcb_tools(mcp):
                 "tooling_holes": tooling_holes,
                 "fiducials": fiducials,
             },
+        )
+
+    @mcp.tool()
+    async def pcb_delete_invalid_objects() -> dict[str, Any]:
+        """Remove degenerate primitives from the active PCB.
+
+        Deletes zero-length tracks and zero-area regions (board hygiene that
+        accumulates from edits and imports). Returns the count removed.
+
+        Returns:
+            {"removed": N}.
+        """
+        bridge = get_bridge()
+        return await bridge.send_command_async("pcb.delete_invalid_objects", {})
+
+    @mcp.tool()
+    async def pcb_audit_pad_center_connected() -> dict[str, Any]:
+        """Find pads whose center has no copper entering it (acid-pad check).
+
+        For every netted pad, checks that a track / arc / via on the same net
+        reaches the pad centroid. A pad connected only at its edge (an "acid
+        pad") can fail in fab. Read-only; reports offenders with designator,
+        pad, net, and location.
+
+        Returns:
+            {"checked": N, "offenders": M, "items": [...]}.
+        """
+        bridge = get_bridge()
+        return await bridge.send_command_async("pcb.audit_pad_center_connected", {})
+
+    @mcp.tool()
+    async def pcb_auto_size_board_outline(margin_mils: int = 100) -> dict[str, Any]:
+        """Fit the board outline around the embedded-board array(s) plus a margin.
+
+        Use after `pcb_panelize` (or any embedded-board layout) to size the
+        panel outline to its content. Unions the embedded boards' extents, adds
+        `margin_mils` on every side, and converts the result to the board
+        outline.
+
+        Args:
+            margin_mils: border added on each side (default 100).
+
+        Returns:
+            {"width_mils", "height_mils"}.
+        """
+        bridge = get_bridge()
+        return await bridge.send_command_async(
+            "pcb.auto_size_board_outline", {"margin_mils": margin_mils}
+        )
+
+    @mcp.tool()
+    async def pcb_normalize_vias() -> dict[str, Any]:
+        """Snap every via to its dominant routing-via-style rule.
+
+        Sets each via's diameter and hole to the rule's preferred values, so a
+        board with mixed/hand-edited via sizes conforms to the design rules.
+
+        Returns:
+            {"checked": N, "changed": M}.
+        """
+        bridge = get_bridge()
+        return await bridge.send_command_async("pcb.normalize_vias", {})
+
+    @mcp.tool()
+    async def pcb_copy_designators_to_mech(layer: str = "Mechanical1") -> dict[str, Any]:
+        """Copy each component designator onto a mechanical layer (assembly prep).
+
+        Places a `.Designator` special-string text on `layer` over every
+        component, for an assembly drawing that survives silkscreen edits.
+
+        Args:
+            layer: target mechanical layer (default Mechanical1).
+
+        Returns:
+            {"copied": N, "layer": "..."}.
+        """
+        bridge = get_bridge()
+        return await bridge.send_command_async(
+            "pcb.copy_designators_to_mech", {"layer": layer}
+        )
+
+    @mcp.tool()
+    async def pcb_trim_extend_track(
+        from_x: int,
+        from_y: int,
+        to_x: int,
+        to_y: int,
+        tolerance_mils: int = 5,
+    ) -> dict[str, Any]:
+        """Trim or extend one track endpoint along the track's own slope.
+
+        Finds the track endpoint nearest (from_x, from_y), then slides it to
+        the perpendicular projection of (to_x, to_y) onto that track's line.
+        The track stays collinear (no bend introduced) and the opposite end
+        stays put, so this cleanly lengthens a track up to a target or pulls
+        it back. All coordinates in mils.
+
+        Args:
+            from_x, from_y: Picks which endpoint moves (nearest one wins).
+            to_x, to_y: Target the moving end is projected toward.
+            tolerance_mils: How close (from_x, from_y) must be to a real
+                endpoint (default 5).
+
+        Returns:
+            {"moved_end", "old_x", "old_y", "new_x", "new_y", "layer"}.
+        """
+        bridge = get_bridge()
+        return await bridge.send_command_async(
+            "pcb.trim_extend_track",
+            {
+                "from_x": str(from_x),
+                "from_y": str(from_y),
+                "to_x": str(to_x),
+                "to_y": str(to_y),
+                "tolerance_mils": str(tolerance_mils),
+            },
+        )
+
+    @mcp.tool()
+    async def pcb_cleanup_tracks(
+        mode: str = "slivers",
+        min_length_mils: int = 1,
+    ) -> dict[str, Any]:
+        """Tidy stray track geometry: delete slivers and/or merge collinear runs.
+
+        Modes:
+        - "slivers" (default): delete every track shorter than
+          min_length_mils. Catches the zero/near-zero stubs left behind by
+          editing.
+        - "merge": join two collinear, same-layer, same-width, same-net tracks
+          that meet end to end into a single track. The merge only fires when
+          the shared point is a clean degree-2 junction (exactly those two
+          track ends, with no via, pad, arc, or third track present), so it is
+          safe to run on routed copper without breaking connectivity.
+        - "both": slivers pass, then merge pass.
+
+        Args:
+            mode: "slivers", "merge", or "both" (default "slivers").
+            min_length_mils: Sliver threshold (default 1).
+
+        Returns:
+            {"slivers_deleted", "merged", "mode"}.
+        """
+        bridge = get_bridge()
+        return await bridge.send_command_async(
+            "pcb.cleanup_tracks",
+            {"mode": mode, "min_length_mils": str(min_length_mils)},
+            timeout=120.0,
+        )
+
+    @mcp.tool()
+    async def pcb_place_thieving_pads(
+        layer: str = "TopLayer",
+        pad_size_mils: int = 20,
+        pitch_mils: int = 50,
+        clearance_mils: int = 15,
+        margin_mils: int = 100,
+    ) -> dict[str, Any]:
+        """Fill bare copper area with a grid of isolated thieving pads.
+
+        Drops a regular grid of small round pads on `layer`, inside the board
+        outline minus `margin_mils`. A grid point is skipped whenever any
+        existing primitive (track, arc, via, pad, fill, region, polygon, or
+        component body) sits within half-pad + clearance of it, so pads land
+        only in genuinely empty regions. Pads carry no net. Evens out plating
+        current on sparse boards. Capped at 5000 pads per run.
+
+        Args:
+            layer: Copper layer to populate (default TopLayer).
+            pad_size_mils: Pad diameter (default 20).
+            pitch_mils: Grid spacing (default 50).
+            clearance_mils: Keep-out from existing copper (default 15).
+            margin_mils: Inset from board edge (default 100).
+
+        Returns:
+            {"placed", "scanned", "layer"}.
+        """
+        bridge = get_bridge()
+        return await bridge.send_command_async(
+            "pcb.place_thieving_pads",
+            {
+                "layer": layer,
+                "pad_size_mils": str(pad_size_mils),
+                "pitch_mils": str(pitch_mils),
+                "clearance_mils": str(clearance_mils),
+                "margin_mils": str(margin_mils),
+            },
+            timeout=180.0,
+        )
+
+    @mcp.tool()
+    async def pcb_move_tracks_to_layer(
+        net_name: str,
+        target_layer: str,
+        via_size_mils: int = 50,
+        via_hole_mils: int = 28,
+    ) -> dict[str, Any]:
+        """Move all tracks of a net to one layer, adding vias where needed.
+
+        Relayers every track of `net_name` onto `target_layer`, then drops a
+        via at each same-net single-layer (SMD) pad that is NOT on the target
+        layer, since that pad can now only connect through a layer change.
+        Multilayer (through-hole) pads need no via. This flattens a net's
+        routing onto one layer, so use it deliberately.
+
+        Args:
+            net_name: Net whose tracks move.
+            target_layer: Destination signal layer (e.g. "BottomLayer").
+            via_size_mils: Via pad diameter for added vias (default 50).
+            via_hole_mils: Via hole diameter (default 28).
+
+        Returns:
+            {"net", "target_layer", "moved", "vias_added"}.
+        """
+        bridge = get_bridge()
+        return await bridge.send_command_async(
+            "pcb.move_tracks_to_layer",
+            {
+                "net_name": net_name,
+                "target_layer": target_layer,
+                "via_size_mils": str(via_size_mils),
+                "via_hole_mils": str(via_hole_mils),
+            },
+            timeout=120.0,
+        )
+
+    @mcp.tool()
+    async def pcb_bevel_polygon_corners(
+        index: int = 0,
+        net_name: str = "",
+        bevel_mils: int = 25,
+    ) -> dict[str, Any]:
+        """Chamfer the corners of a copper polygon pour.
+
+        Replaces each sharp vertex with two points set back along its edges by
+        bevel_mils (auto-clamped so neighbouring bevels never overlap), giving
+        every corner a straight 45-style cut. Only straight-outline polygons
+        are handled, a polygon containing arc segments is left untouched. The
+        polygon is repoured after the edit.
+
+        Args:
+            index: Which polygon to bevel (0-based, in board iteration order).
+            net_name: If set, count only polygons on this net when applying
+                index.
+            bevel_mils: Set-back distance per edge (default 25).
+
+        Returns:
+            {"beveled", "index", "orig_vertices", "new_vertices", "bevel_mils"},
+            or an error code (NOT_FOUND / BAD_POLYGON / HAS_ARC).
+        """
+        bridge = get_bridge()
+        return await bridge.send_command_async(
+            "pcb.bevel_polygon_corners",
+            {"index": str(index), "net_name": net_name, "bevel_mils": str(bevel_mils)},
         )
 
     @mcp.tool()
@@ -2064,54 +2278,6 @@ def register_pcb_tools(mcp):
         return result
 
     @mcp.tool()
-    async def pcb_place_track(
-        x1: int,
-        y1: int,
-        x2: int,
-        y2: int,
-        width: int = 10,
-        layer: str = "TopLayer",
-        net_name: str = "",
-    ) -> dict[str, Any]:
-        """Place ONE track segment on the active PCB.
-
-        IMPORTANT: If you are about to place more than one segment
-        (multi-segment manhattan routes, a whole net, a batch of
-        traces), use `pcb_place_tracks` instead, it takes a list of
-        segments and runs them in a single IPC round-trip, which is
-        dramatically faster than calling this tool repeatedly.
-
-        Args:
-            x1: Start X position in mils
-            y1: Start Y position in mils
-            x2: End X position in mils
-            y2: End Y position in mils
-            width: Track width in mils (default 10)
-            layer: PCB layer name (default "TopLayer"). Options:
-                "TopLayer", "BottomLayer", "MidLayer1"-"MidLayer30"
-            net_name: Net name to assign (optional, empty = no net)
-
-        Returns:
-            Dictionary with placed track coordinates, width, and layer
-        """
-        bridge = get_bridge()
-        params: dict[str, Any] = {
-            "x1": str(x1),
-            "y1": str(y1),
-            "x2": str(x2),
-            "y2": str(y2),
-            "width": str(width),
-            "layer": layer,
-        }
-        if net_name:
-            params["net_name"] = net_name
-        result = await bridge.send_command_async("pcb.place_track", params)
-        hint = BulkHintTracker.record_and_hint("pcb_place_track")
-        if hint and isinstance(result, dict):
-            result["_hint_bulk"] = hint
-        return result
-
-    @mcp.tool()
     async def pcb_place_tracks(
         tracks: list[dict[str, Any]],
     ) -> dict[str, Any]:
@@ -2640,7 +2806,7 @@ def register_pcb_tools(mcp):
                 "region" - Region / split-plane
                 "component" - Placed component
                 (polygon/region/component/arc are matched by bounding-box
-                centre; for bulk/filter-based deletes use ``delete_objects``)
+                centre; for bulk/filter-based deletes use ``obj_delete``)
 
         Returns:
             Dictionary with deleted status, object_type, and distance_mils
@@ -2751,95 +2917,6 @@ def register_pcb_tools(mcp):
         bridge = get_bridge()
         result = await bridge.send_command_async("pcb.get_polygons", {})
         return result
-
-    @mcp.tool()
-    async def pcb_calc_track_current_capacity(
-        width_mils: float,
-        copper_oz: float = 1.0,
-        layer: str = "external",
-        length_mils: float = 0.0,
-    ) -> dict[str, Any]:
-        """IPC-2221 current-carrying capacity for a PCB track.
-
-        Pure math, no Altium hit -- safe to call without an attached
-        session. Returns the current the track can sustain at each
-        of several temperature rises (1, 5, 10, 20, 30 °C above
-        ambient), plus DC resistance if a length is supplied.
-
-        Formula (IPC-2221, also IPC-2152's curve-fit predecessor):
-          ``I = k × (ΔT)^0.44 × (h × w)^0.725``
-        where ``h`` and ``w`` are in mils, ``ΔT`` in °C, and:
-          ``k = 0.048`` for external layers (top, bottom)
-          ``k = 0.024`` for internal layers (mid)
-        Internal-layer derating is the dominant correction; running a
-        signal that draws 5 A on TopLayer might be fine but on an
-        inner plane the same width only handles ~3 A at the same
-        ΔT because heat dissipates more slowly.
-
-        Copper thickness conversion: 1 oz/ft² ≈ 1.378 mils. So
-        ``copper_oz=1.0`` → ``h = 1.378 mils``, ``copper_oz=2.0`` →
-        ``h = 2.756 mils``.
-
-        Resistance: ``R = ρ × L / (h × w)`` with ρ = 6.7 × 10⁻⁷ Ω-mil
-        (annealed copper, 25 °C). Multiply current × resistance to
-        get voltage drop across the track.
-
-        Exposes the track-current math so the agent can apply it
-        across an entire power net after pulling track widths from
-        ``pcb_get_trace_lengths``.
-
-        Args:
-            width_mils: Track width in mils.
-            copper_oz: Copper weight in oz/ft². Common values:
-                0.5 oz (HDI inner), 1.0 oz (standard), 2.0 oz (power
-                planes), 3.0 oz (heavy-current).
-            layer: ``"external"`` (top / bottom) or ``"internal"``
-                (mid / inner planes). Defaults to external.
-            length_mils: If > 0, also returns DC resistance and
-                voltage drop at each temperature rise.
-
-        Returns:
-            Dict with:
-              - ``width_mils``, ``copper_oz``, ``thickness_mils``, ``layer``
-              - ``current_amps``: dict, keys ``1c``, ``5c``, ``10c``,
-                ``20c``, ``30c``
-              - ``resistance_mohm`` (only if ``length_mils`` > 0)
-              - ``voltage_drop_mv`` (only if ``length_mils`` > 0, dict
-                keyed the same as ``current_amps``)
-        """
-        if width_mils <= 0:
-            return {"ok": False, "reason": "width_mils must be > 0"}
-        if copper_oz <= 0:
-            return {"ok": False, "reason": "copper_oz must be > 0"}
-        layer_norm = layer.strip().lower()
-        if layer_norm not in ("external", "internal"):
-            return {"ok": False,
-                    "reason": "layer must be 'external' or 'internal'"}
-
-        thickness_mils = copper_oz * 1.378
-        k = 0.024 if layer_norm == "internal" else 0.048
-        b = 0.44
-        c = 0.725
-        hw_c = (thickness_mils * width_mils) ** c
-
-        rises = (1, 5, 10, 20, 30)
-        current = {f"{t}c": round(k * (t ** b) * hw_c, 3) for t in rises}
-        out: dict[str, Any] = {
-            "ok": True,
-            "width_mils": width_mils,
-            "copper_oz": copper_oz,
-            "thickness_mils": round(thickness_mils, 3),
-            "layer": layer_norm,
-            "current_amps": current,
-        }
-        if length_mils > 0:
-            rho = 6.7e-7
-            r_ohm = rho * length_mils / (thickness_mils * width_mils)
-            out["resistance_mohm"] = round(r_ohm * 1000.0, 4)
-            out["voltage_drop_mv"] = {
-                k_: round(current[k_] * r_ohm * 1000.0, 3) for k_ in current
-            }
-        return out
 
     @mcp.tool()
     async def pcb_modify_polygon(
@@ -3124,116 +3201,26 @@ def register_pcb_tools(mcp):
         return result
 
     @mcp.tool()
-    async def pcb_place_component(
-        footprint: str,
-        library_path: str,
-        x: int,
-        y: int,
-        designator: str = "",
-        lib_reference: str = "",
-        comment: str = "",
-        rotation: float = 0,
-        layer: str = "TopLayer",
-        unique_id: str = "",
-        pad_nets: Optional[dict[str, str]] = None,
-        board_path: str = "",
-    ) -> dict[str, Any]:
-        """Place a footprint from a PcbLib directly onto the board — a
-        scriptable substitute for ECO / *Design ▸ Update PCB Document*.
-
-        To place MANY footprints, prefer the batch `pcb_place_components`
-        (one IPC round-trip, board resolved once) over looping this.
-
-        ``board_path``: when several PcbDocs are open, set this to the
-        absolute .PcbDoc path to target a SPECIFIC board — otherwise the
-        focused/current board is used, which may be the wrong one.
-
-        Why this exists: Altium's ECO is not dialog-free (it always raises a
-        modal), so for unattended board population this drops a footprint
-        straight onto the board. With ``unique_id`` + ``pad_nets`` it can
-        produce a **synced, connected** part; without them it is geometry
-        only.
-
-        Two modes:
-
-        * **Geometry only** (no ``unique_id``/``pad_nets``): places the
-          footprint with a designator. No schematic↔PCB link, no pad nets —
-          pads are unconnected (DRC flags them), and a later real ECO treats
-          the part as "extra in PCB". Fine for artwork, panelization,
-          fiducials, mechanical/placement studies, or testing.
-        * **Synced** (pass ``unique_id`` + ``pad_nets``): also stamps the
-          schematic component's UniqueId onto the PCB part (so a later ECO
-          sees it as MATCHED, not extra) and creates/assigns each pad's net
-          (so the board has real connectivity — ratsnest + DRC). This is the
-          programmatic-ECO path: populate a board from a compiled schematic
-          with NO dialog. Read ``unique_id`` from the schematic component
-          (e.g. ``query_objects(eSchComponent, "Designator.Text,UniqueId")``)
-          and ``pad_nets`` from the compiled netlist
-          (``get_connectivity_many`` → pad number → net).
-
-        Footprints come from a **.PcbLib**, not the .SchLib.
-
-        Args:
-            footprint: Footprint name inside the PcbLib (e.g. "SOIC-8").
-            library_path: Absolute path to the .PcbLib holding it.
-            x, y: Placement position in mils.
-            designator: Reference designator to assign (e.g. "U1"). Match
-                the schematic for the netlist join.
-            lib_reference: Source library reference; defaults to
-                ``footprint`` when omitted.
-            comment: Comment / value text (optional).
-            rotation: Orientation in degrees (default 0).
-            layer: Placement layer (default "TopLayer"; "BottomLayer"
-                for bottom-side).
-            unique_id: The schematic component's UniqueId, to link this PCB
-                part to its schematic counterpart (so a later ECO matches it
-                instead of flagging it as extra).
-            pad_nets: ``{pad_name: net_name}`` (e.g. ``{"1": "VCC",
-                "2": "GND"}``). Each named net is created on the board if
-                missing and assigned to that pad, giving real connectivity.
-
-        Returns:
-            Dict with ``placed``, ``footprint``, ``designator``, ``x``,
-            ``y``, ``rotation``, ``layer``, ``linked`` (UniqueId stamped),
-            ``nets_assigned`` (pad count wired) — or an error.
-        """
-        pad_nets_str = ""
-        if pad_nets:
-            pad_nets_str = "|".join(
-                f"{str(k).strip()}={str(v).strip()}"
-                for k, v in pad_nets.items()
-                if str(k).strip() and str(v).strip()
-            )
-        bridge = get_bridge()
-        return await bridge.send_command_async(
-            "pcb.place_component",
-            {
-                "footprint": footprint,
-                "library_path": library_path,
-                "lib_reference": lib_reference,
-                "designator": designator,
-                "comment": comment,
-                "x": str(int(x)),
-                "y": str(int(y)),
-                "rotation": str(rotation),
-                "layer": layer,
-                "unique_id": unique_id,
-                "pad_nets": pad_nets_str,
-                "board_path": board_path,
-            },
-        )
-
-    @mcp.tool()
     async def pcb_place_components(
         placements: list[dict[str, Any]],
         board_path: str = "",
     ) -> dict[str, Any]:
-        """Place MANY footprints from PcbLibs onto the board in ONE call.
+        """Place one or many footprints from PcbLibs onto the board in ONE call.
 
-        PREFER THIS over looping `pcb_place_component` — it resolves the
-        board once and places every footprint in a single Altium
-        transaction (one IPC round-trip instead of N). Same synced-mode
-        capability per component (UniqueId link + pad-net creation).
+        The scriptable substitute for ECO / *Design ▸ Update PCB Document*:
+        Altium's ECO always raises a modal, so for unattended population this
+        drops footprints straight onto the board. It resolves the board once
+        and places every footprint in a single Altium transaction (one IPC
+        round-trip). Pass a single-element list to place just one.
+
+        Two modes per component: **geometry only** (omit ``unique_id`` /
+        ``pad_nets``) leaves pads unconnected (DRC flags them), good for
+        artwork / panelization / fiducials / placement studies; **synced**
+        (pass both) stamps the schematic UniqueId so a later ECO matches the
+        part and creates+assigns each pad's net for real connectivity. Read
+        ``unique_id`` via ``query_objects(eSchComponent,
+        "Designator.Text,UniqueId")`` and ``pad_nets`` from the compiled
+        netlist (``proj_get_connectivity_many`` → pad number → net).
 
         ``board_path``: target a specific .PcbDoc when several are open
         (resolved once for the whole batch). Otherwise the focused board
@@ -3244,8 +3231,8 @@ def register_pcb_tools(mcp):
                 footprint (required), library_path (required, .PcbLib),
                 x, y (mils), designator, lib_reference, comment,
                 rotation, layer, unique_id, and pad_nets
-                (``{pad_name: net_name}``). See `pcb_place_component` for
-                the meaning of each (geometry-only vs synced).
+                (``{pad_name: net_name}``); omit unique_id/pad_nets for
+                geometry-only, include them for a synced placement.
             board_path: Absolute .PcbDoc path to place onto (optional).
 
         Returns:

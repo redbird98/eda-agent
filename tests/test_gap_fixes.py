@@ -122,7 +122,7 @@ class _RecordingBridge:
 def _place_tool(monkeypatch, bridge):
     from eda_agent.tools import generic as g
     monkeypatch.setattr(g, "get_bridge", lambda: bridge)
-    return _capture(g, "register_generic_tools")["place_sch_components_from_library"]
+    return _capture(g, "register_generic_tools")["sch_place_components"]
 
 
 @pytest.mark.asyncio

@@ -58,19 +58,16 @@ def _capture(module, register_fn_name: str):
 
 
 class TestBulkHintEquivalents:
-    def test_every_new_singular_has_a_bulk_nudge(self):
-        # The 6 new bulk tools each need their singular wired into the tracker.
-        assert "create_object" in BulkHintTracker.BULK_EQUIVALENTS
-        assert "delete_objects" in BulkHintTracker.BULK_EQUIVALENTS
-        assert "place_wire" in BulkHintTracker.BULK_EQUIVALENTS
-        assert (
-            "place_sch_component_from_library"
-            in BulkHintTracker.BULK_EQUIVALENTS
-        )
-        assert (
-            "sch_attach_spice_primitive" in BulkHintTracker.BULK_EQUIVALENTS
-        )
-        assert "lib_add_pin" in BulkHintTracker.BULK_EQUIVALENTS
+    def test_every_tracked_singular_has_a_bulk_nudge(self):
+        # The tracker nudges the generic-CRUD tools and the expensive read
+        # tools whose singular form is still exposed. (The convenience
+        # singular wrappers like place_wire / lib_add_pin were removed in
+        # favour of their bulk-only variants, so they're no longer tracked.)
+        assert "obj_create" in BulkHintTracker.BULK_EQUIVALENTS
+        assert "obj_delete" in BulkHintTracker.BULK_EQUIVALENTS
+        assert "obj_modify" in BulkHintTracker.BULK_EQUIVALENTS
+        assert "proj_get_connectivity" in BulkHintTracker.BULK_EQUIVALENTS
+        assert "proj_get_component_info" in BulkHintTracker.BULK_EQUIVALENTS
 
     def test_bulk_nudge_targets_are_valid(self):
         # Every nudged tool must point at a bulk equivalent whose name
@@ -91,7 +88,7 @@ class TestBatchCreate:
         sent = _install_fake_bridge(monkeypatch, "eda_agent.tools.generic")
         from eda_agent.tools import generic as g
         tools = _capture(g, "register_generic_tools")
-        await tools["batch_create"](operations=[
+        await tools["obj_batch_create"](operations=[
             {"object_type": "eNetLabel",
              "properties": "Text=VCC|Location.X=100|Location.Y=200"},
             {"object_type": "eNetLabel",
@@ -109,7 +106,7 @@ class TestBatchCreate:
         _install_fake_bridge(monkeypatch, "eda_agent.tools.generic")
         from eda_agent.tools import generic as g
         tools = _capture(g, "register_generic_tools")
-        result = await tools["batch_create"](operations=[])
+        result = await tools["obj_batch_create"](operations=[])
         assert "error" in result
 
     @pytest.mark.asyncio
@@ -117,7 +114,7 @@ class TestBatchCreate:
         sent = _install_fake_bridge(monkeypatch, "eda_agent.tools.generic")
         from eda_agent.tools import generic as g
         tools = _capture(g, "register_generic_tools")
-        await tools["batch_create"](operations=[
+        await tools["obj_batch_create"](operations=[
             {"object_type": "eJunction", "properties": "Location.X=1"},
             {"properties": "Text=orphan"},  # no object_type → drop
         ])
@@ -131,7 +128,7 @@ class TestBatchDelete:
         sent = _install_fake_bridge(monkeypatch, "eda_agent.tools.generic")
         from eda_agent.tools import generic as g
         tools = _capture(g, "register_generic_tools")
-        await tools["batch_delete"](operations=[
+        await tools["obj_batch_delete"](operations=[
             {"scope": "active_doc", "object_type": "eNoERC", "filter": ""},
             {"scope": "project", "object_type": "eJunction", "filter": ""},
         ])
@@ -148,7 +145,7 @@ class TestPlaceWires:
         sent = _install_fake_bridge(monkeypatch, "eda_agent.tools.generic")
         from eda_agent.tools import generic as g
         tools = _capture(g, "register_generic_tools")
-        await tools["place_wires"](wires=[
+        await tools["sch_place_wires"](wires=[
             {"x1": 100, "y1": 200, "x2": 300, "y2": 200},
             {"x1": 300, "y1": 200, "x2": 300, "y2": 400},
             {"x1": 300, "y1": 400, "x2": 600, "y2": 400},
@@ -165,7 +162,7 @@ class TestPlaceSchComponentsFromLibrary:
         sent = _install_fake_bridge(monkeypatch, "eda_agent.tools.generic")
         from eda_agent.tools import generic as g
         tools = _capture(g, "register_generic_tools")
-        await tools["place_sch_components_from_library"](placements=[
+        await tools["sch_place_components"](placements=[
             {"lib_reference": "Res1", "x": 1000, "y": 2000,
              "designator": "R1"},
             {"x": 0, "y": 0},  # no lib_reference → drop
@@ -186,7 +183,7 @@ class TestSchAttachSpicePrimitivesBulk:
         sent = _install_fake_bridge(monkeypatch, "eda_agent.tools.generic")
         from eda_agent.tools import generic as g
         tools = _capture(g, "register_generic_tools")
-        await tools["sch_attach_spice_primitives"](attachments=[
+        await tools["sim_attach_primitives"](attachments=[
             {"designator": "R1", "primitive": "R", "value": "10k"},
             {"designator": "C1", "primitive": "C"},
             {"designator": "", "primitive": "R"},  # no designator → drop

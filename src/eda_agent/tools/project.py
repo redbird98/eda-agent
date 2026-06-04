@@ -12,7 +12,7 @@ def register_project_tools(mcp):
     """Register project tools with the MCP server."""
 
     @mcp.tool()
-    async def create_project(
+    async def proj_create(
         project_path: str,
         project_type: str = "PCB",
     ) -> dict[str, Any]:
@@ -48,7 +48,7 @@ def register_project_tools(mcp):
         return result
 
     @mcp.tool()
-    async def open_project(project_path: str) -> dict[str, Any]:
+    async def proj_open(project_path: str) -> dict[str, Any]:
         """Open an existing Altium project.
 
         Args:
@@ -64,7 +64,7 @@ def register_project_tools(mcp):
         return result
 
     @mcp.tool()
-    async def save_project(project_path: Optional[str] = None) -> dict[str, Any]:
+    async def proj_save(project_path: Optional[str] = None) -> dict[str, Any]:
         """Save the current or specified project.
 
         Args:
@@ -81,7 +81,7 @@ def register_project_tools(mcp):
         return result
 
     @mcp.tool()
-    async def close_project(
+    async def proj_close(
         project_path: Optional[str] = None, save: bool = True
     ) -> dict[str, Any]:
         """Close a project.
@@ -101,7 +101,7 @@ def register_project_tools(mcp):
         return result
 
     @mcp.tool()
-    async def get_project_documents(
+    async def proj_list_documents(
         project_path: Optional[str] = None,
     ) -> list[dict[str, Any]]:
         """List all documents in a project.
@@ -123,7 +123,7 @@ def register_project_tools(mcp):
         return result
 
     @mcp.tool()
-    async def add_document_to_project(
+    async def proj_add_document(
         document_path: str, project_path: Optional[str] = None
     ) -> dict[str, Any]:
         """Add an existing document to a project.
@@ -143,7 +143,7 @@ def register_project_tools(mcp):
         return result
 
     @mcp.tool()
-    async def remove_document_from_project(
+    async def proj_remove_document(
         document_path: str, project_path: Optional[str] = None
     ) -> dict[str, Any]:
         """Remove a document from a project.
@@ -165,7 +165,7 @@ def register_project_tools(mcp):
         return result
 
     @mcp.tool()
-    async def get_project_parameters(
+    async def proj_get_parameters(
         project_path: Optional[str] = None,
     ) -> list[dict[str, Any]]:
         """Get all parameters defined at the project level.
@@ -184,7 +184,7 @@ def register_project_tools(mcp):
         return result
 
     @mcp.tool()
-    async def set_project_parameter(
+    async def proj_set_parameter(
         name: str, value: str, project_path: Optional[str] = None
     ) -> dict[str, Any]:
         """Set a project-level parameter.
@@ -206,13 +206,13 @@ def register_project_tools(mcp):
         return result
 
     @mcp.tool()
-    async def project_push_params_to_sheets() -> dict[str, Any]:
+    async def proj_push_parameters() -> dict[str, Any]:
         """Copy all project-level parameters onto each loaded schematic sheet.
 
         Every project parameter is written as a document (sheet) parameter on
         each LOADED schematic in the focused project, so title blocks can
         reference project-wide values. Unloaded sheets are skipped -- call
-        ``load_project_sheets`` first to include every sheet.
+        ``proj_load_sheets`` first to include every sheet.
 
         Returns:
             Dict with param_count, sheets_updated, sheets_skipped_not_loaded,
@@ -224,7 +224,7 @@ def register_project_tools(mcp):
         )
 
     @mcp.tool()
-    async def get_nets(
+    async def proj_get_nets(
         component: str = "",
         net_name: str = "",
         project_path: Optional[str] = None,
@@ -252,7 +252,7 @@ def register_project_tools(mcp):
                 compile (~5-10 s on real designs). Use when you need
                 a guaranteed-fresh netlist (e.g., after the user
                 edited schematics in the UI). Pair with
-                `get_compile_freshness` to confirm no docs are dirty.
+                `proj_get_compile_freshness` to confirm no docs are dirty.
 
         Returns:
             Dict with "pins" and "count".
@@ -274,15 +274,103 @@ def register_project_tools(mcp):
         if project_path:
             params["project_path"] = project_path
         if force_recompile:
-            params["force_recompile"] = "true"
+            params["proj_force_recompile"] = "true"
         result = await bridge.send_command_async("project.get_nets", params)
-        hint = BulkHintTracker.record_and_hint("get_nets")
+        hint = BulkHintTracker.record_and_hint("proj_get_nets")
         if hint and isinstance(result, dict):
             result["_hint_bulk"] = hint
         return result
 
     @mcp.tool()
-    async def compile_project(project_path: Optional[str] = None) -> dict[str, Any]:
+    async def proj_export_netlist(
+        output_path: Optional[str] = None,
+        net_format: str = "pads",
+        project_path: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Write the compiled connectivity to a flat netlist file.
+
+        Pulls the full pin-net table once (the same data as get_nets) and
+        writes it as a standalone netlist that other tools can import. Two
+        formats:
+
+        - "pads": PADS-PCB ASCII, *NET* section with one *SIGNAL* block per
+          net listing its component.pin nodes. Widely importable.
+        - "tabular": one "component,pin,pin_name,net" CSV row per node, for
+          quick diffing or spreadsheet review.
+
+        Single-pin and unnamed nets are included so the file is a faithful
+        dump, not a routed-only view.
+
+        Args:
+            output_path: Destination file. Defaults to
+                workspace/netlist.<ext> if omitted.
+            net_format: "pads" (default) or "tabular".
+            project_path: Optional project path; uses active if omitted.
+
+        Returns:
+            Dictionary with output_path, net_format, net_count, node_count.
+        """
+        from pathlib import Path
+        from ..config import get_config
+
+        fmt = (net_format or "pads").strip().lower()
+        if fmt not in ("pads", "tabular"):
+            return {"success": False, "error": f"unknown net_format '{net_format}' (use 'pads' or 'tabular')"}
+
+        bridge = get_bridge()
+        params: dict[str, Any] = {"limit": "100000"}
+        if project_path:
+            params["project_path"] = project_path
+        data = await bridge.send_command_async("project.get_nets", params)
+        pins = data.get("pins", []) if isinstance(data, dict) else []
+
+        nodes: list[tuple[str, str, str, str]] = []
+        for p in pins:
+            comp = str(p.get("component", "")).strip()
+            pin = str(p.get("pin", "")).strip()
+            pin_name = str(p.get("pin_name", "")).strip()
+            net = str(p.get("net", "")).strip()
+            if not comp or not pin or not net:
+                continue
+            nodes.append((comp, pin, pin_name, net))
+
+        by_net: dict[str, list[tuple[str, str, str, str]]] = {}
+        for n in nodes:
+            by_net.setdefault(n[3], []).append(n)
+
+        if fmt == "pads":
+            lines = ["*PADS-PCB*", "*NET*"]
+            for net in sorted(by_net):
+                lines.append(f"*SIGNAL* {net}")
+                row = "".join(f"{c}.{p} " for c, p, _pn, _net in sorted(by_net[net])).rstrip()
+                lines.append(row)
+            lines.append("*END*")
+            text = "\r\n".join(lines) + "\r\n"
+            default_name = "netlist.net"
+        else:
+            lines = ["component,pin,pin_name,net"]
+            for comp, pin, pin_name, net in sorted(nodes):
+                lines.append(f"{comp},{pin},{pin_name},{net}")
+            text = "\n".join(lines) + "\n"
+            default_name = "netlist.csv"
+
+        if output_path:
+            out = Path(output_path)
+        else:
+            out = get_config().workspace_dir / default_name
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(text, encoding="utf-8")
+
+        return {
+            "success": True,
+            "output_path": str(out),
+            "net_format": fmt,
+            "net_count": len(by_net),
+            "node_count": len(nodes),
+        }
+
+    @mcp.tool()
+    async def proj_compile(project_path: Optional[str] = None) -> dict[str, Any]:
         """Compile a project to check for errors.
 
         This runs the project compilation which validates connectivity
@@ -302,7 +390,7 @@ def register_project_tools(mcp):
         return result
 
     @mcp.tool()
-    async def load_project_sheets(
+    async def proj_load_sheets(
         project_path: Optional[str] = None,
     ) -> dict[str, Any]:
         """Load every schematic sheet of a project into the Altium editor.
@@ -336,7 +424,7 @@ def register_project_tools(mcp):
         return result
 
     @mcp.tool()
-    async def get_bom(
+    async def proj_get_bom(
         project_path: Optional[str] = None,
         limit: int = 1000,
     ) -> dict[str, Any]:
@@ -365,10 +453,10 @@ def register_project_tools(mcp):
         if project_path:
             params["project_path"] = project_path
         result = await bridge.send_command_async("project.get_bom", params)
-        return tag_response(result, bom=result, context="get_bom")
+        return tag_response(result, bom=result, context="proj_get_bom")
 
     @mcp.tool()
-    async def get_component_info(
+    async def proj_get_component_info(
         designator: str,
         project_path: Optional[str] = None,
         with_pin_nets: bool = True,
@@ -378,7 +466,7 @@ def register_project_tools(mcp):
         """Get full information about a single component.
 
         IMPORTANT, if you need info for MORE THAN ONE component, use
-        `get_component_info_many` (batch). Looping this tool is a
+        `proj_get_component_info_many` (batch). Looping this tool is a
         large wall-time sink, especially with `with_pin_nets=True`
         because each call compiles the project.
 
@@ -442,7 +530,7 @@ def register_project_tools(mcp):
         result = await bridge.send_command_async(
             "project.get_component_info", params, timeout=timeout,
         )
-        hint = BulkHintTracker.record_and_hint("get_component_info")
+        hint = BulkHintTracker.record_and_hint("proj_get_component_info")
         if hint and isinstance(result, dict):
             result["_hint_bulk"] = hint
         if isinstance(result, dict):
@@ -466,12 +554,12 @@ def register_project_tools(mcp):
             return tag_response(
                 result,
                 explicit_parts=parts,
-                context="get_component_info",
+                context="proj_get_component_info",
             )
         return result
 
     @mcp.tool()
-    async def get_component_info_many(
+    async def proj_get_component_info_many(
         designators: list[str],
         project_path: Optional[str] = None,
         with_pin_nets: bool = True,
@@ -480,7 +568,7 @@ def register_project_tools(mcp):
     ) -> dict[str, Any]:
         """Full per-component info for MANY designators in ONE round-trip.
 
-        PREFER THIS over looping `get_component_info`. The compile
+        PREFER THIS over looping `proj_get_component_info`. The compile
         (when `with_pin_nets=True`) happens once for the whole batch,
         not once per designator.
 
@@ -564,12 +652,12 @@ def register_project_tools(mcp):
             return tag_response(
                 result,
                 explicit_parts=explicit,
-                context="get_component_info_many",
+                context="proj_get_component_info_many",
             )
         return result
 
     @mcp.tool()
-    async def export_pdf(output_path: str) -> dict[str, Any]:
+    async def proj_export_pdf(output_path: str) -> dict[str, Any]:
         """Export the active document to PDF.
 
         Args:
@@ -585,7 +673,7 @@ def register_project_tools(mcp):
         return result
 
     @mcp.tool()
-    async def cross_probe(
+    async def proj_cross_probe(
         designator: str,
         target: str = "schematic",
     ) -> dict[str, Any]:
@@ -606,7 +694,7 @@ def register_project_tools(mcp):
         return result
 
     @mcp.tool()
-    async def get_design_stats(
+    async def proj_get_stats(
         project_path: Optional[str] = None,
     ) -> dict[str, Any]:
         """Get design statistics from the compiled project.
@@ -627,7 +715,7 @@ def register_project_tools(mcp):
         return result
 
     @mcp.tool()
-    async def get_board_info() -> dict[str, Any]:
+    async def proj_get_board_info() -> dict[str, Any]:
         """Get PCB board information, outline vertices, layer stack, origin.
 
         Requires an active PCB document.
@@ -641,7 +729,7 @@ def register_project_tools(mcp):
         return result
 
     @mcp.tool()
-    async def annotate(
+    async def proj_annotate(
         order: str = "down_then_across",
     ) -> dict[str, Any]:
         """Annotate schematic designators programmatically, no dialog, no user interaction.
@@ -679,7 +767,7 @@ def register_project_tools(mcp):
         return result
 
     @mcp.tool()
-    async def generate_output(
+    async def proj_run_output(
         output_type: str,
         output_path: str = "",
     ) -> dict[str, Any]:
@@ -704,7 +792,7 @@ def register_project_tools(mcp):
         return result
 
     @mcp.tool()
-    async def get_focused_project() -> dict[str, Any]:
+    async def proj_get_focused() -> dict[str, Any]:
         """Get information about the currently focused project.
 
         Returns:
@@ -722,7 +810,7 @@ def register_project_tools(mcp):
     # ------------------------------------------------------------------
 
     @mcp.tool()
-    async def export_step(output_path: str = "") -> dict[str, Any]:
+    async def proj_export_step(output_path: str = "") -> dict[str, Any]:
         """Export the active PCB to a STEP 3D model file.
 
         Requires an active PCB document. If output_path is omitted,
@@ -744,7 +832,7 @@ def register_project_tools(mcp):
         return result
 
     @mcp.tool()
-    async def export_dxf(output_path: str = "") -> dict[str, Any]:
+    async def proj_export_dxf(output_path: str = "") -> dict[str, Any]:
         """Export the active PCB to DXF (AutoCAD) format.
 
         Requires an active PCB document. If output_path is omitted,
@@ -766,7 +854,7 @@ def register_project_tools(mcp):
         return result
 
     @mcp.tool()
-    async def export_image(
+    async def proj_export_image(
         output_path: str,
         format: str = "pdf",
         width: int = 1920,
@@ -778,11 +866,11 @@ def register_project_tools(mcp):
         Raster formats (png/jpg/bmp) require a hand-configured OutJob with
         a Schematic Print -> Multimedia (Image) container; the Pascal side
         rejects them with ``IMAGE_FORMAT_UNSUPPORTED`` and points the
-        caller at ``run_outjob`` instead.
+        caller at ``proj_run_outjob`` instead.
 
         Under the hood the PDF path uses Altium's
         ``WorkspaceManager:Print`` server process with ``FileName=`` - the
-        same machinery as ``export_pdf``. No OutJob is loaded. The print
+        same machinery as ``proj_export_pdf``. No OutJob is loaded. The print
         runs against ``Client.CurrentView`` (the focused document), so
         ensure the schematic or PCB you want exported is the active tab
         before calling.
@@ -841,7 +929,7 @@ def register_project_tools(mcp):
         return result
 
     @mcp.tool()
-    async def get_outjob_containers(outjob_path: str = "") -> dict[str, Any]:
+    async def proj_list_outjob_containers(outjob_path: str = "") -> dict[str, Any]:
         """List all output containers defined in an OutJob file.
 
         OutJob files define output configurations (Gerber, PDF, BOM, etc.)
@@ -866,7 +954,7 @@ def register_project_tools(mcp):
         return result
 
     @mcp.tool()
-    async def run_outjob(
+    async def proj_run_outjob(
         container_name: str,
         outjob_path: str = "",
     ) -> dict[str, Any]:
@@ -894,15 +982,15 @@ def register_project_tools(mcp):
         return result
 
     @mcp.tool()
-    async def run_outjob_all(
+    async def proj_run_outjob_all(
         outjob_path: str = "",
         include_files: bool = True,
         fresh_window_seconds: float = 5.0,
     ) -> dict[str, Any]:
         """Run every container in an OutJob and report what each produced.
 
-        Lists containers via ``get_outjob_containers``, then runs each
-        through ``run_outjob`` in order. For each run, scans the
+        Lists containers via ``proj_list_outjob_containers``, then runs each
+        through ``proj_run_outjob`` in order. For each run, scans the
         OutJob's resolved ``output_dir`` afterwards and flags files
         whose mtime is later than the run started (``newly_produced``)
         so the caller can tell which files this particular container
@@ -991,7 +1079,7 @@ def register_project_tools(mcp):
         }
 
     @mcp.tool()
-    async def generate_fab_package(
+    async def proj_generate_fab_package(
         outjob_path: str = "",
         include_step: bool = False,
         include_dxf: bool = False,
@@ -1109,7 +1197,7 @@ def register_project_tools(mcp):
     # ------------------------------------------------------------------
 
     @mcp.tool()
-    async def get_variants(
+    async def proj_list_variants(
         project_path: Optional[str] = None,
     ) -> dict[str, Any]:
         """List all project variants with their component overrides.
@@ -1134,7 +1222,7 @@ def register_project_tools(mcp):
         return result
 
     @mcp.tool()
-    async def get_active_variant(
+    async def proj_get_active_variant(
         project_path: Optional[str] = None,
     ) -> dict[str, Any]:
         """Get the currently active project variant.
@@ -1156,7 +1244,7 @@ def register_project_tools(mcp):
         return result
 
     @mcp.tool()
-    async def set_active_variant(
+    async def proj_set_active_variant(
         variant_name: str,
         project_path: Optional[str] = None,
     ) -> dict[str, Any]:
@@ -1179,7 +1267,7 @@ def register_project_tools(mcp):
         return result
 
     @mcp.tool()
-    async def create_variant(
+    async def proj_create_variant(
         name: str,
         description: str = "",
         project_path: Optional[str] = None,
@@ -1213,7 +1301,7 @@ def register_project_tools(mcp):
     # ------------------------------------------------------------------
 
     @mcp.tool()
-    async def get_open_projects() -> dict[str, Any]:
+    async def proj_list_open() -> dict[str, Any]:
         """List all currently open projects in the Altium workspace.
 
         Returns:
@@ -1226,25 +1314,12 @@ def register_project_tools(mcp):
         )
         return result
 
-    @mcp.tool()
-    async def save_all() -> dict[str, Any]:
-        """Save all open documents in the workspace.
-
-        Equivalent to File > Save All in Altium Designer.
-
-        Returns:
-            Dictionary confirming the operation
-        """
-        bridge = get_bridge()
-        result = await bridge.send_command_async("project.save_all", {})
-        return result
-
     # ------------------------------------------------------------------
     # Messages, search, connectivity, import, path, document parameters
     # ------------------------------------------------------------------
 
     @mcp.tool()
-    async def get_messages(
+    async def proj_get_messages(
         project_path: Optional[str] = None,
     ) -> dict[str, Any]:
         """Get all messages from the Messages panel (compile errors, ERC violations, etc.).
@@ -1266,7 +1341,7 @@ def register_project_tools(mcp):
         return result
 
     @mcp.tool()
-    async def find_component(
+    async def proj_find_component(
         search_text: str,
         search_by: str = "designator",
         project_path: Optional[str] = None,
@@ -1307,12 +1382,12 @@ def register_project_tools(mcp):
             return tag_response(
                 result,
                 components=synthetic,
-                context="find_component",
+                context="proj_find_component",
             )
         return result
 
     @mcp.tool()
-    async def get_connectivity(
+    async def proj_get_connectivity(
         designator: str,
         project_path: Optional[str] = None,
         force_recompile: bool = False,
@@ -1320,7 +1395,7 @@ def register_project_tools(mcp):
         """Get pin-to-net connectivity for a specific component.
 
         IMPORTANT, if you need connectivity for MORE THAN ONE
-        component, use `get_connectivity_many` (batch). Looping this
+        component, use `proj_get_connectivity_many` (batch). Looping this
         tool for a set of designators is the biggest wall-time sink
         in design-review workflows.
 
@@ -1350,9 +1425,9 @@ def register_project_tools(mcp):
         if project_path:
             params["project_path"] = project_path
         if force_recompile:
-            params["force_recompile"] = "true"
+            params["proj_force_recompile"] = "true"
         result = await bridge.send_command_async("project.get_connectivity", params)
-        hint = BulkHintTracker.record_and_hint("get_connectivity")
+        hint = BulkHintTracker.record_and_hint("proj_get_connectivity")
         if hint and isinstance(result, dict):
             result["_hint_bulk"] = hint
         if isinstance(result, dict):
@@ -1363,19 +1438,19 @@ def register_project_tools(mcp):
                 "designators": designator,
             }]
             return tag_response(
-                result, explicit_parts=explicit, context="get_connectivity"
+                result, explicit_parts=explicit, context="proj_get_connectivity"
             )
         return result
 
     @mcp.tool()
-    async def get_connectivity_many(
+    async def proj_get_connectivity_many(
         designators: list[str],
         project_path: Optional[str] = None,
         force_recompile: bool = False,
     ) -> dict[str, Any]:
         """Pin-net connectivity for MANY components in ONE round-trip.
 
-        PREFER THIS over looping `get_connectivity`.
+        PREFER THIS over looping `proj_get_connectivity`.
 
         DATASHEET DISCIPLINE: pin_name on every component in the
         response comes from the symbol and can be wrong. Before
@@ -1402,7 +1477,7 @@ def register_project_tools(mcp):
         if project_path:
             params["project_path"] = project_path
         if force_recompile:
-            params["force_recompile"] = "true"
+            params["proj_force_recompile"] = "true"
         result = await bridge.send_command_async(
             "project.get_connectivity_batch", params
         )
@@ -1427,12 +1502,12 @@ def register_project_tools(mcp):
             return tag_response(
                 result,
                 explicit_parts=explicit,
-                context="get_connectivity_many",
+                context="proj_get_connectivity_many",
             )
         return result
 
     @mcp.tool()
-    async def force_recompile() -> dict[str, Any]:
+    async def proj_force_recompile() -> dict[str, Any]:
         """Flush all dirty docs, invalidate the compile cache, and recompile.
 
         Use this when you need a guaranteed-fresh netlist, e.g.
@@ -1450,7 +1525,7 @@ def register_project_tools(mcp):
         )
 
     @mcp.tool()
-    async def get_compile_freshness() -> dict[str, Any]:
+    async def proj_get_compile_freshness() -> dict[str, Any]:
         """Report the age of the cached netlist and which docs are dirty.
 
         Use this when you're about to disagree with the user about
@@ -1469,7 +1544,7 @@ def register_project_tools(mcp):
         )
 
     @mcp.tool()
-    async def import_document(
+    async def proj_import_document(
         source_path: str,
     ) -> dict[str, Any]:
         """Import a document into the focused project from an external path.
@@ -1490,7 +1565,7 @@ def register_project_tools(mcp):
         return result
 
     @mcp.tool()
-    async def get_project_path() -> dict[str, Any]:
+    async def proj_get_path() -> dict[str, Any]:
         """Get the full path of the currently focused project file.
 
         Returns:
@@ -1501,7 +1576,7 @@ def register_project_tools(mcp):
         return result
 
     @mcp.tool()
-    async def set_document_parameter(
+    async def proj_set_document_parameter(
         file_path: str,
         name: str,
         value: str,
@@ -1544,7 +1619,7 @@ def register_project_tools(mcp):
     # ------------------------------------------------------------------
 
     @mcp.tool()
-    async def compare_sch_pcb(
+    async def proj_compare_sch_pcb(
         project_path: Optional[str] = None,
     ) -> dict[str, Any]:
         """Compare schematic and PCB: compile and report net/component count differences.
@@ -1574,7 +1649,7 @@ def register_project_tools(mcp):
         return result
 
     @mcp.tool()
-    async def update_pcb() -> dict[str, Any]:
+    async def proj_sync_pcb() -> dict[str, Any]:
         """Push schematic changes to PCB (ECO) — Design ▸ Update PCB Document.
 
         IMPORTANT — this is NOT silent. Altium's ECO (change-review) dialog
@@ -1610,7 +1685,7 @@ def register_project_tools(mcp):
         return result
 
     @mcp.tool()
-    async def update_schematic() -> dict[str, Any]:
+    async def proj_sync_schematic() -> dict[str, Any]:
         """Push PCB changes back to schematic (back-annotate ECO). Attempts silent execution.
 
         Equivalent to Design > Update Schematic in Altium Designer.
@@ -1633,7 +1708,7 @@ def register_project_tools(mcp):
         return result
 
     @mcp.tool()
-    async def get_design_differences(
+    async def proj_get_differences(
         project_path: Optional[str] = None,
     ) -> dict[str, Any]:
         """Get detailed differences between schematic and PCB netlist.
@@ -1660,7 +1735,7 @@ def register_project_tools(mcp):
         return result
 
     @mcp.tool()
-    async def lock_designator(
+    async def proj_lock_designator(
         designator: str,
         lock: bool = True,
     ) -> dict[str, Any]:
@@ -1687,7 +1762,7 @@ def register_project_tools(mcp):
         return result
 
     @mcp.tool()
-    async def get_project_options(
+    async def proj_get_options(
         project_path: Optional[str] = None,
     ) -> dict[str, Any]:
         """Get project options: output path, hierarchy mode, compiler settings.

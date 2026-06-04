@@ -433,7 +433,7 @@ def register_audit_tools(mcp):
         Returns:
             Dict with `{checked, violations, items[]}` where each item
             carries `{designator, parameter, value}` for a visible
-            supplier-PN parameter. Pair with `set_sch_components_parameters`
+            supplier-PN parameter. Pair with `sch_set_components_parameters`
             to hide them in bulk.
         """
         bridge = get_bridge()
@@ -458,7 +458,7 @@ def register_audit_tools(mcp):
         Returns:
             Dict with `{checked, violations, items[]}` where each item
             carries `{designator}` for an unlocked component. Pair
-            with `pcb_set_locked` or `batch_modify` to re-lock at
+            with `pcb_set_locked` or `obj_batch_modify` to re-lock at
             scale.
         """
         bridge = get_bridge()

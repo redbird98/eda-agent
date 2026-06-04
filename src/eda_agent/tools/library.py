@@ -85,10 +85,10 @@ def register_library_tools(mcp):
         active SchLib.
 
         Required before bulk-editing a specific component's pins,
-        rectangle, or parameters via ``modify_objects`` / ``batch_modify``
+        rectangle, or parameters via ``obj_modify`` / ``obj_batch_modify``
         on a SchLib. The asymmetry it fixes: ``lib_get_component_details``
         is a read-only fetch and does NOT update the editor's current
-        component, so subsequent ``modify_objects`` on the SchLib's
+        component, so subsequent ``obj_modify`` on the SchLib's
         ePin / eRectangle / eParameter iterators silently hits whatever
         component was last UI-selected -- usually NOT the one you just
         read.
@@ -113,59 +113,6 @@ def register_library_tools(mcp):
             "library.set_current_component",
             {"name": component_name},
         )
-
-    @mcp.tool()
-    async def lib_add_pin(
-        designator: str,
-        name: str,
-        x: int,
-        y: int,
-        length: int = 200,
-        rotation: int = 0,
-        electrical_type: str = "passive",
-        hidden: bool = False,
-    ) -> dict[str, Any]:
-        """Add a pin to the current symbol.
-
-        IMPORTANT, if you need to add more than one pin, use
-        `lib_add_pins` (batch) instead. Creating a new symbol with 20+
-        pins via this singular tool is the biggest wall-time sink in
-        library workflows: each pin is a full LLM turn. The batch
-        version does all pins in one PreProcess/PostProcess + one save.
-
-        Args:
-            designator: Pin designator (e.g., "1", "2", "VCC")
-            name: Pin name
-            x: X coordinate in mils
-            y: Y coordinate in mils
-            length: Pin length in mils
-            rotation: Pin rotation in degrees (0, 90, 180, 270)
-            electrical_type: Electrical type:
-                - "input", "output", "bidirectional", "passive"
-                - "open_collector", "open_emitter", "power", "hiz"
-            hidden: Whether to hide the pin
-
-        Returns:
-            Dictionary confirming pin addition
-        """
-        bridge = get_bridge()
-        result = await bridge.send_command_async(
-            "library.add_pin",
-            {
-                "designator": designator,
-                "name": name,
-                "x": _snap(int(x)),
-                "y": _snap(int(y)),
-                "length": _snap(int(length)),
-                "rotation": rotation,
-                "electrical_type": electrical_type,
-                "hidden": hidden,
-            },
-        )
-        hint = BulkHintTracker.record_and_hint("lib_add_pin")
-        if hint and isinstance(result, dict):
-            result["_hint_bulk"] = hint
-        return result
 
     @mcp.tool()
     async def lib_add_pins(
@@ -316,35 +263,6 @@ def register_library_tools(mcp):
             "library.add_symbol_lines",
             {"lines": "~~".join(op_strs)},
         )
-
-    @mcp.tool()
-    async def lib_add_symbol_line(
-        x1: int,
-        y1: int,
-        x2: int,
-        y2: int,
-        width: int = 1,
-    ) -> dict[str, Any]:
-        """Add a line to the current symbol.
-
-        Args:
-            x1: Start X in mils
-            y1: Start Y in mils
-            x2: End X in mils
-            y2: End Y in mils
-            width: Line width
-
-        Returns:
-            Dictionary confirming line addition
-        """
-        bridge = get_bridge()
-        result = await bridge.send_command_async(
-            "library.add_symbol_line",
-            {"x1": _snap(int(x1)), "y1": _snap(int(y1)),
-             "x2": _snap(int(x2)), "y2": _snap(int(y2)),
-             "width": width},
-        )
-        return result
 
     # =========================================================================
     # Footprint Creation
@@ -734,6 +652,74 @@ def register_library_tools(mcp):
         )
         return result
 
+    @mcp.tool()
+    async def lib_auto_link_3d_models(
+        model_dir: str,
+        library_path: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Batch-link STEP models to footprints by matching file names.
+
+        Enumerates every footprint in the PcbLib, scans `model_dir` for
+        .step/.stp files, and links each footprint whose name matches a model
+        file's stem (case-insensitive). Builds on lib_link_3d_model so the
+        same caveat applies: offsets/rotations are not set, adjust in the
+        library if a model needs repositioning.
+
+        Args:
+            model_dir: Folder containing .step/.stp model files.
+            library_path: Optional .PcbLib to focus first; uses the focused
+                document otherwise.
+
+        Returns:
+            {"linked": [{footprint, model}], "unmatched_footprints": [...],
+             "unused_models": [...]}.
+        """
+        from pathlib import Path
+
+        d = Path(model_dir)
+        if not d.is_dir():
+            return {"success": False, "error": f"not a directory: {model_dir}"}
+
+        models: dict[str, str] = {}
+        for f in d.iterdir():
+            if f.is_file() and f.suffix.lower() in (".step", ".stp"):
+                models[f.stem.lower()] = str(f)
+
+        bridge = get_bridge()
+        params: dict[str, Any] = {}
+        if library_path:
+            params["library_path"] = library_path
+        fp_data = await bridge.send_command_async("library.get_footprints", params)
+        footprints = fp_data.get("footprints", []) if isinstance(fp_data, dict) else []
+
+        linked: list[dict[str, str]] = []
+        unmatched: list[str] = []
+        used: set[str] = set()
+        for fp in footprints:
+            fname = str(fp.get("name", "")).strip()
+            key = fname.lower()
+            if key in models:
+                await bridge.send_command_async(
+                    "library.link_3d_model",
+                    {
+                        "component_name": fname,
+                        "model_path": models[key],
+                        "offset_x": 0, "offset_y": 0, "offset_z": 0,
+                        "rotation_x": 0, "rotation_y": 0, "rotation_z": 0,
+                    },
+                )
+                linked.append({"footprint": fname, "model": models[key]})
+                used.add(key)
+            else:
+                unmatched.append(fname)
+
+        return {
+            "success": True,
+            "linked": linked,
+            "unmatched_footprints": unmatched,
+            "unused_models": [models[k] for k in models if k not in used],
+        }
+
     # =========================================================================
     # Library Search and Information
     # =========================================================================
@@ -868,7 +854,7 @@ def register_library_tools(mcp):
         AND visual-style records for the designator, comment, pins,
         and each parameter (font_id, color, is_hidden, x, y,
         orientation, justification). The integer ``font_id`` can be
-        expanded to {name, size, bold, italic} via ``get_font_spec``
+        expanded to {name, size, bold, italic} via ``obj_get_font_spec``
         when style detail is needed; the round-trip default keeps it
         compact.
 
@@ -1021,94 +1007,6 @@ def register_library_tools(mcp):
         return result or {}
 
     @mcp.tool()
-    async def lib_set_label_format(
-        target: str = "designator",
-        font_id: Optional[int] = None,
-        color: Optional[int] = None,
-        is_hidden: Optional[bool] = None,
-        orientation: Optional[int] = None,
-        justification: Optional[int] = None,
-        component_name: Optional[str] = None,
-        library_path: Optional[str] = None,
-        only_mismatched: bool = True,
-        limit: int = 5000,
-        timeout: Optional[float] = None,
-    ) -> dict[str, Any]:
-        """Bulk or single-component label-style writer for SchLib symbols.
-
-        Sets any subset of {font_id, color, is_hidden, orientation,
-        justification} on a target ISch_Label (designator, comment, or
-        a specific named parameter) for either one component
-        (``component_name`` set) or every component in the library
-        (``component_name`` omitted).
-
-        Symmetric counterpart to lib_audit_styles' filter mode: with
-        ``only_mismatched=True`` (default), components whose target
-        label already matches every supplied field are skipped, so
-        re-running the call after a partial application is idempotent.
-
-        The whole edit batch is wrapped in a single Altium undo step
-        and saves are deferred (`save_all` flushes the .SchLib).
-
-        Args:
-            target: Which label to format. ``"designator"`` (default),
-                ``"comment"``, or ``"parameter:<Name>"`` (e.g.,
-                ``"parameter:Manufacturer"``).
-            font_id: New font ID. Resolve via get_font_id /
-                get_font_spec if you need to convert from
-                {name, size, bold, italic}.
-            color: New BGR-packed color int. Navy ``#000080`` is
-                ``8388608`` (0x800000 in BGR).
-            is_hidden: Hide / show the label.
-            orientation: 0/90/180/270 (Altium's TRotationBy90 enum).
-            justification: Altium label justification enum.
-            component_name: When set, applies only to that one
-                component. Omit for bulk-walk.
-            library_path: .SchLib path. Defaults to focused doc.
-            only_mismatched: When True (default) skip components
-                already matching the target style. Set False to
-                rewrite unconditionally.
-            limit: Cap on processed components in bulk mode.
-            timeout: Per-call bridge poll timeout override.
-
-        Returns:
-            Dict with library_path, target, scope ("single"|"bulk"),
-            total, modified, already_compliant, missing_target,
-            failed, limit, truncated.
-        """
-        if (font_id is None and color is None and is_hidden is None
-                and orientation is None and justification is None):
-            raise InvalidParameterError(
-                "At least one of font_id / color / is_hidden / "
-                "orientation / justification must be supplied"
-            )
-        bridge = get_bridge()
-        params: dict[str, Any] = {
-            "target": target,
-            "limit": str(limit),
-        }
-        if font_id is not None:
-            params["font_id"] = str(font_id)
-        if color is not None:
-            params["color"] = str(color)
-        if is_hidden is not None:
-            params["is_hidden"] = "true" if is_hidden else "false"
-        if orientation is not None:
-            params["orientation"] = str(orientation)
-        if justification is not None:
-            params["justification"] = str(justification)
-        if component_name:
-            params["component_name"] = component_name
-        if library_path:
-            params["library_path"] = library_path
-        if not only_mismatched:
-            params["only_mismatched"] = "false"
-        result = await bridge.send_command_async(
-            "library.set_label_format", params, timeout=timeout,
-        )
-        return result or {}
-
-    @mcp.tool()
     async def lib_set_label_formats(
         ops: list[dict[str, Any]],
         component_name: Optional[str] = None,
@@ -1141,7 +1039,7 @@ def register_library_tools(mcp):
 
         At least one style field must be set per op. Targets are
         ``"designator"``, ``"comment"``, or ``"parameter:<Name>"``.
-        Use ``get_font_id`` / ``get_font_spec`` to resolve the font_id
+        Use ``obj_get_font_id`` / ``obj_get_font_spec`` to resolve the font_id
         for {name, size, bold, italic} from the active library's font
         table; that keeps the call neutral to any particular library's
         style choices.
@@ -1479,6 +1377,146 @@ def register_library_tools(mcp):
         return result
 
     @mcp.tool()
+    async def lib_export_kicad_symbol(
+        component_name: str = "",
+        output_path: str = "",
+        reference: str = "U",
+    ) -> dict[str, Any]:
+        """Export a SchLib symbol to a KiCad .kicad_sym file.
+
+        Reads the symbol's pins from the active schematic library and writes a
+        KiCad 6+ S-expression symbol: a body rectangle sized to the pin roots
+        plus one pin per Altium pin (designator -> number, name, electrical
+        type, position, orientation). Coordinates convert mils -> mm. This
+        covers the symbol only; footprint export is separate.
+
+        Args:
+            component_name: LibRef to export. If empty, exports whatever
+                component is currently selected in the SchLib.
+            output_path: Destination .kicad_sym file. Defaults to
+                workspace/<name>.kicad_sym.
+            reference: Reference designator prefix for the symbol (default
+                "U").
+
+        Returns:
+            {"output_path", "symbol", "pin_count"} or an error.
+        """
+        from pathlib import Path
+
+        bridge = get_bridge()
+        if component_name:
+            await bridge.send_command_async(
+                "library.set_current_component", {"name": component_name}
+            )
+        pin_data = await bridge.send_command_async("library.get_pin_list", {})
+        if not isinstance(pin_data, dict):
+            return {"success": False, "error": "could not read pin list"}
+        name = component_name or str(pin_data.get("component") or "").strip()
+        if not name:
+            return {"success": False, "error": "no component selected and none named"}
+        pins = pin_data.get("pins", []) or []
+
+        MM = 0.0254  # mils -> mm
+
+        def esc(s: str) -> str:
+            return str(s).replace("\\", "\\\\").replace('"', '\\"')
+
+        # Altium electrical type -> KiCad pin electrical type.
+        etype_map = {
+            "input": "input", "output": "output", "io": "bidirectional",
+            "bidirectional": "bidirectional", "opencollector": "open_collector",
+            "open_collector": "open_collector", "openemitter": "open_emitter",
+            "open_emitter": "open_emitter", "power": "power_in",
+            "power_in": "power_in", "power_out": "power_out",
+            "hiz": "tri_state", "tristate": "tri_state", "tri_state": "tri_state",
+            "passive": "passive",
+        }
+        # Altium orientation 0/1/2/3 (right/up/left/down) -> KiCad pin angle.
+        angle_map = {0: 0, 1: 90, 2: 180, 3: 270}
+        # Unit direction of each orientation, to find each pin's body root.
+        dir_map = {0: (1, 0), 1: (0, 1), 2: (-1, 0), 3: (0, -1)}
+        PIN_LEN_MILS = 100
+
+        roots_x: list[float] = []
+        roots_y: list[float] = []
+        pin_lines: list[str] = []
+        for p in pins:
+            try:
+                px = float(p.get("x", 0))
+                py = float(p.get("y", 0))
+            except (TypeError, ValueError):
+                continue
+            orient = int(p.get("orientation", 0)) % 4
+            dx, dy = dir_map[orient]
+            roots_x.append((px - dx * PIN_LEN_MILS) * MM)
+            roots_y.append((py - dy * PIN_LEN_MILS) * MM)
+            ktype = etype_map.get(
+                str(p.get("electrical_type", "")).strip().lower().replace(" ", ""),
+                "unspecified",
+            )
+            number = esc(p.get("designator", ""))
+            pname = esc(p.get("name", "") or "~")
+            pin_lines.append(
+                f'        (pin {ktype} line (at {px * MM:.4f} {py * MM:.4f} '
+                f'{angle_map[orient]}) (length {PIN_LEN_MILS * MM:.4f})\n'
+                f'          (name "{pname}" (effects (font (size 1.27 1.27))))\n'
+                f'          (number "{number}" (effects (font (size 1.27 1.27)))))'
+            )
+
+        if roots_x and roots_y:
+            minx, maxx = min(roots_x), max(roots_x)
+            miny, maxy = min(roots_y), max(roots_y)
+            if maxx - minx < 2.54:
+                maxx = minx + 2.54
+            if maxy - miny < 2.54:
+                maxy = miny + 2.54
+        else:
+            minx, miny, maxx, maxy = -2.54, -2.54, 2.54, 2.54
+
+        nm = esc(name)
+        body = (
+            f'(kicad_symbol_lib\n'
+            f'  (version 20211014)\n'
+            f'  (generator eda_agent)\n'
+            f'  (symbol "{nm}"\n'
+            f'    (in_bom yes)\n'
+            f'    (on_board yes)\n'
+            f'    (property "Reference" "{esc(reference)}" (at 0 {maxy + 2.54:.4f} 0)\n'
+            f'      (effects (font (size 1.27 1.27))))\n'
+            f'    (property "Value" "{nm}" (at 0 {miny - 2.54:.4f} 0)\n'
+            f'      (effects (font (size 1.27 1.27))))\n'
+            f'    (property "Footprint" "" (at 0 0 0)\n'
+            f'      (effects (font (size 1.27 1.27)) hide))\n'
+            f'    (property "Datasheet" "" (at 0 0 0)\n'
+            f'      (effects (font (size 1.27 1.27)) hide))\n'
+            f'    (symbol "{nm}_0_1"\n'
+            f'      (rectangle (start {minx:.4f} {maxy:.4f}) (end {maxx:.4f} {miny:.4f})\n'
+            f'        (stroke (width 0.254) (type default))\n'
+            f'        (fill (type background)))\n'
+            f'    )\n'
+            f'    (symbol "{nm}_1_1"\n'
+            + "\n".join(pin_lines) + ("\n" if pin_lines else "")
+            + f'    )\n'
+            f'  )\n'
+            f')\n'
+        )
+
+        if output_path:
+            out = Path(output_path)
+        else:
+            safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in name)
+            out = get_config().workspace_dir / f"{safe}.kicad_sym"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(body, encoding="utf-8")
+
+        return {
+            "success": True,
+            "output_path": str(out),
+            "symbol": name,
+            "pin_count": len(pin_lines),
+        }
+
+    @mcp.tool()
     async def lib_copy_component(
         source_name: str,
         new_name: Optional[str] = None,
@@ -1495,7 +1533,7 @@ def register_library_tools(mcp):
         component is copied across libraries -- the source library is
         focused for the replicate, then the destination is focused and
         the clone is added there. The destination ends focused with the
-        new component selected. Save is deferred (call ``save_all`` to
+        new component selected. Save is deferred (call ``app_save_all`` to
         flush).
 
         Args:
@@ -1531,3 +1569,51 @@ def register_library_tools(mcp):
             "library.copy_component", params,
         )
         return result
+
+    @mcp.tool()
+    async def lib_split_pin_functions() -> dict[str, Any]:
+        """Split slash-delimited pin names into pin function lists.
+
+        For the current library symbol, parses each pin whose name is
+        `PRIMARY/ALT1/ALT2/...` into the pin's function list (the alternate-
+        function popup), leaving `PRIMARY` as the visible name. Pins without a
+        `/` are unchanged.
+
+        Returns:
+            {"pins_processed": N}.
+        """
+        bridge = get_bridge()
+        return await bridge.send_command_async("library.split_pin_functions", {})
+
+    @mcp.tool()
+    async def lib_install_library(library_path: str) -> dict[str, Any]:
+        """Register a library with the environment's Available Libraries.
+
+        Installs an .IntLib / .SchLib / .PcbLib so its parts resolve by
+        lib-ref across the workspace (the step after authoring a library).
+
+        Args:
+            library_path: absolute path to the library file.
+
+        Returns:
+            {"installed": bool, "library_path": "..."}.
+        """
+        bridge = get_bridge()
+        return await bridge.send_command_async(
+            "library.install_library", {"library_path": library_path}
+        )
+
+    @mcp.tool()
+    async def lib_uninstall_library(library_path: str) -> dict[str, Any]:
+        """Unregister a library from the environment's Available Libraries.
+
+        Args:
+            library_path: absolute path to the library file.
+
+        Returns:
+            {"uninstalled": bool, "library_path": "..."}.
+        """
+        bridge = get_bridge()
+        return await bridge.send_command_async(
+            "library.uninstall_library", {"library_path": library_path}
+        )

@@ -118,7 +118,7 @@ def register_sim_tools(mcp):
     """Register SPICE / simulation tools with the MCP server."""
 
     @mcp.tool()
-    async def sch_get_simulation_readiness() -> dict[str, Any]:
+    async def sim_get_readiness() -> dict[str, Any]:
         """Audit every component on the active schematic for SPICE readiness.
 
         Use this as step 1 of any simulation workflow. The response
@@ -167,57 +167,7 @@ def register_sim_tools(mcp):
         return result
 
     @mcp.tool()
-    async def sch_attach_spice_primitive(
-        designator: str,
-        primitive: str,
-        value: str = "",
-        spice_model: str = "",
-        sim_kind: str = "",
-    ) -> dict[str, Any]:
-        """Attach a built-in SPICE primitive to a component.
-
-        For R/L/C/V/I/D/Q parts, Altium's simulator maps these to
-        built-in primitives, no model file is needed, just the prefix
-        letter and a value string.
-
-        Args:
-            designator: Component reference (e.g. "R1", "C3", "Q1").
-            primitive: Single letter identifying the primitive:
-                R (resistor), L (inductor), C (capacitor),
-                V (voltage source), I (current source),
-                D (diode), Q (BJT), M (MOSFET), X (subcircuit).
-            value: SPICE value string, e.g. "10k" for a resistor,
-                "100n" for a cap, "DC 5" or "SIN(0 1 1k)" for a source,
-                a model name for a diode/BJT.
-            spice_model: Optional explicit model name. For semi parts
-                (D, Q, M) this is the model name from a .mdl file.
-            sim_kind: Optional SimulationKind tag, "General",
-                "Subcircuit", "Model".
-
-        Returns:
-            Dict with success, designator, primitive, value.
-        """
-        bridge = get_bridge()
-        params: dict[str, Any] = {
-            "designator": designator,
-            "primitive": primitive,
-        }
-        if value:
-            params["value"] = value
-        if spice_model:
-            params["spice_model"] = spice_model
-        if sim_kind:
-            params["sim_kind"] = sim_kind
-        result = await bridge.send_command_async(
-            "generic.attach_spice_primitive", params
-        )
-        hint = BulkHintTracker.record_and_hint("sch_attach_spice_primitive")
-        if hint and isinstance(result, dict):
-            result["_hint_bulk"] = hint
-        return result
-
-    @mcp.tool()
-    async def sch_attach_spice_model(
+    async def sim_attach_model(
         designator: str,
         file_path: str,
         model_name: str,

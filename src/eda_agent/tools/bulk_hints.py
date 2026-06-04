@@ -29,11 +29,11 @@ class BulkHintTracker:
     # variant as soon as a second call arrives in the window.
     _EXPENSIVE_THRESHOLD = 2
     _EXPENSIVE: frozenset[str] = frozenset({
-        "get_nets",
-        "get_connectivity",
-        "get_component_info",
-        "get_design_stats",
-        "get_bom",
+        "proj_get_nets",
+        "proj_get_connectivity",
+        "proj_get_component_info",
+        "proj_get_stats",
+        "proj_get_bom",
     })
 
     _lock = threading.Lock()
@@ -42,53 +42,29 @@ class BulkHintTracker:
 
     # singular_tool -> (bulk_tool_name, one-line nudge text)
     BULK_EQUIVALENTS: dict[str, tuple[str, str]] = {
-        "pcb_move_component": (
-            "pcb_move_components",
-            "Pass a list of moves to pcb_move_components to batch them in one IPC call.",
+        "obj_modify": (
+            "obj_batch_modify",
+            "When each target needs a different value, obj_batch_modify does them all in one call.",
         ),
-        "pcb_place_track": (
-            "pcb_place_tracks",
-            "Pass a list of tracks to pcb_place_tracks to batch them in one IPC call.",
+        "obj_create": (
+            "obj_batch_create",
+            "Pass a list of create ops to obj_batch_create to bundle them in one IPC call.",
         ),
-        "modify_objects": (
-            "batch_modify",
-            "When each target needs a different value, batch_modify does them all in one call.",
+        "obj_delete": (
+            "obj_batch_delete",
+            "Pass a list of delete ops to obj_batch_delete to bundle them in one IPC call.",
         ),
-        "create_object": (
-            "batch_create",
-            "Pass a list of create ops to batch_create to bundle them in one IPC call.",
+        "proj_get_connectivity": (
+            "proj_get_connectivity_many",
+            "Pass a list of designators to proj_get_connectivity_many to pull them all in one round-trip instead of ~700 ms per call.",
         ),
-        "delete_objects": (
-            "batch_delete",
-            "Pass a list of delete ops to batch_delete to bundle them in one IPC call.",
+        "proj_get_component_info": (
+            "proj_get_component_info_many",
+            "Pass a list of designators to proj_get_component_info_many to pull them all in one round-trip. The compile (when with_pin_nets=True) happens once for the whole batch, not once per designator.",
         ),
-        "place_wire": (
-            "place_wires",
-            "Pass a list of wire endpoints to place_wires to place them all in one call.",
-        ),
-        "place_sch_component_from_library": (
-            "place_sch_components_from_library",
-            "Pass a list of placements to place_sch_components_from_library to lay out the BOM in one call.",
-        ),
-        "sch_attach_spice_primitive": (
-            "sch_attach_spice_primitives",
-            "Pass a list of attachments to sch_attach_spice_primitives to do the whole readiness set in one call.",
-        ),
-        "lib_add_pin": (
-            "lib_add_pins",
-            "Pass a list of pins to lib_add_pins to build the whole pinout in one call.",
-        ),
-        "get_connectivity": (
-            "get_connectivity_many",
-            "Pass a list of designators to get_connectivity_many to pull them all in one round-trip instead of ~700 ms per call.",
-        ),
-        "get_component_info": (
-            "get_component_info_many",
-            "Pass a list of designators to get_component_info_many to pull them all in one round-trip. The compile (when with_pin_nets=True) happens once for the whole batch, not once per designator.",
-        ),
-        "get_nets": (
-            "get_nets",
-            "Call get_nets ONCE with no filters (component='', net_name='', raise limit) to pull the entire pin-net table, then filter locally. Each filtered call is ~700 ms and compiles the project.",
+        "proj_get_nets": (
+            "proj_get_nets",
+            "Call proj_get_nets ONCE with no filters (component='', net_name='', raise limit) to pull the entire pin-net table, then filter locally. Each filtered call is ~700 ms and compiles the project.",
         ),
     }
 

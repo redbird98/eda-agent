@@ -8524,6 +8524,1084 @@ Begin
 End;
 
 {..............................................................................}
+{ PCB_DeleteInvalidObjects - remove degenerate primitives: zero-area regions  }
+{ and zero-length tracks. Find-one-remove-restart so a live iterator is never  }
+{ invalidated by a removal.                                                    }
+{..............................................................................}
+Function PCB_DeleteInvalidObjects(Params : String; RequestId : String) : String;
+Var
+    Board : IPCB_Board;
+    Iter : IPCB_BoardIterator;
+    Obj, Victim : IPCB_Primitive;
+    Trk : IPCB_Track;
+    BR : TCoordRect;
+    Removed, Guard : Integer;
+    FoundOne : Boolean;
+Begin
+    Board := GetPCBBoardAnywhere;
+    If Board = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCB', 'No PCB document is active');
+        Exit;
+    End;
+
+    Removed := 0;
+    Guard := 0;
+    PCBServer.PreProcess;
+    Try
+        FoundOne := True;
+        While FoundOne And (Guard < 100000) Do
+        Begin
+            Guard := Guard + 1;
+            FoundOne := False;
+            Victim := Nil;
+            Iter := Board.BoardIterator_Create;
+            Try
+                Iter.AddFilter_ObjectSet(MkSet(eTrackObject, eRegionObject));
+                Iter.AddFilter_LayerSet(AllLayers);
+                Iter.AddFilter_Method(eProcessAll);
+                Obj := Iter.FirstPCBObject;
+                While Obj <> Nil Do
+                Begin
+                    If Obj.ObjectId = eTrackObject Then
+                    Begin
+                        Trk := Obj;
+                        If (Trk.x1 = Trk.x2) And (Trk.y1 = Trk.y2) Then
+                        Begin
+                            Victim := Obj;
+                            FoundOne := True;
+                        End;
+                    End
+                    Else If Obj.ObjectId = eRegionObject Then
+                    Begin
+                        Try
+                            BR := Obj.BoundingRectangle;
+                            If ((BR.X2 - BR.X1) <= 0) Or ((BR.Y2 - BR.Y1) <= 0) Then
+                            Begin
+                                Victim := Obj;
+                                FoundOne := True;
+                            End;
+                        Except End;
+                    End;
+                    If FoundOne Then Break;
+                    Obj := Iter.NextPCBObject;
+                End;
+            Finally
+                Board.BoardIterator_Destroy(Iter);
+            End;
+
+            If FoundOne And (Victim <> Nil) Then
+            Begin
+                Try
+                    PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
+                        PCBM_BoardRegisteration, Victim.I_ObjectAddress);
+                    Board.RemovePCBObject(Victim);
+                    Removed := Removed + 1;
+                Except End;
+            End;
+        End;
+    Finally
+        PCBServer.PostProcess;
+    End;
+
+    SaveDocByPath(Board.FileName);
+    Result := BuildSuccessResponse(RequestId,
+        '{"removed":' + IntToStr(Removed) + '}');
+End;
+
+{..............................................................................}
+{ PCB_AuditPadCenterConnected - report pads whose center has no track / via    }
+{ / arc entering it (acid-pad / center-entry QA). Read-only findings.          }
+{..............................................................................}
+Function PCB_AuditPadCenterConnected(Params : String; RequestId : String) : String;
+Var
+    Board : IPCB_Board;
+    Iter, SIter : IPCB_BoardIterator;
+    Pad : IPCB_Pad;
+    Obj : IPCB_Primitive;
+    PX, PY, Tol : Integer;
+    Connected, First : Boolean;
+    Checked, Offenders : Integer;
+    ItemsJson, Des : String;
+Begin
+    Board := GetPCBBoardAnywhere;
+    If Board = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCB', 'No PCB document is active');
+        Exit;
+    End;
+
+    Tol := MilsToCoord(2);
+    Checked := 0;
+    Offenders := 0;
+    ItemsJson := '';
+    First := True;
+
+    Iter := Board.BoardIterator_Create;
+    Try
+        Iter.AddFilter_ObjectSet(MkSet(ePadObject));
+        Iter.AddFilter_LayerSet(AllLayers);
+        Iter.AddFilter_Method(eProcessAll);
+        Pad := Iter.FirstPCBObject;
+        While Pad <> Nil Do
+        Begin
+            If Pad.InNet Then
+            Begin
+                Checked := Checked + 1;
+                PX := Pad.X;
+                PY := Pad.Y;
+                Connected := False;
+                SIter := Board.SpatialIterator_Create;
+                Try
+                    SIter.AddFilter_ObjectSet(MkSet(eTrackObject, eArcObject, eViaObject));
+                    SIter.AddFilter_LayerSet(AllLayers);
+                    SIter.AddFilter_Area(PX - Tol, PY - Tol, PX + Tol, PY + Tol);
+                    Obj := SIter.FirstPCBObject;
+                    While Obj <> Nil Do
+                    Begin
+                        If Obj.Net <> Nil Then
+                            If Obj.Net.Name = Pad.Net.Name Then Connected := True;
+                        If Connected Then Break;
+                        Obj := SIter.NextPCBObject;
+                    End;
+                Finally
+                    Board.SpatialIterator_Destroy(SIter);
+                End;
+
+                If Not Connected Then
+                Begin
+                    Offenders := Offenders + 1;
+                    Des := '';
+                    Try If Pad.Component <> Nil Then Des := Pad.Component.Name.Text; Except End;
+                    If Not First Then ItemsJson := ItemsJson + ',';
+                    ItemsJson := ItemsJson + JsonObj(
+                        JsonStr('designator', Des) + ',' +
+                        JsonStr('pad', Pad.Name) + ',' +
+                        JsonStr('net', Pad.Net.Name) + ',' +
+                        JsonInt('x_mils', CoordToMils(PX)) + ',' +
+                        JsonInt('y_mils', CoordToMils(PY)));
+                    First := False;
+                End;
+            End;
+            Pad := Iter.NextPCBObject;
+        End;
+    Finally
+        Board.BoardIterator_Destroy(Iter);
+    End;
+
+    Result := BuildSuccessResponse(RequestId,
+        '{"checked":' + IntToStr(Checked) + ',"offenders":' + IntToStr(Offenders)
+        + ',"items":' + JsonArr(ItemsJson) + '}');
+End;
+
+{..............................................................................}
+{ PCB_AutoSizeBoardOutline - fit the board outline around all embedded-board   }
+{ arrays plus a margin. Rails are drawn on a mechanical layer and converted    }
+{ to the board outline.                                                        }
+{..............................................................................}
+Function PCB_AutoSizeBoardOutline(Params : String; RequestId : String) : String;
+Var
+    Board : IPCB_Board;
+    Iter : IPCB_BoardIterator;
+    Obj : IPCB_Primitive;
+    Trk : IPCB_Track;
+    BR : TCoordRect;
+    Margin, RailW : Integer;
+    MinX, MinY, MaxX, MaxY : Integer;
+    MechL : TLayer;
+    Found : Boolean;
+Begin
+    Board := GetPCBBoardAnywhere;
+    If Board = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCB', 'No PCB document is active');
+        Exit;
+    End;
+
+    Margin := MilsToCoord(StrToIntDef(ExtractJsonValue(Params, 'margin_mils'), 100));
+    RailW := MilsToCoord(10);
+    MechL := eMechanical1;
+    MinX := MAX_INT; MinY := MAX_INT; MaxX := -MAX_INT; MaxY := -MAX_INT;
+    Found := False;
+
+    Iter := Board.BoardIterator_Create;
+    Try
+        Iter.AddFilter_ObjectSet(MkSet(eEmbeddedBoardObject));
+        Iter.AddFilter_LayerSet(AllLayers);
+        Iter.AddFilter_Method(eProcessAll);
+        Obj := Iter.FirstPCBObject;
+        While Obj <> Nil Do
+        Begin
+            Try
+                BR := Obj.BoundingRectangle;
+                If BR.X1 < MinX Then MinX := BR.X1;
+                If BR.Y1 < MinY Then MinY := BR.Y1;
+                If BR.X2 > MaxX Then MaxX := BR.X2;
+                If BR.Y2 > MaxY Then MaxY := BR.Y2;
+                Found := True;
+            Except End;
+            Obj := Iter.NextPCBObject;
+        End;
+    Finally
+        Board.BoardIterator_Destroy(Iter);
+    End;
+
+    If Not Found Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_CONTENT',
+            'No embedded-board arrays found to size the outline around');
+        Exit;
+    End;
+
+    MinX := MinX - Margin; MinY := MinY - Margin;
+    MaxX := MaxX + Margin; MaxY := MaxY + Margin;
+
+    PCBServer.PreProcess;
+    Try
+        Trk := NewTrack(MinX, MinY, MaxX, MinY, RailW, MechL); Board.AddPCBObject(Trk); Trk.Selected := True;
+        Trk := NewTrack(MaxX, MinY, MaxX, MaxY, RailW, MechL); Board.AddPCBObject(Trk); Trk.Selected := True;
+        Trk := NewTrack(MaxX, MaxY, MinX, MaxY, RailW, MechL); Board.AddPCBObject(Trk); Trk.Selected := True;
+        Trk := NewTrack(MinX, MaxY, MinX, MinY, RailW, MechL); Board.AddPCBObject(Trk); Trk.Selected := True;
+        Try Board.LayerIsDisplayed[MechL] := True; Except End;
+    Finally
+        PCBServer.PostProcess;
+    End;
+
+    ResetParameters;
+    AddStringParameter('Mode', 'BOARDOUTLINE_FROM_SEL_PRIMS');
+    RunProcess('PCB:PlaceBoardOutline');
+
+    SaveDocByPath(Board.FileName);
+    Result := BuildSuccessResponse(RequestId,
+        '{"width_mils":' + IntToStr(CoordToMils(MaxX - MinX))
+        + ',"height_mils":' + IntToStr(CoordToMils(MaxY - MinY)) + '}');
+End;
+
+{..............................................................................}
+{ PCB_NormalizeVias - snap every via's diameter + hole to its dominant routing }
+{ via-style rule's preferred values.                                          }
+{..............................................................................}
+Function PCB_NormalizeVias(Params : String; RequestId : String) : String;
+Var
+    Board : IPCB_Board;
+    Iter : IPCB_BoardIterator;
+    Obj : IPCB_Primitive;
+    Via : IPCB_Via;
+    Rule : IPCB_Rule;
+    Checked, Changed : Integer;
+Begin
+    Board := GetPCBBoardAnywhere;
+    If Board = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCB', 'No PCB document is active');
+        Exit;
+    End;
+
+    Checked := 0;
+    Changed := 0;
+    PCBServer.PreProcess;
+    Try
+        Iter := Board.BoardIterator_Create;
+        Try
+            Iter.AddFilter_ObjectSet(MkSet(eViaObject));
+            Iter.AddFilter_LayerSet(AllLayers);
+            Iter.AddFilter_Method(eProcessAll);
+            Obj := Iter.FirstPCBObject;
+            While Obj <> Nil Do
+            Begin
+                Checked := Checked + 1;
+                Via := Obj;
+                Rule := Board.FindDominantRuleForObject(Via, eRule_RoutingViaStyle);
+                If Rule <> Nil Then
+                Begin
+                    Try
+                        PCBServer.SendMessageToRobots(Via.I_ObjectAddress, c_Broadcast,
+                            PCBM_BeginModify, c_NoEventData);
+                        Via.Size := Rule.PreferedWidth;
+                        Via.HoleSize := Rule.PreferedHoleWidth;
+                        PCBServer.SendMessageToRobots(Via.I_ObjectAddress, c_Broadcast,
+                            PCBM_EndModify, c_NoEventData);
+                        Changed := Changed + 1;
+                    Except End;
+                End;
+                Obj := Iter.NextPCBObject;
+            End;
+        Finally
+            Board.BoardIterator_Destroy(Iter);
+        End;
+    Finally
+        PCBServer.PostProcess;
+    End;
+
+    SaveDocByPath(Board.FileName);
+    Result := BuildSuccessResponse(RequestId,
+        '{"checked":' + IntToStr(Checked) + ',"changed":' + IntToStr(Changed) + '}');
+End;
+
+{..............................................................................}
+{ PCB_CopyDesignatorsToMechLayer - place a .Designator special-string copy of  }
+{ every component's reference designator on a mechanical layer (assembly       }
+{ drawing prep). Default eMechanical1; override with "layer".                  }
+{..............................................................................}
+Function PCB_CopyDesignatorsToMechLayer(Params : String; RequestId : String) : String;
+Var
+    Board : IPCB_Board;
+    Iter : IPCB_BoardIterator;
+    Obj : IPCB_Primitive;
+    Comp : IPCB_Component;
+    NewTxt : IPCB_Text;
+    LayerStr : String;
+    MechL : TLayer;
+    Copied : Integer;
+Begin
+    Board := GetPCBBoardAnywhere;
+    If Board = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCB', 'No PCB document is active');
+        Exit;
+    End;
+
+    LayerStr := ExtractJsonValue(Params, 'layer');
+    If LayerStr <> '' Then MechL := GetLayerFromString(LayerStr) Else MechL := eMechanical1;
+    Copied := 0;
+
+    PCBServer.PreProcess;
+    Try
+        Iter := Board.BoardIterator_Create;
+        Try
+            Iter.AddFilter_ObjectSet(MkSet(eComponentObject));
+            Iter.AddFilter_LayerSet(AllLayers);
+            Iter.AddFilter_Method(eProcessAll);
+            Obj := Iter.FirstPCBObject;
+            While Obj <> Nil Do
+            Begin
+                Comp := Obj;
+                Try
+                    NewTxt := Comp.Name.Replicate;
+                    NewTxt.Layer := MechL;
+                    NewTxt.Text := '.Designator';
+                    PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
+                        PCBM_BoardRegisteration, NewTxt.I_ObjectAddress);
+                    Board.AddPCBObject(NewTxt);
+                    Copied := Copied + 1;
+                Except End;
+                Obj := Iter.NextPCBObject;
+            End;
+        Finally
+            Board.BoardIterator_Destroy(Iter);
+        End;
+    Finally
+        PCBServer.PostProcess;
+    End;
+
+    SaveDocByPath(Board.FileName);
+    Result := BuildSuccessResponse(RequestId,
+        '{"copied":' + IntToStr(Copied) + ',"layer":"'
+        + EscapeJsonString(GetLayerString(MechL)) + '"}');
+End;
+
+{..............................................................................}
+{ PCB_TrimExtendTrack - move one endpoint of a track along its own slope so it  }
+{ lands at the perpendicular projection of a target point. Pure trim/extend:    }
+{ the track stays collinear, only its length changes. The endpoint nearest      }
+{ (from_x, from_y) is the one that moves; the opposite end is the anchor.        }
+{ All coordinates in mils.                                                       }
+{..............................................................................}
+Function PCB_TrimExtendTrack(Params : String; RequestId : String) : String;
+Var
+    Board : IPCB_Board;
+    Iter : IPCB_BoardIterator;
+    Track, Best : IPCB_Track;
+    FromX, FromY, ToX, ToY, Tol : Integer;
+    TolC : Integer;
+    BestD, D : Double;
+    e1x, e1y, e2x, e2y : Double;
+    MoveEnd : Integer;
+    fx, fy, mx, my, tx, ty : Double;
+    dxv, dyv, len2, t, nx, ny : Double;
+    NewMx, NewMy, OldMxMils, OldMyMils : Integer;
+Begin
+    Board := GetPCBBoardAnywhere;
+    If Board = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCB', 'No PCB document is active');
+        Exit;
+    End;
+
+    If (ExtractJsonValue(Params, 'from_x') = '') Or (ExtractJsonValue(Params, 'from_y') = '')
+       Or (ExtractJsonValue(Params, 'to_x') = '') Or (ExtractJsonValue(Params, 'to_y') = '') Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAM', 'from_x, from_y, to_x, to_y required');
+        Exit;
+    End;
+    FromX := StrToIntDef(ExtractJsonValue(Params, 'from_x'), 0);
+    FromY := StrToIntDef(ExtractJsonValue(Params, 'from_y'), 0);
+    ToX := StrToIntDef(ExtractJsonValue(Params, 'to_x'), 0);
+    ToY := StrToIntDef(ExtractJsonValue(Params, 'to_y'), 0);
+    Tol := StrToIntDef(ExtractJsonValue(Params, 'tolerance_mils'), 5);
+    TolC := MilsToCoord(Tol);
+
+    Best := Nil;
+    MoveEnd := 0;
+    BestD := 1.0E30;
+    Iter := Board.BoardIterator_Create;
+    Try
+        Iter.AddFilter_ObjectSet(MkSet(eTrackObject));
+        Iter.AddFilter_LayerSet(AllLayers);
+        Iter.AddFilter_Method(eProcessAll);
+        Track := Iter.FirstPCBObject;
+        While Track <> Nil Do
+        Begin
+            e1x := Track.x1; e1y := Track.y1;
+            e2x := Track.x2; e2y := Track.y2;
+            D := (e1x - MilsToCoord(FromX)) * (e1x - MilsToCoord(FromX))
+               + (e1y - MilsToCoord(FromY)) * (e1y - MilsToCoord(FromY));
+            If D < BestD Then Begin BestD := D; Best := Track; MoveEnd := 1; End;
+            D := (e2x - MilsToCoord(FromX)) * (e2x - MilsToCoord(FromX))
+               + (e2y - MilsToCoord(FromY)) * (e2y - MilsToCoord(FromY));
+            If D < BestD Then Begin BestD := D; Best := Track; MoveEnd := 2; End;
+            Track := Iter.NextPCBObject;
+        End;
+    Finally
+        Board.BoardIterator_Destroy(Iter);
+    End;
+
+    If (Best = Nil) Or (Sqrt(BestD) > TolC) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NOT_FOUND',
+            'No track endpoint within tolerance of (from_x, from_y)');
+        Exit;
+    End;
+
+    If MoveEnd = 1 Then
+    Begin
+        mx := Best.x1; my := Best.y1; fx := Best.x2; fy := Best.y2;
+    End
+    Else
+    Begin
+        mx := Best.x2; my := Best.y2; fx := Best.x1; fy := Best.y1;
+    End;
+    OldMxMils := CoordToMils(Round(mx));
+    OldMyMils := CoordToMils(Round(my));
+
+    dxv := mx - fx; dyv := my - fy;
+    len2 := dxv * dxv + dyv * dyv;
+    If len2 = 0 Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'ZERO_LENGTH', 'Target track has zero length; slope undefined');
+        Exit;
+    End;
+    tx := MilsToCoord(ToX); ty := MilsToCoord(ToY);
+    t := ((tx - fx) * dxv + (ty - fy) * dyv) / len2;
+    nx := fx + t * dxv;
+    ny := fy + t * dyv;
+    NewMx := Round(nx);
+    NewMy := Round(ny);
+
+    PCBServer.PreProcess;
+    Try
+        PCBServer.SendMessageToRobots(Best.I_ObjectAddress, c_Broadcast,
+            PCBM_BeginModify, c_NoEventData);
+        If MoveEnd = 1 Then Begin Best.x1 := NewMx; Best.y1 := NewMy; End
+        Else Begin Best.x2 := NewMx; Best.y2 := NewMy; End;
+        PCBServer.SendMessageToRobots(Best.I_ObjectAddress, c_Broadcast,
+            PCBM_EndModify, c_NoEventData);
+    Finally
+        PCBServer.PostProcess;
+    End;
+    SaveDocByPath(Board.FileName);
+
+    Result := BuildSuccessResponse(RequestId,
+        '{"moved_end":' + IntToStr(MoveEnd)
+        + ',"old_x":' + IntToStr(OldMxMils) + ',"old_y":' + IntToStr(OldMyMils)
+        + ',"new_x":' + IntToStr(CoordToMils(NewMx)) + ',"new_y":' + IntToStr(CoordToMils(NewMy))
+        + ',"layer":"' + EscapeJsonString(GetLayerString(Best.Layer)) + '"}');
+End;
+
+{ Squared-distance proximity test in internal coords, computed in Double to     }
+{ avoid 32-bit overflow on board-scale magnitudes.                              }
+Function PointsNearC(Ax, Ay, Bx, By, TolC : Integer) : Boolean;
+Var dx, dy, tt : Double;
+Begin
+    dx := Ax - Bx; dy := Ay - By; tt := TolC;
+    Result := (dx * dx + dy * dy) <= (tt * tt);
+End;
+
+{ Net name of a track, '' when it carries no net. }
+Function TrackNetNm(T : IPCB_Track) : String;
+Begin
+    Result := '';
+    Try If T.Net <> Nil Then Result := T.Net.Name; Except End;
+End;
+
+{..............................................................................}
+{ PCB_CleanupTracks - tidy stray track geometry. Two passes, selectable via     }
+{ 'mode' (slivers | merge | both; default slivers):                             }
+{   slivers - delete tracks whose length is below min_length_mils (default 1).  }
+{   merge   - join two collinear, same-layer, same-width, same-net tracks that   }
+{             meet end-to-end into one, ONLY when the shared point is a clean    }
+{             degree-2 junction (exactly those two track ends there, with no     }
+{             via / pad / arc / third track). The guard makes the merge safe to  }
+{             run on routed copper without breaking connectivity.                }
+{..............................................................................}
+Function PCB_CleanupTracks(Params : String; RequestId : String) : String;
+Var
+    Board : IPCB_Board;
+    Iter, Iter2, SIter : IPCB_BoardIterator;
+    A, B, MergeA, MergeB : IPCB_Track;
+    SObj : IPCB_Primitive;
+    Mode : String;
+    MinLenMils, TolC, JTolC : Integer;
+    SliverDeleted, Merged, Guard : Integer;
+    DidWork : Boolean;
+    a1x, a1y, a2x, a2y, b1x, b1y, b2x, b2y : Double;
+    SegLen : Double;
+    Sx, Sy, FarAx, FarAy, FarBx, FarBy : Integer;
+    sax, say, sbx, sby, crossv, dotv, lna, lnb : Double;
+    TrackCnt, BlockerCnt : Integer;
+    NewT : IPCB_Track;
+    NewLayer : TLayer;
+    NewWidth : Integer;
+    NewNet : IPCB_Net;
+Begin
+    Board := GetPCBBoardAnywhere;
+    If Board = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCB', 'No PCB document is active');
+        Exit;
+    End;
+
+    Mode := ExtractJsonValue(Params, 'mode');
+    If Mode = '' Then Mode := 'slivers';
+    MinLenMils := StrToIntDef(ExtractJsonValue(Params, 'min_length_mils'), 1);
+    TolC := MilsToCoord(2);
+    JTolC := MilsToCoord(2);
+    SliverDeleted := 0;
+    Merged := 0;
+
+    { Sliver pass: find-one-delete-restart so the iterator is never stale. }
+    If (Mode = 'slivers') Or (Mode = 'both') Then
+    Begin
+        DidWork := True;
+        While DidWork Do
+        Begin
+            DidWork := False;
+            A := Nil;
+            Iter := Board.BoardIterator_Create;
+            Try
+                Iter.AddFilter_ObjectSet(MkSet(eTrackObject));
+                Iter.AddFilter_LayerSet(AllLayers);
+                Iter.AddFilter_Method(eProcessAll);
+                B := Iter.FirstPCBObject;
+                While (B <> Nil) And (A = Nil) Do
+                Begin
+                    a1x := B.x1; a1y := B.y1; a2x := B.x2; a2y := B.y2;
+                    SegLen := Sqrt((a2x - a1x) * (a2x - a1x) + (a2y - a1y) * (a2y - a1y));
+                    If SegLen < MilsToCoord(MinLenMils) Then A := B;
+                    B := Iter.NextPCBObject;
+                End;
+            Finally
+                Board.BoardIterator_Destroy(Iter);
+            End;
+            If A <> Nil Then
+            Begin
+                PCBServer.PreProcess;
+                Try
+                    Board.RemovePCBObject(A);
+                Finally
+                    PCBServer.PostProcess;
+                End;
+                SliverDeleted := SliverDeleted + 1;
+                DidWork := True;
+            End;
+        End;
+    End;
+
+    { Merge pass: find-one-merge-restart. The search runs entirely inside the    }
+    { iterators using base members + typed x1/x2; the board mutation is deferred  }
+    { until both iterators are destroyed so NextPCBObject never sees a stale set. }
+    If (Mode = 'merge') Or (Mode = 'both') Then
+    Begin
+        DidWork := True;
+        Guard := 0;
+        While DidWork And (Guard < 20000) Do
+        Begin
+            DidWork := False;
+            Guard := Guard + 1;
+            MergeA := Nil; MergeB := Nil;
+            FarAx := 0; FarAy := 0; FarBx := 0; FarBy := 0;
+
+            Iter := Board.BoardIterator_Create;
+            Try
+                Iter.AddFilter_ObjectSet(MkSet(eTrackObject));
+                Iter.AddFilter_LayerSet(AllLayers);
+                Iter.AddFilter_Method(eProcessAll);
+                A := Iter.FirstPCBObject;
+                While (A <> Nil) And (MergeA = Nil) Do
+                Begin
+                    Iter2 := Board.BoardIterator_Create;
+                    Try
+                        Iter2.AddFilter_ObjectSet(MkSet(eTrackObject));
+                        Iter2.AddFilter_LayerSet(AllLayers);
+                        Iter2.AddFilter_Method(eProcessAll);
+                        B := Iter2.FirstPCBObject;
+                        While (B <> Nil) And (MergeA = Nil) Do
+                        Begin
+                            If (A.I_ObjectAddress <> B.I_ObjectAddress)
+                               And (A.Layer = B.Layer) And (A.Width = B.Width)
+                               And (TrackNetNm(A) = TrackNetNm(B)) Then
+                            Begin
+                                a1x := A.x1; a1y := A.y1; a2x := A.x2; a2y := A.y2;
+                                b1x := B.x1; b1y := B.y1; b2x := B.x2; b2y := B.y2;
+                                { locate the single shared endpoint S; A2/B2 are the far ends }
+                                If PointsNearC(Round(a1x), Round(a1y), Round(b1x), Round(b1y), TolC) Then
+                                Begin Sx := Round(a1x); Sy := Round(a1y); FarAx := Round(a2x); FarAy := Round(a2y); FarBx := Round(b2x); FarBy := Round(b2y); End
+                                Else If PointsNearC(Round(a1x), Round(a1y), Round(b2x), Round(b2y), TolC) Then
+                                Begin Sx := Round(a1x); Sy := Round(a1y); FarAx := Round(a2x); FarAy := Round(a2y); FarBx := Round(b1x); FarBy := Round(b1y); End
+                                Else If PointsNearC(Round(a2x), Round(a2y), Round(b1x), Round(b1y), TolC) Then
+                                Begin Sx := Round(a2x); Sy := Round(a2y); FarAx := Round(a1x); FarAy := Round(a1y); FarBx := Round(b2x); FarBy := Round(b2y); End
+                                Else If PointsNearC(Round(a2x), Round(a2y), Round(b2x), Round(b2y), TolC) Then
+                                Begin Sx := Round(a2x); Sy := Round(a2y); FarAx := Round(a1x); FarAy := Round(a1y); FarBx := Round(b1x); FarBy := Round(b1y); End
+                                Else
+                                    Sx := -2147483647;  { sentinel: no shared endpoint }
+
+                                If Sx <> -2147483647 Then
+                                Begin
+                                    { collinear continuation: far ends point opposite directions through S }
+                                    sax := FarAx - Sx; say := FarAy - Sy;
+                                    sbx := FarBx - Sx; sby := FarBy - Sy;
+                                    lna := Sqrt(sax * sax + say * say);
+                                    lnb := Sqrt(sbx * sbx + sby * sby);
+                                    If (lna > 0) And (lnb > 0) Then
+                                    Begin
+                                        crossv := Abs(sax * sby - say * sbx) / (lna * lnb);
+                                        dotv := sax * sbx + say * sby;
+                                        If (crossv < 0.02) And (dotv < 0) Then
+                                        Begin
+                                            { degree-2 junction guard at S using base members only }
+                                            TrackCnt := 0; BlockerCnt := 0;
+                                            SIter := Board.SpatialIterator_Create;
+                                            Try
+                                                SIter.AddFilter_ObjectSet(MkSet(eTrackObject, eArcObject, eViaObject, ePadObject));
+                                                SIter.AddFilter_LayerSet(AllLayers);
+                                                SIter.AddFilter_Area(Sx - JTolC, Sy - JTolC, Sx + JTolC, Sy + JTolC);
+                                                SObj := SIter.FirstPCBObject;
+                                                While SObj <> Nil Do
+                                                Begin
+                                                    If SObj.ObjectId = eTrackObject Then TrackCnt := TrackCnt + 1
+                                                    Else BlockerCnt := BlockerCnt + 1;
+                                                    SObj := SIter.NextPCBObject;
+                                                End;
+                                            Finally
+                                                Board.SpatialIterator_Destroy(SIter);
+                                            End;
+
+                                            If (TrackCnt = 2) And (BlockerCnt = 0) Then
+                                            Begin
+                                                MergeA := A; MergeB := B;
+                                                NewLayer := A.Layer; NewWidth := A.Width; NewNet := A.Net;
+                                            End;
+                                        End;
+                                    End;
+                                End;
+                            End;
+                            B := Iter2.NextPCBObject;
+                        End;
+                    Finally
+                        Board.BoardIterator_Destroy(Iter2);
+                    End;
+                    A := Iter.NextPCBObject;
+                End;
+            Finally
+                Board.BoardIterator_Destroy(Iter);
+            End;
+
+            If MergeA <> Nil Then
+            Begin
+                PCBServer.PreProcess;
+                Try
+                    NewT := PCBServer.PCBObjectFactory(eTrackObject, eNoDimension, eCreate_Default);
+                    NewT.Layer := NewLayer;
+                    NewT.Width := NewWidth;
+                    NewT.x1 := FarAx; NewT.y1 := FarAy;
+                    NewT.x2 := FarBx; NewT.y2 := FarBy;
+                    If NewNet <> Nil Then NewT.Net := NewNet;
+                    Board.AddPCBObject(NewT);
+                    PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
+                        PCBM_BoardRegisteration, NewT.I_ObjectAddress);
+                    Board.RemovePCBObject(MergeA);
+                    Board.RemovePCBObject(MergeB);
+                Finally
+                    PCBServer.PostProcess;
+                End;
+                Merged := Merged + 1;
+                DidWork := True;
+            End;
+        End;
+    End;
+
+    SaveDocByPath(Board.FileName);
+    Result := BuildSuccessResponse(RequestId,
+        '{"slivers_deleted":' + IntToStr(SliverDeleted)
+        + ',"merged":' + IntToStr(Merged)
+        + ',"mode":"' + EscapeJsonString(Mode) + '"}');
+End;
+
+{..............................................................................}
+{ PCB_PlaceThievingPads - fill bare copper area with a grid of small isolated   }
+{ pads (thieving) so plating current spreads evenly. A grid point is skipped     }
+{ whenever ANY existing primitive (track / arc / via / pad / fill / region /     }
+{ polygon / component) sits within half-pad + clearance of it, so the pads only  }
+{ land in genuinely empty regions. Pads carry no net.                            }
+{..............................................................................}
+Function PCB_PlaceThievingPads(Params : String; RequestId : String) : String;
+Var
+    Board : IPCB_Board;
+    Outline : IPCB_BoardOutline;
+    BR : TCoordRect;
+    SIter : IPCB_BoardIterator;
+    SObj : IPCB_Primitive;
+    LayerStr : String;
+    Lyr : TLayer;
+    PadSize, Pitch, Clearance, Margin : Integer;
+    PadC, PitchC, ClearC, MarginC, HalfClr : Integer;
+    Gx, Gy, Placed, Scanned, MaxPads, MaxScan : Integer;
+    Blocked : Boolean;
+    NewPad : IPCB_Pad;
+Begin
+    Board := GetPCBBoardAnywhere;
+    If Board = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCB', 'No PCB document is active');
+        Exit;
+    End;
+    Outline := Board.BoardOutline;
+    If Outline = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_OUTLINE', 'Board has no outline defined');
+        Exit;
+    End;
+    Try Outline.Invalidate; Outline.Rebuild; Outline.Validate; Except End;
+    BR := Outline.BoundingRectangle;
+
+    LayerStr := ExtractJsonValue(Params, 'layer');
+    If LayerStr <> '' Then Lyr := GetLayerFromString(LayerStr) Else Lyr := eTopLayer;
+    PadSize := StrToIntDef(ExtractJsonValue(Params, 'pad_size_mils'), 20);
+    Pitch := StrToIntDef(ExtractJsonValue(Params, 'pitch_mils'), 50);
+    Clearance := StrToIntDef(ExtractJsonValue(Params, 'clearance_mils'), 15);
+    Margin := StrToIntDef(ExtractJsonValue(Params, 'margin_mils'), 100);
+    If Pitch < 1 Then Pitch := 50;
+
+    PadC := MilsToCoord(PadSize);
+    PitchC := MilsToCoord(Pitch);
+    ClearC := MilsToCoord(Clearance);
+    MarginC := MilsToCoord(Margin);
+    HalfClr := (PadC Div 2) + ClearC;
+
+    Placed := 0; Scanned := 0;
+    MaxPads := 5000; MaxScan := 200000;
+
+    PCBServer.PreProcess;
+    Try
+        Gy := BR.Bottom + MarginC;
+        While (Gy <= BR.Top - MarginC) And (Placed < MaxPads) And (Scanned < MaxScan) Do
+        Begin
+            Gx := BR.Left + MarginC;
+            While (Gx <= BR.Right - MarginC) And (Placed < MaxPads) And (Scanned < MaxScan) Do
+            Begin
+                Scanned := Scanned + 1;
+                Blocked := False;
+                SIter := Board.SpatialIterator_Create;
+                Try
+                    SIter.AddFilter_ObjectSet(MkSet(eTrackObject, eArcObject, eViaObject,
+                        ePadObject, eFillObject, eRegionObject, ePolyObject, eComponentObject));
+                    SIter.AddFilter_LayerSet(AllLayers);
+                    SIter.AddFilter_Area(Gx - HalfClr, Gy - HalfClr, Gx + HalfClr, Gy + HalfClr);
+                    SObj := SIter.FirstPCBObject;
+                    If SObj <> Nil Then Blocked := True;
+                Finally
+                    Board.SpatialIterator_Destroy(SIter);
+                End;
+
+                If Not Blocked Then
+                Begin
+                    NewPad := PCBServer.PCBObjectFactory(ePadObject, eNoDimension, eCreate_Default);
+                    NewPad.Layer := Lyr;
+                    NewPad.X := Gx;
+                    NewPad.Y := Gy;
+                    NewPad.TopXSize := PadC;
+                    NewPad.TopYSize := PadC;
+                    NewPad.TopShape := eRounded;
+                    Board.AddPCBObject(NewPad);
+                    PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
+                        PCBM_BoardRegisteration, NewPad.I_ObjectAddress);
+                    Placed := Placed + 1;
+                End;
+                Gx := Gx + PitchC;
+            End;
+            Gy := Gy + PitchC;
+        End;
+    Finally
+        PCBServer.PostProcess;
+    End;
+
+    SaveDocByPath(Board.FileName);
+    Result := BuildSuccessResponse(RequestId,
+        '{"placed":' + IntToStr(Placed) + ',"scanned":' + IntToStr(Scanned)
+        + ',"layer":"' + EscapeJsonString(GetLayerString(Lyr)) + '"}');
+End;
+
+{..............................................................................}
+{ PCB_MoveTracksToLayer - move every track of one net onto a target signal      }
+{ layer, then drop a via wherever the net still needs to reach a single-layer   }
+{ (SMD) pad that is NOT on the target layer. Because ALL the net's tracks move,  }
+{ a same-net SMD pad off the target layer can only connect through a via, so a   }
+{ via at that pad's centre is exactly what is required. Multilayer (through-     }
+{ hole) pads need no via.                                                        }
+{..............................................................................}
+Function PCB_MoveTracksToLayer(Params : String; RequestId : String) : String;
+Var
+    Board : IPCB_Board;
+    Iter : IPCB_BoardIterator;
+    Trk : IPCB_Track;
+    Pad : IPCB_Pad;
+    Via : IPCB_Via;
+    NetStr, LayerStr : String;
+    TargetNet : IPCB_Net;
+    TargetLayer : TLayer;
+    ViaSize, ViaHole, Moved, ViasAdded : Integer;
+Begin
+    Board := GetPCBBoardAnywhere;
+    If Board = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCB', 'No PCB document is active');
+        Exit;
+    End;
+
+    NetStr := ExtractJsonValue(Params, 'net_name');
+    LayerStr := ExtractJsonValue(Params, 'target_layer');
+    If (NetStr = '') Or (LayerStr = '') Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAM', 'net_name and target_layer required');
+        Exit;
+    End;
+    TargetNet := FindNetByName(Board, NetStr);
+    If TargetNet = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NOT_FOUND', 'Net not found: ' + NetStr);
+        Exit;
+    End;
+    TargetLayer := GetLayerFromString(LayerStr);
+    ViaSize := StrToIntDef(ExtractJsonValue(Params, 'via_size_mils'), 50);
+    ViaHole := StrToIntDef(ExtractJsonValue(Params, 'via_hole_mils'), 28);
+    Moved := 0; ViasAdded := 0;
+
+    PCBServer.PreProcess;
+    Try
+        { move pass: layer change does not alter the iterated set, so in-place }
+        Iter := Board.BoardIterator_Create;
+        Try
+            Iter.AddFilter_ObjectSet(MkSet(eTrackObject));
+            Iter.AddFilter_LayerSet(AllLayers);
+            Iter.AddFilter_Method(eProcessAll);
+            Trk := Iter.FirstPCBObject;
+            While Trk <> Nil Do
+            Begin
+                If (TrackNetNm(Trk) = NetStr) And (Trk.Layer <> TargetLayer) Then
+                Begin
+                    PCBServer.SendMessageToRobots(Trk.I_ObjectAddress, c_Broadcast,
+                        PCBM_BeginModify, c_NoEventData);
+                    Trk.Layer := TargetLayer;
+                    PCBServer.SendMessageToRobots(Trk.I_ObjectAddress, c_Broadcast,
+                        PCBM_EndModify, c_NoEventData);
+                    Moved := Moved + 1;
+                End;
+                Trk := Iter.NextPCBObject;
+            End;
+        Finally
+            Board.BoardIterator_Destroy(Iter);
+        End;
+
+        { via pass: same-net SMD pad off the target layer now needs a via }
+        Iter := Board.BoardIterator_Create;
+        Try
+            Iter.AddFilter_ObjectSet(MkSet(ePadObject));
+            Iter.AddFilter_LayerSet(AllLayers);
+            Iter.AddFilter_Method(eProcessAll);
+            Pad := Iter.FirstPCBObject;
+            While Pad <> Nil Do
+            Begin
+                If Pad.InNet Then
+                    If Pad.Net.Name = NetStr Then
+                        If (Pad.Layer <> eMultiLayer) And (Pad.Layer <> TargetLayer) Then
+                        Begin
+                            Via := PCBServer.PCBObjectFactory(eViaObject, eNoDimension, eCreate_Default);
+                            Via.x := Pad.X;
+                            Via.y := Pad.Y;
+                            Via.Size := MilsToCoord(ViaSize);
+                            Via.HoleSize := MilsToCoord(ViaHole);
+                            Via.LowLayer := eTopLayer;
+                            Via.HighLayer := eBottomLayer;
+                            Via.Net := TargetNet;
+                            Board.AddPCBObject(Via);
+                            PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
+                                PCBM_BoardRegisteration, Via.I_ObjectAddress);
+                            ViasAdded := ViasAdded + 1;
+                        End;
+                Pad := Iter.NextPCBObject;
+            End;
+        Finally
+            Board.BoardIterator_Destroy(Iter);
+        End;
+    Finally
+        PCBServer.PostProcess;
+    End;
+
+    SaveDocByPath(Board.FileName);
+    Result := BuildSuccessResponse(RequestId,
+        '{"net":"' + EscapeJsonString(NetStr) + '","target_layer":"'
+        + EscapeJsonString(GetLayerString(TargetLayer)) + '","moved":'
+        + IntToStr(Moved) + ',"vias_added":' + IntToStr(ViasAdded) + '}');
+End;
+
+{..............................................................................}
+{ PCB_BevelPolygonCorners - chamfer the corners of a copper polygon. Each sharp  }
+{ vertex is replaced by two points set back along its two edges by bevel_mils    }
+{ (auto-clamped so adjacent bevels never overlap), turning every corner into a   }
+{ straight 45-style cut. Only line-segment polygons are handled; a polygon with  }
+{ any arc segment is left untouched. Target is the Nth polygon (index, default   }
+{ 0) optionally filtered to net_name. The polygon is repoured afterwards.        }
+{..............................................................................}
+Function PCB_BevelPolygonCorners(Params : String; RequestId : String) : String;
+Var
+    Board : IPCB_Board;
+    Iter : IPCB_BoardIterator;
+    Poly, Target : IPCB_Polygon;
+    OrigList : TStringList;
+    NetFilter, S : String;
+    Idx, MatchCount, N, I, K, P, dC, BevelMils : Integer;
+    vpx, vpy, vix, viy, vnx, vny, ax, ay, bx, by : Integer;
+    upx, upy, unx, uny, lenp, lenn, dd : Double;
+    Seg : TPolySegment;
+    HasArc : Boolean;
+Begin
+    Board := GetPCBBoardAnywhere;
+    If Board = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCB', 'No PCB document is active');
+        Exit;
+    End;
+
+    NetFilter := ExtractJsonValue(Params, 'net_name');
+    Idx := StrToIntDef(ExtractJsonValue(Params, 'index'), 0);
+    BevelMils := StrToIntDef(ExtractJsonValue(Params, 'bevel_mils'), 25);
+    dC := MilsToCoord(BevelMils);
+
+    Target := Nil;
+    MatchCount := 0;
+    Iter := Board.BoardIterator_Create;
+    Try
+        Iter.AddFilter_ObjectSet(MkSet(ePolyObject));
+        Iter.AddFilter_LayerSet(AllLayers);
+        Iter.AddFilter_Method(eProcessAll);
+        Poly := Iter.FirstPCBObject;
+        While (Poly <> Nil) And (Target = Nil) Do
+        Begin
+            If (NetFilter = '') Or ((Poly.Net <> Nil) And (Poly.Net.Name = NetFilter)) Then
+            Begin
+                If MatchCount = Idx Then Target := Poly;
+                MatchCount := MatchCount + 1;
+            End;
+            Poly := Iter.NextPCBObject;
+        End;
+    Finally
+        Board.BoardIterator_Destroy(Iter);
+    End;
+
+    If Target = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NOT_FOUND', 'No matching polygon at that index');
+        Exit;
+    End;
+
+    N := 0;
+    Try N := Target.PointCount; Except End;
+    If N < 3 Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'BAD_POLYGON', 'Polygon has fewer than 3 vertices');
+        Exit;
+    End;
+
+    { snapshot original vertices, refusing arc segments }
+    OrigList := TStringList.Create;
+    HasArc := False;
+    For I := 0 To N - 1 Do
+    Begin
+        If Target.Segments[I].Kind <> ePolySegmentLine Then HasArc := True;
+        OrigList.Add(IntToStr(Target.Segments[I].vx) + '|' + IntToStr(Target.Segments[I].vy));
+    End;
+    If HasArc Then
+    Begin
+        OrigList.Free;
+        Result := BuildErrorResponse(RequestId, 'HAS_ARC', 'Polygon has arc segments; bevel only handles straight outlines');
+        Exit;
+    End;
+
+    PCBServer.PreProcess;
+    Try
+        Target.PointCount := 2 * N;
+        Seg := TPolySegment;
+        Seg.Kind := ePolySegmentLine;
+        For I := 0 To N - 1 Do
+        Begin
+            K := I - 1; If K < 0 Then K := N - 1;
+            S := OrigList[K];   P := Pos('|', S);
+            vpx := StrToIntDef(Copy(S, 1, P - 1), 0); vpy := StrToIntDef(Copy(S, P + 1, Length(S)), 0);
+            S := OrigList[I];   P := Pos('|', S);
+            vix := StrToIntDef(Copy(S, 1, P - 1), 0); viy := StrToIntDef(Copy(S, P + 1, Length(S)), 0);
+            K := I + 1; If K >= N Then K := 0;
+            S := OrigList[K];   P := Pos('|', S);
+            vnx := StrToIntDef(Copy(S, 1, P - 1), 0); vny := StrToIntDef(Copy(S, P + 1, Length(S)), 0);
+
+            upx := vpx - vix; upy := vpy - viy; lenp := Sqrt(upx * upx + upy * upy);
+            unx := vnx - vix; uny := vny - viy; lenn := Sqrt(unx * unx + uny * uny);
+            dd := dC;
+            If lenp > 0 Then If dd > 0.45 * lenp Then dd := 0.45 * lenp;
+            If lenn > 0 Then If dd > 0.45 * lenn Then dd := 0.45 * lenn;
+            If (lenp > 0) And (lenn > 0) Then
+            Begin
+                ax := Round(vix + dd * upx / lenp); ay := Round(viy + dd * upy / lenp);
+                bx := Round(vix + dd * unx / lenn); by := Round(viy + dd * uny / lenn);
+            End
+            Else
+            Begin
+                ax := vix; ay := viy; bx := vix; by := viy;
+            End;
+
+            Seg.vx := ax; Seg.vy := ay; Target.Segments[2 * I] := Seg;
+            Seg.vx := bx; Seg.vy := by; Target.Segments[2 * I + 1] := Seg;
+        End;
+
+        Target.Invalidate;
+        Target.Rebuild;
+        Target.Validate;
+    Finally
+        PCBServer.PostProcess;
+    End;
+    OrigList.Free;
+
+    ResetParameters;
+    RunProcess('PCB:RepourAllPolygons');
+    SaveDocByPath(Board.FileName);
+
+    Result := BuildSuccessResponse(RequestId,
+        '{"beveled":true,"index":' + IntToStr(Idx)
+        + ',"orig_vertices":' + IntToStr(N)
+        + ',"new_vertices":' + IntToStr(2 * N)
+        + ',"bevel_mils":' + IntToStr(BevelMils) + '}');
+End;
+
+{..............................................................................}
 { HandlePCBCommand - Route PCB actions to handlers                            }
 {..............................................................................}
 
@@ -8610,6 +9688,16 @@ Begin
         'autoplace_silkscreen':    Result := PCB_AutoplaceSilkscreen(Params, RequestId);
         'tune_length':             Result := PCB_TuneLength(Params, RequestId);
         'panelize':                Result := PCB_Panelize(Params, RequestId);
+        'delete_invalid_objects':  Result := PCB_DeleteInvalidObjects(Params, RequestId);
+        'audit_pad_center_connected': Result := PCB_AuditPadCenterConnected(Params, RequestId);
+        'auto_size_board_outline': Result := PCB_AutoSizeBoardOutline(Params, RequestId);
+        'normalize_vias':          Result := PCB_NormalizeVias(Params, RequestId);
+        'copy_designators_to_mech': Result := PCB_CopyDesignatorsToMechLayer(Params, RequestId);
+        'trim_extend_track':       Result := PCB_TrimExtendTrack(Params, RequestId);
+        'cleanup_tracks':          Result := PCB_CleanupTracks(Params, RequestId);
+        'place_thieving_pads':     Result := PCB_PlaceThievingPads(Params, RequestId);
+        'move_tracks_to_layer':    Result := PCB_MoveTracksToLayer(Params, RequestId);
+        'bevel_polygon_corners':   Result := PCB_BevelPolygonCorners(Params, RequestId);
     Else
         Result := BuildErrorResponse(RequestId, 'UNKNOWN_ACTION', 'Unknown PCB action: ' + Action);
     End;

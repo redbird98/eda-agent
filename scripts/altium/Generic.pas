@@ -7752,6 +7752,217 @@ End;
 { Command Handler - must be at end                                            }
 {..............................................................................}
 
+{..............................................................................}
+{ Gen_StubPins - place a short wire stub + net label at each named pin. Pins   }
+{ is a pipe-separated list of "designator,pin_number,label" records (label     }
+{ optional, defaults to designator_pinnumber). The stub extends from the pin's }
+{ electrical end outward along the pin orientation by stub_length_mils.        }
+{..............................................................................}
+Function Gen_StubPins(Params : String; RequestId : String) : String;
+Var
+    SchDoc : ISch_Document;
+    PinsStr, RecStr, Remaining, Token : String;
+    Desig, PinNum, Lbl : String;
+    PipePos, CommaPos, FieldIdx, StubLen, Stubbed, Failed : Integer;
+    Iter, PinIter : ISch_Iterator;
+    Comp : ISch_Component;
+    Pin : ISch_Pin;
+    PX, PY, EX, EY, Orient : Integer;
+    Found : Boolean;
+    Wire : ISch_Wire;
+    NetLabel : ISch_NetLabel;
+Begin
+    SchDoc := SchServer.GetCurrentSchDocument;
+    If SchDoc = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_SCHDOC', 'No schematic document is active');
+        Exit;
+    End;
+
+    PinsStr := ExtractJsonValue(Params, 'pins');
+    If PinsStr = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAM', 'pins parameter required');
+        Exit;
+    End;
+    StubLen := StrToIntDef(ExtractJsonValue(Params, 'stub_length_mils'), 100);
+
+    Stubbed := 0;
+    Failed := 0;
+    SchServer.ProcessControl.PreProcess(SchDoc, '');
+    Try
+        Remaining := PinsStr;
+        While Length(Remaining) > 0 Do
+        Begin
+            PipePos := Pos('|', Remaining);
+            If PipePos = 0 Then Begin RecStr := Remaining; Remaining := ''; End
+            Else Begin RecStr := Copy(Remaining, 1, PipePos - 1); Remaining := Copy(Remaining, PipePos + 1, Length(Remaining)); End;
+            If RecStr = '' Then Continue;
+
+            Desig := ''; PinNum := ''; Lbl := '';
+            FieldIdx := 0;
+            While (RecStr <> '') And (FieldIdx <= 2) Do
+            Begin
+                CommaPos := Pos(',', RecStr);
+                If CommaPos = 0 Then Begin Token := RecStr; RecStr := ''; End
+                Else Begin Token := Copy(RecStr, 1, CommaPos - 1); RecStr := Copy(RecStr, CommaPos + 1, Length(RecStr)); End;
+                Case FieldIdx Of
+                    0: Desig := Token;
+                    1: PinNum := Token;
+                    2: Lbl := Token;
+                End;
+                FieldIdx := FieldIdx + 1;
+            End;
+
+            If (Desig = '') Or (PinNum = '') Then Begin Failed := Failed + 1; Continue; End;
+
+            Found := False;
+            PX := 0; PY := 0; Orient := 0;
+            Iter := SchDoc.SchIterator_Create;
+            Try
+                Iter.AddFilter_ObjectSet(MkSet(eSchComponent));
+                Comp := Iter.FirstSchObject;
+                While (Comp <> Nil) And (Not Found) Do
+                Begin
+                    If Comp.Designator.Text = Desig Then
+                    Begin
+                        PinIter := Comp.SchIterator_Create;
+                        Try
+                            PinIter.AddFilter_ObjectSet(MkSet(ePin));
+                            Pin := PinIter.FirstSchObject;
+                            While (Pin <> Nil) And (Not Found) Do
+                            Begin
+                                If Pin.Designator = PinNum Then
+                                Begin
+                                    Try PX := CoordToMils(Pin.Location.X); Except End;
+                                    Try PY := CoordToMils(Pin.Location.Y); Except End;
+                                    Try Orient := Pin.Orientation; Except End;
+                                    Found := True;
+                                End;
+                                Pin := PinIter.NextSchObject;
+                            End;
+                        Finally
+                            Comp.SchIterator_Destroy(PinIter);
+                        End;
+                    End;
+                    Comp := Iter.NextSchObject;
+                End;
+            Finally
+                SchDoc.SchIterator_Destroy(Iter);
+            End;
+
+            If Not Found Then Begin Failed := Failed + 1; Continue; End;
+
+            EX := PX; EY := PY;
+            If Orient = 0 Then EX := PX + StubLen
+            Else If Orient = 1 Then EY := PY + StubLen
+            Else If Orient = 2 Then EX := PX - StubLen
+            Else If Orient = 3 Then EY := PY - StubLen;
+
+            Wire := SchServer.SchObjectFactory(eWire, eCreate_Default);
+            If Wire <> Nil Then
+            Begin
+                Wire.Location := Point(MilsToCoord(PX), MilsToCoord(PY));
+                Wire.InsertVertex := 1;
+                Wire.SetState_Vertex(1, Point(MilsToCoord(PX), MilsToCoord(PY)));
+                Wire.InsertVertex := 2;
+                Wire.SetState_Vertex(2, Point(MilsToCoord(EX), MilsToCoord(EY)));
+                SchDoc.RegisterSchObjectInContainer(Wire);
+                SchRegisterObject(SchDoc, Wire);
+            End;
+
+            If Lbl = '' Then Lbl := Desig + '_' + PinNum;
+            NetLabel := SchServer.SchObjectFactory(eNetLabel, eCreate_Default);
+            If NetLabel <> Nil Then
+            Begin
+                NetLabel.Text := Lbl;
+                NetLabel.Location := Point(MilsToCoord(EX), MilsToCoord(EY));
+                SchDoc.RegisterSchObjectInContainer(NetLabel);
+                SchRegisterObject(SchDoc, NetLabel);
+            End;
+
+            Stubbed := Stubbed + 1;
+        End;
+    Finally
+        SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
+        SchDoc.GraphicallyInvalidate;
+    End;
+
+    Result := BuildSuccessResponse(RequestId,
+        '{"stubbed":' + IntToStr(Stubbed) + ',"failed":' + IntToStr(Failed) + '}');
+End;
+
+{..............................................................................}
+{ Gen_SetNetTie - mark a placed schematic component as a net tie. A net tie     }
+{ component shorts the nets landing on its pins for routing while keeping them   }
+{ logically separate. mode 'bom' keeps it in the BOM; 'nobom' (default) hides    }
+{ it and lets synchronization maintain it. Sets ISch_Component.ComponentKind.    }
+{..............................................................................}
+Function Gen_SetNetTie(Params : String; RequestId : String) : String;
+Var
+    SchDoc : ISch_Document;
+    Iter : ISch_Iterator;
+    Comp, Target : ISch_Component;
+    Desig, ModeStr, KindStr : String;
+Begin
+    SchDoc := SchServer.GetCurrentSchDocument;
+    If SchDoc = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_SCHDOC', 'No schematic document is active');
+        Exit;
+    End;
+
+    Desig := ExtractJsonValue(Params, 'designator');
+    If Desig = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAM', 'designator parameter required');
+        Exit;
+    End;
+    ModeStr := ExtractJsonValue(Params, 'mode');
+    If ModeStr = '' Then ModeStr := 'nobom';
+
+    Target := Nil;
+    Iter := SchDoc.SchIterator_Create;
+    Try
+        Iter.AddFilter_ObjectSet(MkSet(eSchComponent));
+        Comp := Iter.FirstSchObject;
+        While (Comp <> Nil) And (Target = Nil) Do
+        Begin
+            If Comp.Designator.Text = Desig Then Target := Comp;
+            Comp := Iter.NextSchObject;
+        End;
+    Finally
+        SchDoc.SchIterator_Destroy(Iter);
+    End;
+
+    If Target = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NOT_FOUND', 'Component not found: ' + Desig);
+        Exit;
+    End;
+
+    SchServer.ProcessControl.PreProcess(SchDoc, '');
+    Try
+        If ModeStr = 'bom' Then
+        Begin
+            Target.ComponentKind := eComponentKind_NetTie_BOM;
+            KindStr := 'NetTie_BOM';
+        End
+        Else
+        Begin
+            Target.ComponentKind := eComponentKind_NetTie_NoBOM;
+            KindStr := 'NetTie_NoBOM';
+        End;
+    Finally
+        SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
+    End;
+    Try SchDoc.GraphicallyInvalidate; Except End;
+
+    Result := BuildSuccessResponse(RequestId,
+        '{"designator":"' + EscapeJsonString(Desig) + '","component_kind":"'
+        + KindStr + '"}');
+End;
+
 Function HandleGenericCommand(Action : String; Params : String; RequestId : String) : String;
 Begin
     Case Action Of
@@ -7796,6 +8007,8 @@ Begin
         'set_sch_component_parameters': Result := Gen_SetSchComponentParameters(Params, RequestId);
         'get_sch_component_pins': Result := Gen_GetSchComponentPins(Params, RequestId);
         'place_net_label':  Result := Gen_PlaceNetLabel(Params, RequestId);
+        'stub_pins':        Result := Gen_StubPins(Params, RequestId);
+        'set_net_tie':      Result := Gen_SetNetTie(Params, RequestId);
         'place_port':       Result := Gen_PlacePort(Params, RequestId);
         'place_power_port': Result := Gen_PlacePowerPort(Params, RequestId);
         'get_sheet_parameters': Result := Gen_GetSheetParameters(Params, RequestId);

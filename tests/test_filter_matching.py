@@ -385,16 +385,16 @@ class TestCommandRouting:
     VALID_CATEGORIES = {'application', 'project', 'library', 'generic'}
 
     APPLICATION_ACTIONS = [
-        'ping', 'get_version', 'get_open_documents', 'get_active_document',
-        'set_active_document', 'run_process', 'stop_server',
+        'ping', 'get_version', 'app_list_documents', 'app_get_active_document',
+        'app_set_active_document', 'run_process', 'stop_server',
     ]
 
     PROJECT_ACTIONS = [
         'create', 'open', 'save', 'close', 'get_documents', 'add_document',
         'remove_document', 'get_parameters', 'set_parameter', 'compile',
-        'get_focused', 'get_nets', 'get_bom', 'get_component_info',
-        'export_pdf', 'cross_probe', 'get_design_stats', 'get_board_info',
-        'annotate', 'generate_output',
+        'get_focused', 'proj_get_nets', 'proj_get_bom', 'proj_get_component_info',
+        'proj_export_pdf', 'proj_cross_probe', 'proj_get_stats', 'proj_get_board_info',
+        'proj_annotate', 'proj_run_output',
     ]
 
     LIBRARY_ACTIONS = [
@@ -406,9 +406,9 @@ class TestCommandRouting:
     ]
 
     GENERIC_ACTIONS = [
-        'query_objects', 'modify_objects', 'create_object', 'delete_objects',
-        'run_process', 'get_font_spec', 'get_font_id', 'select_objects',
-        'deselect_all', 'zoom',
+        'obj_query', 'obj_modify', 'obj_create', 'obj_delete',
+        'run_process', 'obj_get_font_spec', 'obj_get_font_id', 'obj_select',
+        'obj_deselect_all', 'obj_zoom',
     ]
 
     def test_all_application_commands_route_correctly(self):

@@ -1255,33 +1255,32 @@ def create_app(workspace_dir: Optional[Path] = None) -> Flask:
     # design state. The badge is informational, not a safety gate.
     # -----------------------------------------------------------------
 
-    _READ_ONLY_EXACT = {
-        "attach_to_altium", "detach_from_altium", "ping_altium",
-        "cross_probe", "highlight_net", "clear_highlights",
-        "deselect_all", "select_objects", "zoom", "switch_view",
-        "get_clipboard_text", "execute_menu", "refresh_document",
-        "compile_project", "force_recompile",
-        "run_erc", "run_drc", "get_unconnected_pins",
-        "set_intent", "diag_workspace", "generate_output",
-    }
-    _READ_ONLY_PREFIXES = (
-        "get_", "list_", "find_", "query_", "compare_", "crossref_",
-        "diag_", "ping_",
-        "lib_search", "lib_diff", "lib_audit", "lib_get",
-        "pcb_get_", "pcb_check_", "pcb_export_",
-        "sch_get_",
-        "design_preview_", "design_validate_", "design_get_",
-        "design_snapshot_inventory", "design_review_snapshot",
-        "design_learn_from", "export_",
-    )
+    # Every tool name is `ns_verb_object`, so read-only classification keys
+    # off the verb (the token after the namespace). Pure inspection / export
+    # verbs are read-only; everything else mutates. A short exact list covers
+    # the actions whose verb is ambiguous (compile, ERC/DRC, view navigation).
+    _READ_ONLY_VERBS = frozenset({
+        "get", "list", "find", "query", "compare", "crossref", "check",
+        "export", "search", "diff", "audit", "preview", "validate",
+        "snapshot", "review", "learn", "lint", "datasheet", "calc",
+        "plan", "visual", "render", "ping", "diag", "count",
+    })
+    _READ_ONLY_EXACT = frozenset({
+        "proj_compile", "proj_force_recompile", "proj_run_erc", "pcb_run_drc",
+        "proj_run_output", "proj_cross_probe", "app_attach", "app_detach",
+        "app_set_intent", "app_run_menu", "obj_highlight_net",
+        "obj_clear_highlights", "obj_deselect_all", "obj_select", "obj_zoom",
+        "obj_switch_view", "obj_refresh_document",
+    })
 
     def _is_mutating_tool(name: str) -> bool:
         if name in _READ_ONLY_EXACT:
             return False
-        for pre in _READ_ONLY_PREFIXES:
-            if name.startswith(pre):
-                return False
-        return True
+        parts = name.split("_")
+        if parts[0] == "audit":          # every audit_* tool only inspects
+            return False
+        verb = parts[1] if len(parts) >= 2 else parts[0]
+        return verb not in _READ_ONLY_VERBS
 
     @app.route("/api/tools")
     def tools_catalog() -> Response:
