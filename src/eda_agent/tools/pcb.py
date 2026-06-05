@@ -6,7 +6,11 @@ Provides high-level PCB operations: net classes, design rules, DRC,
 component placement, trace lengths, layer stackup, board outline, etc.
 """
 
-from typing import Any, Optional
+import json
+from typing import Any, Optional, Union
+
+from pydantic import ValidationError
+
 from ..bridge import get_bridge
 from ..placement import (
     BoardRegion,
@@ -14,11 +18,170 @@ from ..placement import (
     PlaceNet,
     PlaceOptions,
     PlacePin,
+    hpwl,
+    overlap_pair_count,
     plan_placement,
     rotate_offset,
 )
 from .bulk_hints import BulkHintTracker
 from .datasheet_hints import tag_response
+
+
+def _build_objective_report(
+    place_comps: list,
+    positions: dict[str, tuple],
+    rotations: dict[str, float],
+    place_nets: list,
+    region_obj,
+    grid_mils: float,
+    clearance_mils: float,
+) -> dict[str, Any]:
+    """Score a proposed placement on the full multi-term objective.
+
+    Pure Python; reuses the scorer in ``design.pcb_placement`` so both
+    auto-placement cores report the same un-weighted term breakdown
+    (wirelength, layer-change proxy, congestion, overlap, board-edge,
+    decoupling proximity, connector banding, thermal) plus the weighted
+    total, a legality flag, and the achieved utilization. Components all
+    sit on the top side here, so the via term is structurally zero.
+    """
+    from ..design import pcb_placement as _construct
+
+    rules = _construct.DesignRules(
+        grid=float(grid_mils),
+        component_clr=float(clearance_mils),
+    )
+    pos = {r: [float(c[0]), float(c[1])] for r, c in positions.items()}
+    rot = {c.ref: float(rotations.get(c.ref, c.rotation)) for c in place_comps}
+    sides = {c.ref: 1 for c in place_comps}
+    report = _construct.score(
+        place_comps, pos, rot, sides, place_nets, region_obj,
+        rules, _construct.ObjectiveWeights(),
+    )
+    out = report.as_dict()
+    out["weighted_total"] = round(report.weighted_total, 3)
+    out["legal"] = bool(report.legal)
+    out["utilization"] = round(report.utilization, 4)
+    for key in list(out):
+        if isinstance(out[key], float):
+            out[key] = round(out[key], 3)
+    return out
+
+
+def _build_net_length_report(
+    place_comps: list,
+    positions: dict[str, tuple],
+    rotations: dict[str, float],
+    place_nets: list,
+    critical: set,
+    top: int = 8,
+) -> dict[str, Any]:
+    """Per-net physical bounding span (mils) of the proposed placement.
+
+    Reuses ``design.pcb_placement.net_spans`` so the diagnostic matches the
+    same pin geometry the scorer sees. Returns the ``top`` longest nets
+    (the routing risk / candidates to mark critical) plus the achieved span
+    of every net the caller already flagged critical.
+    """
+    from ..design import pcb_placement as _construct
+
+    pos = {r: [float(c[0]), float(c[1])] for r, c in positions.items()}
+    rot = {c.ref: float(rotations.get(c.ref, c.rotation)) for c in place_comps}
+    sides = {c.ref: 1 for c in place_comps}
+    spans = _construct.net_spans(place_comps, pos, rot, sides, place_nets)
+    ordered = sorted(spans.items(), key=lambda kv: (-kv[1], kv[0]))
+    report: dict[str, Any] = {
+        "longest_nets": [
+            {"net": n, "span_mils": round(v, 1)} for n, v in ordered[:top]
+        ],
+    }
+    if critical:
+        report["critical_net_spans"] = {
+            n: round(spans[n], 1) for n, _ in ordered if n.upper() in critical
+        }
+    return report
+
+
+def _build_decoupling_report(
+    place_comps: list,
+    positions: dict[str, tuple],
+    rotations: dict[str, float],
+    place_nets: list,
+) -> list:
+    """Structural decoupling analysis of the proposed placement.
+
+    Reuses ``design.pcb_placement.decoupling_report`` to surface which cap
+    decouples which IC (found on the connectivity graph, never by name) and
+    the achieved centre-to-power-pin distance in mils, worst first -- so the
+    caller can confirm decaps landed tight against their ICs.
+    """
+    from ..design import pcb_placement as _construct
+
+    pos = {r: [float(c[0]), float(c[1])] for r, c in positions.items()}
+    rot = {c.ref: float(rotations.get(c.ref, c.rotation)) for c in place_comps}
+    sides = {c.ref: 1 for c in place_comps}
+    return _construct.decoupling_report(place_comps, pos, rot, sides, place_nets)
+
+
+# A net touching more than this many parts is treated as a power/ground rail
+# (routed as a plane/pour) and excluded from the SIGNAL ratsnest count, since
+# its crossings do not become signal vias.
+_RATSNEST_SIGNAL_FANOUT = 4
+
+
+def _build_ratsnest_report(
+    place_comps: list,
+    positions: dict[str, tuple],
+    rotations: dict[str, float],
+    place_nets: list,
+) -> dict[str, Any]:
+    """Ratsnest crossing counts as a routability / via-pressure indicator.
+
+    ``signal_crossings`` excludes high-fanout rails (planes carry no signal
+    via) and is the figure that predicts routing difficulty; ``total_crossings``
+    is the conservative all-net count (power assumed routed as traces).
+    """
+    from ..design import pcb_placement as _construct
+
+    pos = {r: [float(c[0]), float(c[1])] for r, c in positions.items()}
+    rot = {c.ref: float(rotations.get(c.ref, c.rotation)) for c in place_comps}
+    sides = {c.ref: 1 for c in place_comps}
+    return {
+        "signal_crossings": _construct.ratsnest_crossings(
+            place_comps, pos, rot, sides, place_nets,
+            max_fanout=_RATSNEST_SIGNAL_FANOUT),
+        "total_crossings": _construct.ratsnest_crossings(
+            place_comps, pos, rot, sides, place_nets),
+        "signal_fanout_cap": _RATSNEST_SIGNAL_FANOUT,
+    }
+
+
+def _build_placement_summary(
+    objective_report: dict[str, Any],
+    ratsnest: dict[str, Any],
+    decoupling: list,
+    suggested_board: Optional[dict[str, Any]],
+) -> str:
+    """One-line, human/LLM-readable assessment of the placement, synthesising
+    the detailed reports so a caller can judge quality at a glance."""
+    parts: list[str] = []
+    parts.append("legal" if objective_report.get("legal")
+                 else "ILLEGAL (courtyard overlap)")
+    util = objective_report.get("utilization")
+    if util is not None:
+        parts.append(f"{round(float(util) * 100)}% board utilization")
+    sx = ratsnest.get("signal_crossings")
+    if sx is not None:
+        tag = "routable" if sx <= 2 else "review routability"
+        parts.append(f"{sx} signal-net ratsnest crossing(s) ({tag})")
+    if decoupling:
+        worst = max(d["distance_mils"] for d in decoupling)
+        parts.append(f"{len(decoupling)} decap(s) detected, worst "
+                     f"{worst:.0f} mils from its IC power pin")
+    if suggested_board:
+        parts.append(f"suggested board {suggested_board['width']:.0f}x"
+                     f"{suggested_board['height']:.0f} mils")
+    return "; ".join(parts) + "."
 
 
 def register_pcb_tools(mcp):
@@ -787,21 +950,42 @@ def register_pcb_tools(mcp):
         clearance_mils: float = 15.0,
         max_net_fanout: int = 0,
         exclude_nets: Optional[list[str]] = None,
+        critical_nets: Optional[list[str]] = None,
+        critical_weight: float = 3.0,
+        edge_parts: Optional[dict[str, str]] = None,
+        keepout_groups: Optional[dict[str, str]] = None,
+        match_groups: Optional[dict[str, str]] = None,
+        match_roles: Optional[dict[str, str]] = None,
+        plan_json: Optional[Union[str, dict]] = None,
         reseed_grid: bool = False,
         optimize_rotation: bool = True,
+        engine: str = "refine",
+        restarts: int = 1,
+        render_png: Optional[str] = None,
         apply: bool = False,
     ) -> dict[str, Any]:
         """Connectivity-driven auto-placement: shorten wirelength, keep
         components legal. **Dry-run by default** -- returns a proposed
         move list and quality metrics without touching the board.
 
-        This is the analytical-placement idea from the PCB-placement
-        literature (global spring/repulsion relaxation -> legalization),
-        run as a pure-Python solver on the current board. It reads the
+        A pure-Python solver run on the current board. It reads the
         compiled netlist and every component's real footprint bounding
-        box, then refines positions to minimize half-perimeter
+        box, then improves positions to minimize half-perimeter
         wirelength (HPWL) while keeping components inside the board
         outline and free of same-layer overlaps.
+
+        Two solver cores are available via ``engine``:
+
+        - ``"refine"`` (default): a force-directed relaxation that nudges
+          the board's CURRENT positions, then a legalization pass. Best
+          for tidying an already-placed board.
+        - ``"construct"``: a from-scratch constructor that sizes the
+          placement, seeds parts at connectivity-weighted centroids,
+          chooses orientations, legalizes, and runs a short cooled
+          polish on a full multi-term objective (wirelength, overlap,
+          board-edge, decoupling proximity, connector banding, thermal).
+          Best for an unplaced or badly scrambled board. The full
+          per-term objective is always returned under ``objective_report``.
 
         With ``optimize_rotation`` (default on) it also picks each
         eligible part's orientation (0/90/180/270) to point its pins at
@@ -842,22 +1026,112 @@ def register_pcb_tools(mcp):
                 components (default 0 = keep all). Set e.g. 20 to ignore
                 power/ground planes that do not usefully guide placement.
             exclude_nets: Explicit net names to ignore (e.g. ``["GND"]``).
+            critical_nets: Net names to treat as placement-critical (e.g. a
+                clock, a high-speed pair, a sensitive analog feedback line).
+                Their pull is scaled by ``critical_weight`` so the solver
+                keeps their endpoints close and shortens those traces first,
+                at a small cost to ordinary nets. You (the planner) decide
+                which nets matter; the tool does not guess by name.
+            critical_weight: Multiplier applied to ``critical_nets`` pull
+                (default 3.0, clamped to [1, 20]). Higher = more aggressive
+                shortening of the critical nets versus the rest.
+            edge_parts: ``{refdes: band}`` mapping parts that must sit on a
+                board EDGE to which edge -- ``"L"``/``"R"``/``"T"``/``"B"``
+                (left/right/top/bottom). The solver seats each against that
+                edge (centred on the free axis) and holds it there. Use for
+                connectors, mounting holes, USB/headers -- anything needing
+                cable or panel access. You (the planner) decide which; the
+                tool does not guess by designator prefix.
+            keepout_groups: ``{refdes: group}`` mixed-signal separation tags.
+                Parts in DIFFERENT groups are pushed apart (the
+                industrial-engineering "undesirable adjacency" relationship)
+                -- segregate a noisy switching / digital section from a
+                sensitive analog / RF one. The group string is opaque (only
+                equality matters); you (the planner) assign the domains
+                semantically. ``construct`` engine only. Separating the groups
+                usually also shortens wirelength by de-interleaving them.
+            match_groups: ``{refdes: group}`` matched-pair keep-together tags.
+                Parts in the SAME group are pulled ADJACENT even when they
+                share no net -- the absolutely-necessary-adjacency relationship
+                / analog common-centroid matching (a differential pair's two
+                input resistors, a current mirror, a matched array). HPWL only
+                co-locates parts that share a net; this co-locates matched ones
+                that don't. ``construct`` engine only.
+            match_roles: ``{refdes: role}`` common-centroid sub-device labels
+                WITHIN a match_group (e.g. ``A``/``B`` for the two matched
+                halves of a cross-quad or interdigitated array). The optimiser
+                drives each role's centroid onto a common point so a linear
+                process/thermal gradient cancels -- it picks the balanced
+                ABBA/ABAB arrangement that ``match_groups`` alone (which only
+                keeps the cells compact) cannot distinguish from an unbalanced
+                AABB. Only meaningful with >= 2 roles per group and >= 2 cells
+                per role; needs ``match_groups`` set too. ``construct`` only.
+            plan_json: The DesignPlan (JSON string or dict) you authored. When
+                given, the placer auto-derives matched-pair ``match_groups``
+                from differential nets and analog/digital ``keepout_groups``
+                from the plan's net roles, and MERGES them under the explicit
+                ``match_groups`` / ``keepout_groups`` args (explicit wins per
+                refdes). No-op for a plan with no differential / mixed-signal
+                structure. What was inferred is echoed in ``auto_constraints``.
             reseed_grid: Re-place from a fresh grid instead of refining
                 current positions (default False).
             optimize_rotation: Also choose part orientation to shorten
                 pin-level wirelength (default True). Set False to keep
                 every part's current rotation.
+            engine: ``"refine"`` (default, nudge current positions) or
+                ``"construct"`` (from-scratch placement). ``"construct"``
+                implies a from-scratch re-place regardless of
+                ``reseed_grid``.
+            restarts: ``"construct"`` engine only. When > 1, run that many
+                seeded restarts and keep the lowest-objective legal
+                placement (variance reduction at a cost linear in
+                ``restarts``). Default 1 (single deterministic run).
+            render_png: Optional file path. When set, also render a preview
+                image of the proposed placement (board outline, courtyards,
+                net stars) to that path and return it as ``preview_png``
+                (offline, matplotlib). Rendering never breaks the move data;
+                failures surface as ``preview_error``.
             apply: When True, commit the moves to the board. Default
                 False (dry-run).
 
         Returns:
             Dict with:
               - ``dry_run``: bool (True unless ``apply`` and moves exist)
+              - ``engine``: the solver core used
               - ``component_count``, ``movable_count``, ``fixed_count``
               - ``net_count`` (nets used after filtering)
               - ``pin_count`` (pads mapped to components for rotation)
+              - ``summary``: a one-line plain-language assessment synthesising
+                legality, utilization, signal routability, decoupling, and the
+                suggested board size -- read this first to judge the placement
               - ``hpwl_before``, ``hpwl_after``, ``hpwl_improvement_pct``
               - ``overlap_pairs_before``, ``overlap_pairs_after``
+              - ``objective_report``: every objective term un-weighted
+                (``hpwl``, ``via``, ``cong``, ``clear``, ``edge``,
+                ``decap``, ``conn``, ``therm``) plus ``weighted_total``,
+                ``legal``, and ``utilization`` for the proposed layout
+              - ``net_length_report``: ``longest_nets`` (the few nets with
+                the largest physical bounding span in mils -- the routing
+                risk, and the candidates to mark ``critical_nets``) plus
+                ``critical_net_spans`` echoing the achieved span of each
+                net you flagged critical, so you can confirm it paid off
+              - ``ratsnest``: routability / via-pressure indicator from the
+                straight-line MST of each net. ``signal_crossings`` (rails
+                above ``signal_fanout_cap`` pins excluded, since planes carry
+                no signal via) predicts routing difficulty -- different-net
+                MST edges that cross need a layer change; ``total_crossings``
+                is the conservative all-net count
+              - ``decoupling_report``: the engine's structural decoupling
+                analysis -- a list of ``{decap, ic, distance_mils}`` (worst
+                first) naming which cap decouples which IC (found on the
+                connectivity graph, never by reference) and how close it
+                landed to the served power pin. Empty when no decoupling is
+                structurally identifiable
+              - ``suggested_board``: for the ``construct`` engine, the board
+                rectangle it sized and tightened to the placement
+                (``{x1, y1, x2, y2, width, height}`` in mils) -- the "best
+                PCB size" recommendation. ``null`` for the ``refine`` engine,
+                which works inside the existing outline
               - ``moved_count``, ``rotated_count`` and ``moves`` (each
                 ``{designator, from: {x, y, rotation}, to: {x, y,
                 rotation}}`` in mils/degrees; ``to.rotation`` is null
@@ -967,6 +1241,77 @@ def register_pcb_tools(mcp):
             timeout=180.0,
         )
         exclude = {str(n).strip().upper() for n in (exclude_nets or [])}
+        critical = {str(n).strip().upper() for n in (critical_nets or [])}
+        crit_w = max(1.0, min(float(critical_weight), 20.0))
+        # refdes -> edge band, validated to the four sides. Tag the matching
+        # placed component so the solver seats it against that board edge.
+        edge_band_of = {
+            str(r).strip(): str(b).strip().upper()[:1]
+            for r, b in (edge_parts or {}).items()
+            if str(b).strip().upper()[:1] in ("L", "R", "T", "B")
+        }
+        for ref, band in edge_band_of.items():
+            pc = comp_by_ref.get(ref)
+            if pc is not None:
+                pc.edge = True
+                pc.edge_band = band
+        # Role-driven auto-constraints: when the planner hands us its plan, we
+        # derive the matched-pair (differential) match_groups and the
+        # mixed-signal (analog/digital) keepout_groups from the plan's net
+        # roles and MERGE them under the explicit args. Explicit tags win on a
+        # per-refdes conflict, so the planner can always override. No-op when
+        # plan_json is absent or the plan has no differential / mixed-signal
+        # structure, so existing callers are unaffected.
+        auto_constraints: dict[str, Any] = {}
+        if plan_json is not None:
+            try:
+                from ..design.placement_constraints import (
+                    infer_placement_constraints,
+                    merge_groups,
+                )
+                from ..design.plan import DesignPlan
+                _payload = (plan_json if isinstance(plan_json, dict)
+                            else json.loads(plan_json))
+                _plan = DesignPlan.model_validate(_payload)
+                _c = infer_placement_constraints(_plan)
+                match_groups = merge_groups(_c.match_groups, match_groups)
+                keepout_groups = merge_groups(_c.keepout_groups, keepout_groups)
+                auto_constraints = {
+                    "match_groups_inferred": _c.match_groups,
+                    "keepout_groups_inferred": _c.keepout_groups,
+                }
+            except (ValueError, json.JSONDecodeError, ValidationError) as exc:
+                auto_constraints = {"plan_json_error": str(exc)}
+        # Mixed-signal keep-apart tags: parts in DIFFERENT groups are pushed
+        # apart by the separation term (construct engine only). The planner
+        # supplies the grouping semantically (e.g. analog vs digital vs RF);
+        # the tag string itself is opaque, only equality matters.
+        for ref, grp in (keepout_groups or {}).items():
+            pc = comp_by_ref.get(str(ref).strip())
+            tag = str(grp).strip()
+            if pc is not None and tag:
+                pc.keepout_group = tag
+        # Matched-pair keep-together tags: parts in the SAME group are pulled
+        # adjacent even with no shared net (diff pair, current mirror, matched
+        # array). Construct engine only.
+        for ref, grp in (match_groups or {}).items():
+            pc = comp_by_ref.get(str(ref).strip())
+            tag = str(grp).strip()
+            if pc is not None and tag:
+                pc.match_group = tag
+        # Common-centroid sub-device roles: within a match_group, parts sharing
+        # a role form one matched half (the 'A' transistors vs the 'B' ones of
+        # a cross-quad / interdigitated array). Drives the two halves' centroids
+        # to coincide so a process/thermal gradient cancels. Needs match_group
+        # too -- a role with no group is inert.
+        for ref, role in (match_roles or {}).items():
+            pc = comp_by_ref.get(str(ref).strip())
+            tag = str(role).strip()
+            if pc is not None and tag:
+                pc.match_role = tag
+
+        def _net_weight(net_name: str) -> float:
+            return crit_w if net_name.upper() in critical else 1.0
         net_members: dict[str, list[str]] = {}
         comps_conn = net_resp.get("components") if isinstance(net_resp, dict) else None
         for c in comps_conn or []:
@@ -987,7 +1332,9 @@ def register_pcb_tools(mcp):
                 continue
             if max_net_fanout and len(members) > max_net_fanout:
                 continue
-            place_nets.append(PlaceNet(tuple(members), name=net))
+            place_nets.append(
+                PlaceNet(tuple(members), name=net, weight=_net_weight(net))
+            )
 
         # Pin geometry: one board-wide pad query, then a spatial join (pad
         # center -> smallest containing component bbox) + back-rotation to
@@ -1055,20 +1402,150 @@ def register_pcb_tools(mcp):
                         continue
                     if max_net_fanout and len(members) > max_net_fanout:
                         continue
-                    place_nets.append(PlaceNet(tuple(members), name=net))
+                    place_nets.append(
+                        PlaceNet(tuple(members), name=net, weight=_net_weight(net))
+                    )
 
-        options = PlaceOptions(
-            iterations=max(0, int(iterations)),
-            grid_mils=float(grid_mils),
-            clearance_mils=float(clearance_mils),
-            reseed_grid=bool(reseed_grid),
-            optimize_rotation=bool(optimize_rotation),
-        )
         region_obj = BoardRegion(
             region_used["x1"], region_used["y1"],
             region_used["x2"], region_used["y2"],
         )
-        result = plan_placement(place_comps, place_nets, region_obj, options)
+
+        engine_norm = str(engine or "refine").strip().lower()
+        if engine_norm not in ("refine", "construct"):
+            return {
+                "error": "BAD_ENGINE",
+                "reason": "engine must be 'refine' or 'construct'",
+            }
+
+        # Seed positions / rotations of the input, for before-metrics.
+        in_pos = {ref: (g["cx"], g["cy"]) for ref, g in geom.items()}
+        in_rot = {ref: g["rot"] for ref, g in geom.items()}
+
+        if engine_norm == "construct":
+            # From-scratch placement core (sizes, seeds, legalizes, polishes
+            # a full multi-term objective). Imported lazily so the tool
+            # module stays cheap to import.
+            from ..design import pcb_placement as _construct
+
+            rules = _construct.DesignRules(
+                grid=float(grid_mils),
+                component_clr=float(clearance_mils),
+            )
+            # Auto-group each crystal/resonator with its two load caps so the
+            # keep-together term clusters the oscillator tight at the MCU's
+            # crystal pins (critical for short, symmetric, low-noise traces).
+            # Structural + naming-agnostic; an explicit planner match_group
+            # always wins.
+            for ref, grp in _construct._infer_crystal_groups(
+                place_comps, place_nets
+            ).items():
+                pc = comp_by_ref.get(ref)
+                if pc is not None and not getattr(pc, "match_group", ""):
+                    pc.match_group = grp
+            # Auto-group a switching regulator's switch-node parts (inductor +
+            # catch diode / sync FET + bootstrap cap) so keep-together keeps the
+            # high-di/dt loop compact -- the dominant EMI rule for any
+            # buck/boost. Structural; an explicit planner match_group wins.
+            for ref, grp in _construct._infer_switch_node_groups(
+                place_comps, place_nets
+            ).items():
+                pc = comp_by_ref.get(ref)
+                if pc is not None and not getattr(pc, "match_group", ""):
+                    pc.match_group = grp
+            cons_opts = _construct.ConstructOptions()
+            n_restarts = max(1, int(restarts))
+            if n_restarts > 1:
+                # Several seeded restarts; keep the lowest-objective legal one.
+                cres = _construct.construct_placement_best_of(
+                    place_comps, place_nets, rules,
+                    seeds=tuple(range(n_restarts)), base_opts=cons_opts,
+                )
+            else:
+                cres = _construct.construct_placement(
+                    place_comps, place_nets, rules, cons_opts
+                )
+            # Visual repair: tighten any keep-together cluster (crystal + load
+            # caps, matched pair) the analytic objective left scattered. Reads
+            # the perceptual compactness metric and relocates the cluster tight
+            # against the IC it serves, gated to never regress the combined
+            # analytic-plus-visual objective. A no-op when nothing is scattered.
+            cres = _construct.tighten_match_clusters(
+                place_comps, place_nets, rules, cres)
+            # The construct engine sizes (and tightens) its own board; surface
+            # that as the recommended outline -- the "best PCB size" answer.
+            suggested_board = {
+                "x1": round(cres.region.x1, 1), "y1": round(cres.region.y1, 1),
+                "x2": round(cres.region.x2, 1), "y2": round(cres.region.y2, 1),
+                "width": round(cres.region.width, 1),
+                "height": round(cres.region.height, 1),
+            }
+            result_positions = {r: (c[0], c[1]) for r, c in cres.centroids.items()}
+            result_rotations = dict(cres.rotations)
+            result_rotated = {
+                r: result_rotations[r]
+                for r in result_rotations
+                if abs(result_rotations.get(r, 0.0) - in_rot.get(r, 0.0)) > 1e-6
+            }
+            hpwl_before = hpwl(in_pos, place_nets)
+            hpwl_after = hpwl(result_positions, place_nets)
+            overlap_before = overlap_pair_count(
+                place_comps, in_pos, float(clearance_mils), in_rot
+            )
+            overlap_after = overlap_pair_count(
+                place_comps, result_positions, float(clearance_mils),
+                result_rotations,
+            )
+            solver_notes = list(cres.notes)
+        else:
+            # The refine engine nudges the board's CURRENT positions inside the
+            # given outline; it does not propose a new board size.
+            suggested_board = None
+            options = PlaceOptions(
+                iterations=max(0, int(iterations)),
+                grid_mils=float(grid_mils),
+                clearance_mils=float(clearance_mils),
+                reseed_grid=bool(reseed_grid),
+                optimize_rotation=bool(optimize_rotation),
+            )
+            result = plan_placement(place_comps, place_nets, region_obj, options)
+            result_positions = dict(result.positions)
+            result_rotations = dict(result.rotations)
+            result_rotated = dict(result.rotated)
+            hpwl_before = result.hpwl_before
+            hpwl_after = result.hpwl_after
+            overlap_before = result.overlap_pairs_before
+            overlap_after = result.overlap_pairs_after
+            solver_notes = list(result.notes)
+
+        # Full per-term objective report on the proposed layout. Computed
+        # for both engines from the same pure-Python scorer so the caller
+        # always sees the trade-off, not just a single HPWL number.
+        objective_report = _build_objective_report(
+            place_comps, result_positions, result_rotations,
+            place_nets, region_obj, float(grid_mils), float(clearance_mils),
+        )
+
+        # Per-net wirelength diagnostic: the longest nets are the routing
+        # risk, and the candidates the caller may want to mark critical and
+        # re-place. Also echoes the achieved span of any flagged critical net.
+        net_length_report = _build_net_length_report(
+            place_comps, result_positions, result_rotations,
+            place_nets, critical,
+        )
+
+        # Structural decoupling analysis: which cap decouples which IC and how
+        # close it landed -- confirms decaps sit tight against their ICs.
+        decoupling = _build_decoupling_report(
+            place_comps, result_positions, result_rotations, place_nets,
+        )
+
+        # Ratsnest crossings: a routability / via-pressure indicator. The
+        # signal figure excludes high-fanout rails (planes/pours carry no
+        # signal via); the total is the conservative all-net count.
+        ratsnest = _build_ratsnest_report(
+            place_comps, result_positions, result_rotations, place_nets,
+        )
 
         # Convert each solved (centroid, rotation) back to an Altium move.
         # Altium sets the origin (Comp.x/y) and rotates the body about it,
@@ -1077,13 +1554,13 @@ def register_pcb_tools(mcp):
         # when the part shifted past half the snap grid OR was re-oriented.
         threshold = max(1.0, float(grid_mils) / 2.0)
         moves: list[dict[str, Any]] = []
-        for ref, (ncx, ncy) in result.positions.items():
+        for ref, (ncx, ncy) in result_positions.items():
             comp = comp_by_ref.get(ref)
             if comp is None or comp.fixed:
                 continue
             g = geom[ref]
-            new_rot = float(result.rotations.get(ref, g["rot"]))
-            rotated = ref in result.rotated
+            new_rot = float(result_rotations.get(ref, g["rot"]))
+            rotated = ref in result_rotated
             c0x, c0y = g["c0"]
             r0x, r0y = rotate_offset(c0x, c0y, new_rot)
             new_ox = int(round(ncx - r0x))
@@ -1101,8 +1578,6 @@ def register_pcb_tools(mcp):
                        "rotation": new_rot if rotated else None},
             })
 
-        hpwl_before = result.hpwl_before
-        hpwl_after = result.hpwl_after
         improvement = (
             round((hpwl_before - hpwl_after) / hpwl_before * 100.0, 2)
             if hpwl_before > 0 else 0.0
@@ -1111,6 +1586,7 @@ def register_pcb_tools(mcp):
         rotated_count = sum(1 for m in moves if m["to"]["rotation"] is not None)
         summary: dict[str, Any] = {
             "dry_run": True,
+            "engine": engine_norm,
             "component_count": len(place_comps),
             "movable_count": movable_count,
             "fixed_count": len(place_comps) - movable_count,
@@ -1120,14 +1596,23 @@ def register_pcb_tools(mcp):
             "hpwl_before": round(hpwl_before, 1),
             "hpwl_after": round(hpwl_after, 1),
             "hpwl_improvement_pct": improvement,
-            "overlap_pairs_before": result.overlap_pairs_before,
-            "overlap_pairs_after": result.overlap_pairs_after,
+            "overlap_pairs_before": overlap_before,
+            "overlap_pairs_after": overlap_after,
+            "summary": _build_placement_summary(
+                objective_report, ratsnest, decoupling, suggested_board),
+            "objective_report": objective_report,
+            "net_length_report": net_length_report,
+            "ratsnest": ratsnest,
+            "decoupling_report": decoupling,
+            "suggested_board": suggested_board,
             "moved_count": len(moves),
             "rotated_count": rotated_count,
             "moves": moves,
             "region": region_used,
-            "notes": result.notes,
+            "notes": solver_notes,
         }
+        if auto_constraints:
+            summary["auto_constraints"] = auto_constraints
 
         if apply and moves:
             # Pack as designator,x,y,rotation (empty rotation field leaves
@@ -1148,6 +1633,22 @@ def register_pcb_tools(mcp):
         elif apply and not moves:
             summary["apply_result"] = {"moves_applied": 0,
                                        "reason": "no moves to apply"}
+
+        if render_png:
+            try:
+                from pathlib import Path
+                from ..design.illustrate import placement_png
+                out = Path(render_png)
+                out.parent.mkdir(parents=True, exist_ok=True)
+                title = (f"PCB placement ({engine_norm})  "
+                         f"HPWL {objective_report.get('hpwl', 0.0):.0f}  "
+                         f"legal={objective_report.get('legal')}")
+                placement_png(place_comps, result_positions, region_obj,
+                              place_nets, str(out), title=title,
+                              rotations=result_rotations)
+                summary["preview_png"] = str(out)
+            except Exception as exc:  # rendering must never break the move data
+                summary["preview_error"] = str(exc)
 
         return summary
 
@@ -1412,6 +1913,320 @@ def register_pcb_tools(mcp):
         return out
 
     @mcp.tool()
+    async def pcb_calc_trace_width_for_impedance(
+        target_ohms: float,
+        geometry: str,
+        dielectric_height_mils: float,
+        dielectric_constant: float = 4.2,
+        copper_oz: float = 1.0,
+        spacing_mils: float = 0.0,
+    ) -> dict[str, Any]:
+        """Trace WIDTH to hit a target impedance (inverse of pcb_calc_impedance).
+
+        The design-time complement: instead of "what impedance does this width
+        give?", it answers "I need 90 ohm USB / 100 ohm HDMI differential, or
+        50 ohm single-ended; how wide?". Inverts the same IPC-2141 / Wadell
+        closed forms, so it round-trips with the forward calc. Pure math, no
+        Altium. Same +/-10 % caveat -- a fab field solver refines the stackup;
+        read the real dielectric heights / er with ``pcb_get_layer_stackup``.
+
+        Args:
+            target_ohms: Single-ended Z0 for ``microstrip``/``stripline``, or
+                the differential Zdiff for ``microstrip_diff``/
+                ``stripline_diff``.
+            geometry: One of microstrip, microstrip_diff, stripline,
+                stripline_diff.
+            dielectric_height_mils: Trace-to-plane height (microstrip) or full
+                between-plane thickness (stripline).
+            dielectric_constant: er (default 4.2 FR-4).
+            copper_oz: Copper weight for trace thickness (default 1.0).
+            spacing_mils: Edge-to-edge gap (required for ``*_diff``).
+
+        Returns:
+            ``{"ok": True, "width_mils", "single_ended_z0_ohms", "feasible",
+            ...}`` (feasible False when the target needs a width <= 0: raise the
+            dielectric height or lower the target), or ``{"ok": False, ...}``.
+        """
+        from ..design.impedance_sizing import trace_width_for_impedance
+        try:
+            r = trace_width_for_impedance(
+                target_ohms, geometry, dielectric_height_mils,
+                dielectric_constant=dielectric_constant, copper_oz=copper_oz,
+                spacing_mils=spacing_mils)
+        except ValueError as exc:
+            return {"ok": False, "reason": str(exc)}
+        out: dict[str, Any] = {
+            "ok": True,
+            "geometry": r.geometry,
+            "target_ohms": target_ohms,
+            "feasible": r.feasible,
+            "width_mils": round(r.width_mils, 2),
+            "single_ended_z0_ohms": round(r.single_ended_z0_ohms, 1),
+            "dielectric_height_mils": dielectric_height_mils,
+            "dielectric_constant": dielectric_constant,
+        }
+        if r.geometry.endswith("_diff"):
+            out["spacing_mils"] = spacing_mils
+        out["summary"] = (
+            f"{target_ohms:g} ohm {r.geometry}: "
+            + (f"width {r.width_mils:.2f} mil" if r.feasible else
+               "infeasible (target too high for this stackup)"))
+        return out
+
+    @mcp.tool()
+    async def pcb_calc_termination(
+        length_mils: float,
+        rise_time_ns: float,
+        z0_ohms: float = 50.0,
+        dielectric_constant: float = 4.2,
+        geometry: str = "microstrip",
+        driver_impedance_ohms: float = 0.0,
+        vcc: float = 0.0,
+        width_mils: float = 0.0,
+        dielectric_height_mils: float = 0.0,
+        length_fraction: float = 1.0 / 6.0,
+        multi_load: bool = False,
+    ) -> dict[str, Any]:
+        """Decide if a net needs termination and size the resistor(s).
+
+        Two questions the impedance calc does not answer: is this net
+        electrically long for its edge rate, and -- if so -- what termination
+        value? A net stays a lumped wire while its one-way flight time is under
+        ``length_fraction`` of the rise time (Johnson & Graham's 1/6 rule by
+        default; pass 1/2 for the looser convention); past the critical length
+        the reflection arrives during the edge and the net must be matched to
+        ``z0_ohms``. Pure math, no Altium. Propagation speed uses the effective
+        dielectric constant (Er for stripline; reduced for microstrip, Hammerstad
+        when ``width_mils``/``dielectric_height_mils`` are given, else the
+        0.475*Er+0.67 approximation).
+
+        Args:
+            length_mils: Routed (or estimated) net length.
+            rise_time_ns: Signal edge rate (the driver's 10-90 % rise time).
+            z0_ohms: Line characteristic impedance (size it with
+                ``pcb_calc_impedance``; default 50).
+            dielectric_constant: er (default 4.2 FR-4).
+            geometry: ``microstrip`` or ``stripline``.
+            driver_impedance_ohms: Driver output impedance, subtracted for the
+                series value (``Rs = Z0 - Rdriver``).
+            vcc: Supply rail; enables the Thevenin split option when > 0.
+            width_mils, dielectric_height_mils: Microstrip geometry for the
+                Hammerstad Er_eff (optional; falls back to the approximation).
+            length_fraction: Electrically-long threshold (default 1/6).
+            multi_load: True for a bus / multi-receiver net (recommends
+                far-end Thevenin/parallel instead of source series).
+
+        Returns:
+            ``{"ok": True, "needs_termination", "recommended", "critical_length_mils",
+            "flight_time_ns", "options": {...}, "summary"}`` -- ``options`` carries
+            the ideal and nearest-E24 resistor values (and the AC cap) for every
+            applicable scheme.
+        """
+        from ..design.signal_integrity import recommend_termination
+        try:
+            adv = recommend_termination(
+                length_mils, rise_time_ns, z0_ohms, dielectric_constant,
+                geometry=geometry,
+                driver_impedance=driver_impedance_ohms or None,
+                vcc=vcc or None,
+                width_mils=width_mils or None,
+                height_mils=dielectric_height_mils or None,
+                fraction=length_fraction, multi_load=multi_load)
+        except ValueError as exc:
+            return {"ok": False, "reason": str(exc)}
+        options: dict[str, Any] = {}
+        if adv.series is not None:
+            options["series"] = {
+                "r_ohms": round(adv.series.r_series, 2),
+                "r_e24": adv.series.r_series_e24}
+        if adv.parallel is not None:
+            options["parallel"] = {
+                "r_ohms": round(adv.parallel.r_parallel, 2),
+                "r_e24": adv.parallel.r_parallel_e24}
+        if adv.thevenin is not None:
+            options["thevenin"] = {
+                "r_pullup_ohms": round(adv.thevenin.r_pullup, 2),
+                "r_pulldown_ohms": round(adv.thevenin.r_pulldown, 2),
+                "r_pullup_e24": adv.thevenin.r_pullup_e24,
+                "r_pulldown_e24": adv.thevenin.r_pulldown_e24,
+                "v_bias": round(adv.thevenin.v_bias, 3),
+                "static_power_w": round(adv.thevenin.static_power_w, 4)}
+        if adv.ac is not None:
+            options["ac"] = {
+                "r_ohms": round(adv.ac.r_parallel, 2),
+                "r_e24": adv.ac.r_parallel_e24,
+                "capacitance_pf": round(adv.ac.capacitance_f * 1e12, 1)}
+        return {
+            "ok": True,
+            "needs_termination": adv.needs_termination,
+            "recommended": adv.recommended,
+            "electrically_long": adv.electrical.electrically_long,
+            "critical_length_mils": round(adv.electrical.critical_length_mils, 1),
+            "flight_time_ns": round(adv.electrical.flight_time_ns, 4),
+            "delay_ratio": round(adv.electrical.delay_ratio, 2),
+            "options": options,
+            "summary": adv.note,
+        }
+
+    @mcp.tool()
+    async def pcb_calc_length_match(
+        lengths: Optional[dict[str, float]] = None,
+        skew_budget_ps: float = 0.0,
+        rise_time_ns: float = 0.0,
+        match_fraction: float = 0.1,
+        dielectric_constant: float = 4.2,
+        geometry: str = "stripline",
+        width_mils: float = 0.0,
+        dielectric_height_mils: float = 0.0,
+    ) -> dict[str, Any]:
+        """Length-match tolerance and serpentine compensation for a bus / pair.
+
+        Turns a timing budget into the length-match window the routing must hold,
+        and -- given the routed lengths -- the serpentine copper each net needs.
+        The complement of Altium's ``pcb_tune_length`` (which executes the
+        meander) and ``pcb_get_trace_lengths`` (which reads lengths back). Pure
+        math, no Altium. Rests on the ns/in == ps/mil identity, so skew maps to
+        length exactly; propagation speed uses the effective dielectric constant
+        (stripline = Er, the usual inner-layer bus case; microstrip reduced).
+
+        The skew budget is taken from ``skew_budget_ps`` if > 0, else from
+        ``match_fraction * rise_time_ns`` (the "match to within 10-20 % of the
+        edge" rule).
+
+        Args:
+            lengths: Optional ``{net: length_mils}`` of routed lengths; when
+                given, returns a per-net match report targeting the longest net.
+            skew_budget_ps: Allowed skew in ps (e.g. a DDR byte-lane budget).
+            rise_time_ns: Edge rate, used with ``match_fraction`` if no ps budget.
+            match_fraction: Fraction of the rise time allowed as skew (default 0.1).
+            dielectric_constant: er (default 4.2 FR-4).
+            geometry: ``stripline`` (default) or ``microstrip``.
+            width_mils, dielectric_height_mils: Microstrip geometry for the
+                Hammerstad Er_eff (optional).
+
+        Returns:
+            ``{"ok": True, "er_eff", "t_pd_ps_per_mil", "skew_budget_ps",
+            "tolerance_mils", "members"?: [{net, length_mils, mismatch_mils,
+            skew_ps, compensation_mils, within_tolerance}], "target_length_mils"?,
+            "worst_skew_ps"?, "all_matched"?, "summary"}``.
+        """
+        from ..design.length_matching import assess_length_match
+        try:
+            res = assess_length_match(
+                dielectric_constant=dielectric_constant, geometry=geometry,
+                width_mils=width_mils or None,
+                dielectric_height_mils=dielectric_height_mils or None,
+                skew_budget_ps=skew_budget_ps or None,
+                rise_time_ns=rise_time_ns or None,
+                match_fraction=match_fraction,
+                lengths=lengths or None)
+        except ValueError as exc:
+            return {"ok": False, "reason": str(exc)}
+        tol = res["tolerance_mils"]
+        out: dict[str, Any] = {
+            "ok": True,
+            "er_eff": round(res["er_eff"], 3),
+            "t_pd_ps_per_mil": round(res["t_pd_ps_per_mil"], 4),
+            "skew_budget_ps": res["skew_budget_ps"],
+            "tolerance_mils": round(tol, 2) if tol is not None else None,
+        }
+        rep = res.get("report")
+        if rep is not None:
+            out["target_length_mils"] = rep.target_length_mils
+            out["worst_skew_ps"] = round(rep.worst_skew_ps, 3)
+            out["all_matched"] = rep.all_matched
+            out["members"] = [
+                {"net": m.name, "length_mils": m.length_mils,
+                 "mismatch_mils": round(m.mismatch_mils, 2),
+                 "skew_ps": round(m.skew_ps, 3),
+                 "compensation_mils": round(m.compensation_mils, 2),
+                 "within_tolerance": m.within_tolerance}
+                for m in rep.members]
+            n_bad = sum(1 for m in rep.members if not m.within_tolerance)
+            out["summary"] = (
+                f"target {rep.target_length_mils:.0f} mils, worst skew "
+                f"{rep.worst_skew_ps:.1f} ps"
+                + (f", {n_bad} net(s) over the {tol:.0f}-mil window"
+                   if tol is not None and n_bad else
+                   (", all matched" if tol is not None else "")))
+        else:
+            out["summary"] = (
+                f"match window {tol:.1f} mils for a {res['skew_budget_ps']:.1f} ps "
+                f"budget on {geometry}" if tol is not None else
+                f"no budget given ({geometry}, {res['t_pd_ps_per_mil']:.3f} ps/mil)")
+        return out
+
+    @mcp.tool()
+    async def pcb_calc_thermal_vias(
+        drill_mm: float,
+        board_thickness_mm: float,
+        plating_um: float = 25.0,
+        filled_copper: bool = False,
+        k_cu: float = 385.0,
+        power_w: float = 0.0,
+        delta_t_c: float = 0.0,
+        target_k_per_w: float = 0.0,
+        via_count: int = 0,
+    ) -> dict[str, Any]:
+        """Size a thermal-via field under a power pad (Fourier conduction).
+
+        The thermal calcs answer "what junction-to-ambient resistance does the
+        part need" (``required_theta_ja``); this answers "how many vias get the
+        heat into the board". A plated via is a copper tube of axial resistance
+        ``R = L / (k * A)``; vias conduct in parallel (``R_array = R/N``). Give a
+        target -- ``target_k_per_w`` directly, or ``power_w`` with a ``delta_t_c``
+        budget (target = dT/P) -- to solve the count, or an explicit
+        ``via_count`` to score a layout. Pure math, no Altium. Models the via
+        field's conduction bottleneck and assumes good copper spreading on the
+        pad and the receiving plane (a thin-copper spreading term is left to a
+        field solver).
+
+        Args:
+            drill_mm: Finished via drill diameter.
+            board_thickness_mm: Conduction length -- top layer to the heat-
+                spreading plane (full thickness for a bottom plane).
+            plating_um: Barrel plating thickness (default 25 = 1 oz).
+            filled_copper: True for a copper-filled via (full-circle copper),
+                False for an unfilled / resin-filled barrel (annulus only).
+            k_cu: Copper thermal conductivity, W/(m.K) (default 385).
+            power_w: Dissipation, for the target (with ``delta_t_c``) and the
+                realized temperature rise.
+            delta_t_c: Allowed rise across the via field.
+            target_k_per_w: Explicit target array resistance.
+            via_count: Score this exact count instead of solving one.
+
+        Returns:
+            ``{"ok": True, "via_count", "single_via_k_per_w", "array_k_per_w",
+            "target_k_per_w", "temp_rise_c", "barrel_area_mm2", "summary"}``.
+        """
+        from ..design.thermal_vias import assess_thermal_vias
+        try:
+            rep = assess_thermal_vias(
+                drill_mm, plating_um, board_thickness_mm,
+                filled_copper=filled_copper, k_cu=k_cu,
+                power_w=power_w or None, delta_t_c=delta_t_c or None,
+                target_k_per_w=target_k_per_w or None,
+                via_count=via_count or None)
+        except ValueError as exc:
+            return {"ok": False, "reason": str(exc)}
+        rise = (f", {rep.temp_rise_c:.1f} C rise"
+                if rep.temp_rise_c is not None else "")
+        return {
+            "ok": True,
+            "via_count": rep.via_count,
+            "single_via_k_per_w": round(rep.single_via_k_per_w, 1),
+            "array_k_per_w": round(rep.array_k_per_w, 2),
+            "target_k_per_w": (round(rep.target_k_per_w, 2)
+                               if rep.target_k_per_w is not None else None),
+            "temp_rise_c": (round(rep.temp_rise_c, 2)
+                            if rep.temp_rise_c is not None else None),
+            "barrel_area_mm2": round(rep.barrel_area_mm2, 4),
+            "summary": (
+                f"{rep.via_count} via(s) -> {rep.array_k_per_w:.1f} K/W"
+                f" ({rep.single_via_k_per_w:.0f} K/W each){rise}"),
+        }
+
+    @mcp.tool()
     async def pcb_calc_track_current_capacity(
         width_mils: float,
         copper_oz: float = 1.0,
@@ -1498,6 +2313,67 @@ def register_pcb_tools(mcp):
             out["voltage_drop_mv"] = {
                 k_: round(current[k_] * r_ohm * 1000.0, 3) for k_ in current
             }
+        return out
+
+    @mcp.tool()
+    async def pcb_calc_trace_width_for_current(
+        current_amps: float,
+        copper_oz: float = 1.0,
+        delta_t_c: float = 10.0,
+        layer: str = "external",
+        margin: float = 0.2,
+        length_mils: float = 0.0,
+    ) -> dict[str, Any]:
+        """Minimum track WIDTH to carry a target current (inverse IPC-2221).
+
+        The design-time complement of ``pcb_calc_track_current_capacity``:
+        instead of "what current does this width carry?", it answers "I need N
+        amps, how wide?". Pure math, no Altium hit.
+
+        Solves ``I = k * dT^0.44 * (h*w)^0.725`` for ``w`` with the same
+        constants as the forward tool (so they round-trip), ``k = 0.048``
+        external / ``0.024`` internal, ``h = copper_oz * 1.378 mils``.
+
+        Args:
+            current_amps: Target current the track must carry.
+            copper_oz: Copper weight, oz/ft^2 (0.5 / 1.0 / 2.0 / 3.0).
+            delta_t_c: Allowed temperature rise above ambient (10 degC is a
+                common conservative budget; 20-30 degC for tight boards).
+            layer: ``"external"`` (top/bottom) or ``"internal"`` (inner; needs
+                ~2.6x the width for the same rise).
+            margin: Fractional widening above the bare IPC minimum for the
+                recommendation (default 0.2 = 20 %).
+            length_mils: If > 0, also returns DC resistance and voltage drop at
+                the recommended width.
+
+        Returns:
+            ``{"ok": True, "min_width_mils", "recommended_width_mils",
+            "copper_oz", "delta_t_c", "layer", ...optional resistance/drop}``
+            or ``{"ok": False, "reason": ...}``.
+        """
+        from ..design.trace_sizing import trace_width_for_current
+        try:
+            r = trace_width_for_current(
+                current_amps, copper_oz=copper_oz, delta_t_c=delta_t_c,
+                layer=layer, margin=margin, length_mils=length_mils)
+        except ValueError as exc:
+            return {"ok": False, "reason": str(exc)}
+        out: dict[str, Any] = {
+            "ok": True,
+            "current_amps": current_amps,
+            "min_width_mils": round(r.min_width_mils, 3),
+            "recommended_width_mils": r.recommended_width_mils,
+            "copper_oz": copper_oz,
+            "delta_t_c": delta_t_c,
+            "layer": r.layer,
+            "summary": (
+                f"{current_amps:g} A at {delta_t_c:g} degC rise ({r.layer}, "
+                f"{copper_oz:g} oz): min {r.min_width_mils:.1f} mil, "
+                f"use {r.recommended_width_mils:g} mil"),
+        }
+        if r.resistance_mohm is not None:
+            out["resistance_mohm"] = round(r.resistance_mohm, 4)
+            out["voltage_drop_mv"] = round(r.voltage_drop_mv, 3)
         return out
 
     @mcp.tool()

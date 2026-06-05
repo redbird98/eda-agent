@@ -49,6 +49,13 @@ def _net_is_power(name: str) -> bool:
        or (n and n[0] == "+") or n.startswith("AGND") \
        or n.startswith("DGND"):
         return True
+    # Other common supply rails whose IC pins still want decoupling: analog
+    # supplies, battery/USB/reference/negative rails. Prefix-matched so e.g.
+    # AVDD3V3 or VREF_ADC also count. The decoupling audit is intentionally
+    # broad here -- missing one of these silently skips its decoupling check.
+    if n.startswith(("AVDD", "AVCC", "AVEE", "AVSS", "VBAT", "VBUS", "VEE",
+                     "VPP", "VREF", "VSYS", "VIO", "VAA", "VPWR")):
+        return True
     if "V3V3" in n or "V5V" in n:
         return True
     if len(n) >= 2 and n[0] == "V" and n[1].isdigit():

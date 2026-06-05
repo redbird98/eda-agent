@@ -61,6 +61,8 @@ class EmitResult:
     labels_emitted: int = 0
     power_ports_emitted: int = 0
     junctions_emitted: int = 0
+    buses_emitted: int = 0
+    bus_entries_emitted: int = 0
     failures: list[EmitFailure] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
 
@@ -226,6 +228,14 @@ def _emit_sheet(
     wires = canvas.wires_on(sheet_name)
     if wires:
         _emit_wires(wires, bridge, result, sheet_name)
+    # 3b. Buses + bus entries (before labels, so the bus exists when the
+    # per-signal net labels are placed on the entries' wire stubs).
+    buses = canvas.buses_on(sheet_name)
+    if buses:
+        _emit_buses(buses, bridge, result, sheet_name)
+    bus_entries = canvas.bus_entries_on(sheet_name)
+    if bus_entries:
+        _emit_bus_entries(bus_entries, bridge, result, sheet_name)
     # 4. Bulk junctions (after wires).
     junctions = canvas.junctions_on(sheet_name)
     if junctions:
@@ -388,6 +398,45 @@ def _emit_junctions(
         result.junctions_emitted += len(junctions)
     except Exception as exc:
         result.notes.append(f"place_junctions for {sheet_name} failed: {exc}")
+
+
+def _emit_buses(
+    buses: list, bridge: Any, result: EmitResult, sheet_name: str
+) -> None:
+    # The Altium bridge exposes single-object place_bus / place_bus_entry (no
+    # bulk variant). Buses are few (one short line per IC bus stub), so the
+    # per-object loop is fine. Stop on the first failure so a broken bridge
+    # doesn't spam one note per segment.
+    for b in buses:
+        try:
+            bridge.send_command(
+                "generic.place_bus",
+                {"x1": str(b.x1), "y1": str(b.y1),
+                 "x2": str(b.x2), "y2": str(b.y2)},
+                timeout=_BULK_TIMEOUT_S,
+            )
+            result.buses_emitted += 1
+        except Exception as exc:
+            result.notes.append(f"place_bus for {sheet_name} failed: {exc}")
+            break
+
+
+def _emit_bus_entries(
+    entries: list, bridge: Any, result: EmitResult, sheet_name: str
+) -> None:
+    for e in entries:
+        try:
+            bridge.send_command(
+                "generic.place_bus_entry",
+                {"x1": str(e.x1), "y1": str(e.y1),
+                 "x2": str(e.x2), "y2": str(e.y2)},
+                timeout=_BULK_TIMEOUT_S,
+            )
+            result.bus_entries_emitted += 1
+        except Exception as exc:
+            result.notes.append(
+                f"place_bus_entry for {sheet_name} failed: {exc}")
+            break
 
 
 def _emit_labels(

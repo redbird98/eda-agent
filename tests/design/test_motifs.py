@@ -10,9 +10,12 @@ from eda_agent.design.motifs import (
     BOOT_CAP,
     BYPASS_CAP,
     CRYSTAL_LOAD,
+    DIODE_BRIDGE,
     FB_DIVIDER,
     LC_OUTPUT,
     MOTIF_CATALOGUE,
+    OPAMP_INVERTING,
+    PI_FILTER,
     PULL_DOWN_R,
     PULL_UP_R,
     RC_COMPENSATION,
@@ -29,7 +32,11 @@ from eda_agent.design.motifs import (
     resolve_matches,
     splat_motif,
 )
-from eda_agent.design.motifs import _kind_from_refdes, _net_role_tag
+from eda_agent.design.motifs import (
+    _infer_power_nets,
+    _kind_from_refdes,
+    _net_role_tag,
+)
 from eda_agent.design.plan import (
     DesignPlan,
     Net,
@@ -63,6 +70,75 @@ def _plan(parts: list[Part], nets: list[Net], zones: list[Zone] | None = None) -
 # ---------------------------------------------------------------------------
 # Helpers tested directly
 # ---------------------------------------------------------------------------
+
+
+def _ldo_plan(flag_power: bool):
+    """LDO: J1(in)->C1->U1->C2->R1->D1->J2(out). VIN/VOUT power flag toggled."""
+    extra_vin = {"is_power": True} if flag_power else {}
+    extra_vout = {"is_power": True} if flag_power else {}
+    parts = [
+        Part(refdes="J1", lib_ref="HDR", role="input_conn", status="existing"),
+        Part(refdes="C1", lib_ref="CAP", status="existing"),
+        Part(refdes="U1", lib_ref="LDO", status="existing"),
+        Part(refdes="C2", lib_ref="CAP", status="existing"),
+        Part(refdes="R1", lib_ref="RES", status="existing"),
+        Part(refdes="D1", lib_ref="LED", status="existing"),
+        Part(refdes="J2", lib_ref="HDR", role="output_conn", status="existing"),
+    ]
+    nets = [
+        _net("VIN", [("J1", "1"), ("C1", "1"), ("U1", "1")], **extra_vin),
+        _net("GND", [("J1", "2"), ("C1", "2"), ("U1", "2"), ("C2", "2"),
+                     ("D1", "2")], is_ground=True),
+        _net("VOUT", [("U1", "3"), ("C2", "1"), ("R1", "1"), ("J2", "1")],
+             **extra_vout),
+        _net("LEDK", [("R1", "2"), ("D1", "1")]),
+    ]
+    return _plan(parts, nets)
+
+
+def test_infer_power_catches_connector_fed_rail():
+    """A raw input / regulator-output rail the planner forgot to flag is found
+    structurally: it carries a decoupling cap to ground AND reaches a power
+    connector."""
+    plan = _ldo_plan(flag_power=False)
+    assert _infer_power_nets(plan) == {"VIN", "VOUT"}
+
+
+def test_infer_power_ignores_filter_node():
+    """An RC filter's output node has the same cap-to-ground signature but
+    touches no power connector, so it is NOT promoted -- the rc_lowpass motif
+    must keep matching it."""
+    parts = [
+        Part(refdes="J1", lib_ref="HDR", role="input_conn", status="existing"),
+        Part(refdes="R1", lib_ref="RES", status="existing"),
+        Part(refdes="C1", lib_ref="CAP", status="existing"),
+        Part(refdes="U1", lib_ref="OPAMP", status="existing"),
+    ]
+    nets = [
+        _net("SIGIN", [("J1", "1"), ("R1", "1")]),
+        _net("FILT", [("R1", "2"), ("C1", "1"), ("U1", "3")]),
+        _net("GND", [("J1", "2"), ("C1", "2"), ("U1", "4")], is_ground=True),
+        _net("VCC", [("U1", "7"), ("R1", "1")], is_power=True),
+    ]
+    plan = _plan(parts, nets)
+    assert "FILT" not in _infer_power_nets(plan)
+    names = {m.motif_name for m in recognize_motifs(plan)}
+    assert "rc_lowpass" in names      # real filter still recognised
+
+
+def test_unflagged_ldo_recognises_bypass_not_false_filter():
+    """End to end: with VIN/VOUT unflagged, the structural inference still makes
+    both decoupling caps read as bypass_cap and suppresses the rc_lowpass false
+    positive that C2 + the LED resistor would otherwise trigger."""
+    got = {(m.motif_name, frozenset(m.components))
+           for m in recognize_motifs(_ldo_plan(flag_power=False))}
+    assert ("bypass_cap", frozenset({"C1"})) in got
+    assert ("bypass_cap", frozenset({"C2"})) in got
+    assert not any(name == "rc_lowpass" for name, _ in got)
+    # And it matches what explicitly flagging the rails would have produced.
+    flagged = {(m.motif_name, frozenset(m.components))
+               for m in recognize_motifs(_ldo_plan(flag_power=True))}
+    assert got == flagged
 
 
 def test_kind_from_refdes_known_prefixes() -> None:
@@ -579,6 +655,245 @@ def test_fb_divider_wins_over_voltage_divider_when_u_pin_present() -> None:
     kept = recognize_motifs(plan)
     names = sorted(m.motif_name for m in kept)
     assert "fb_divider" in names
+    assert "voltage_divider" not in names
+
+
+def _diode_bridge_plan():
+    """J1 (AC in) -> 4-diode bridge -> C1 smoothing -> U1. The bridge is a
+    bipartite 4-cycle: AC1 -D1- VPLUS -D2- AC2 -D4- VMINUS -D3- AC1."""
+    parts = [
+        Part(refdes="J1", lib_ref="HDR"),
+        Part(refdes="D1", lib_ref="DIODE"),
+        Part(refdes="D2", lib_ref="DIODE"),
+        Part(refdes="D3", lib_ref="DIODE"),
+        Part(refdes="D4", lib_ref="DIODE"),
+        Part(refdes="C1", lib_ref="CAP"),
+        Part(refdes="U1", lib_ref="REG"),
+    ]
+    nets = [
+        _net("AC1", [("J1", "1"), ("D1", "1"), ("D3", "2")]),
+        _net("AC2", [("J1", "2"), ("D2", "1"), ("D4", "2")]),
+        _net("VPLUS", [("D1", "2"), ("D2", "2"), ("C1", "1"), ("U1", "1")],
+             is_power=True),
+        _net("VMINUS", [("D3", "1"), ("D4", "1"), ("C1", "2"), ("U1", "2")],
+             is_ground=True),
+    ]
+    return _plan(parts, nets)
+
+
+def test_diode_bridge_matches_four_diode_bridge() -> None:
+    """Four diodes in the rectifier 4-cycle resolve to a diode_bridge over
+    {D1..D4}. The bridge is symmetric (AC1<->AC2), so VF2 reports several
+    automorphic orderings covering the same component set."""
+    plan = _diode_bridge_plan()
+    matches = list(find_motif_matches(build_circuit_graph(plan), DIODE_BRIDGE))
+    assert matches, "expected a diode_bridge match"
+    comp_sets = {frozenset(m.components) for m in matches}
+    assert comp_sets == {frozenset({"D1", "D2", "D3", "D4"})}
+
+
+def test_diode_bridge_rejects_esd_diode_array() -> None:
+    """Four diodes in a STAR to one ground (an ESD clamp array) is not a
+    bridge -- there is no second DC rail and no 4-cycle."""
+    plan = _plan(
+        parts=[
+            Part(refdes="U1", lib_ref="MCU"),
+            Part(refdes="D1", lib_ref="DIODE"),
+            Part(refdes="D2", lib_ref="DIODE"),
+            Part(refdes="D3", lib_ref="DIODE"),
+            Part(refdes="D4", lib_ref="DIODE"),
+        ],
+        nets=[
+            _net("SIG1", [("U1", "1"), ("D1", "1")]),
+            _net("SIG2", [("U1", "2"), ("D2", "1")]),
+            _net("SIG3", [("U1", "3"), ("D3", "1")]),
+            _net("SIG4", [("U1", "4"), ("D4", "1")]),
+            _net("GND", [("D1", "2"), ("D2", "2"), ("D3", "2"),
+                         ("D4", "2"), ("U1", "5")], is_ground=True),
+        ],
+    )
+    matches = list(find_motif_matches(build_circuit_graph(plan), DIODE_BRIDGE))
+    assert matches == []
+
+
+def test_recognize_diode_bridge_end_to_end() -> None:
+    """The full pipeline recognises the bridge as one unit."""
+    kept = recognize_motifs(_diode_bridge_plan())
+    names = sorted(m.motif_name for m in kept)
+    assert "diode_bridge" in names
+
+
+def _pi_filter_plan(with_output_cap: bool = True, stray_decap: bool = False):
+    """J1 -> Cin -> L -> Cout -> U1 power-rail pi filter. ``with_output_cap``
+    drops C2; ``stray_decap`` puts C1 on an UNRELATED rail (not the inductor's
+    input net) to prove it can't stand in as the input cap."""
+    parts = [
+        Part(refdes="J1", lib_ref="HDR"),
+        Part(refdes="C1", lib_ref="CAP"),
+        Part(refdes="L1", lib_ref="IND"),
+        Part(refdes="U1", lib_ref="LOAD"),
+    ]
+    nets = [
+        _net("VIN", [("J1", "1"), ("L1", "1")]
+             + ([] if stray_decap else [("C1", "1")]), is_power=True),
+        _net("VFILT", [("L1", "2"), ("U1", "1")], is_power=True),
+        _net("GND", [("J1", "2"), ("C1", "2"), ("U1", "2")], is_ground=True),
+    ]
+    if stray_decap:
+        # C1 lives on a separate rail (with its own load), NOT VIN.
+        parts.append(Part(refdes="U2", lib_ref="LOAD"))
+        nets.append(_net("VAUX", [("C1", "1"), ("U2", "1")], is_power=True))
+        nets[2].pins.append(PinRef(refdes="U2", pin="2"))
+    if with_output_cap:
+        parts.append(Part(refdes="C2", lib_ref="CAP"))
+        # C2 from VFILT to GND -- the output cap.
+        nets[1].pins.append(PinRef(refdes="C2", pin="1"))
+        nets[2].pins.append(PinRef(refdes="C2", pin="2"))
+    return _plan(parts, nets)
+
+
+def test_pi_filter_matches_c_l_c() -> None:
+    """Two caps to ground bridged by a series inductor -> a pi_filter over
+    {C1, L1, C2}. The motif is symmetric (Cin<->Cout), so VF2 reports both
+    automorphic orderings; they cover the same component set, and resolution
+    keeps one."""
+    plan = _pi_filter_plan()
+    matches = list(find_motif_matches(build_circuit_graph(plan), PI_FILTER))
+    assert matches, "expected a pi_filter match"
+    comp_sets = {frozenset(m.components) for m in matches}
+    assert comp_sets == {frozenset({"C1", "L1", "C2"})}
+
+
+def test_pi_filter_rejects_single_cap_lc() -> None:
+    """One cap + inductor (an LC, not a pi) does not match -- pi needs the
+    second cap on the inductor's OUTPUT net."""
+    plan = _pi_filter_plan(with_output_cap=False)
+    matches = list(find_motif_matches(build_circuit_graph(plan), PI_FILTER))
+    assert matches == []
+
+
+def test_pi_filter_input_cap_must_share_inductor_net() -> None:
+    """A decoupling cap on an unrelated rail cannot serve as the input cap --
+    the input cap must sit on the SAME net as one inductor terminal."""
+    plan = _pi_filter_plan(stray_decap=True)
+    matches = list(find_motif_matches(build_circuit_graph(plan), PI_FILTER))
+    assert matches == []
+
+
+def test_pi_filter_resolves_over_two_bypass_caps() -> None:
+    """Both pi caps would each match bypass_cap; pi_filter (higher specificity,
+    3 components) claims all three, so the filter is recognised as ONE unit
+    and its caps are not scattered as independent bypass caps."""
+    kept = recognize_motifs(_pi_filter_plan())
+    names = sorted(m.motif_name for m in kept)
+    assert "pi_filter" in names
+    assert "bypass_cap" not in names
+
+
+def _inverting_amp_plan():
+    """Inverting op-amp: Rin from VIN to the summing node (U1.IN-), Rf from
+    the summing node back to VOUT (U1.OUT). IN+ tied to GND. SUMMING is the
+    virtual-ground inverting input -- degree-3 (Rin + Rf + U1)."""
+    parts = [
+        Part(refdes="J1", lib_ref="HDR"),
+        Part(refdes="R1", lib_ref="RES"),   # input resistor (Rin)
+        Part(refdes="R2", lib_ref="RES"),   # feedback resistor (Rf)
+        Part(refdes="U1", lib_ref="OPAMP"),
+        Part(refdes="J2", lib_ref="HDR"),
+    ]
+    nets = [
+        _net("VIN", [("J1", "1"), ("R1", "1")]),
+        _net("SUMMING", [("R1", "2"), ("R2", "1"), ("U1", "2")]),
+        _net("VOUT", [("R2", "2"), ("U1", "1"), ("J2", "1")]),
+        _net("GND", [("U1", "3"), ("J1", "2"), ("J2", "2")], is_ground=True),
+    ]
+    return _plan(parts, nets)
+
+
+def test_opamp_inverting_matches_inverting_amp() -> None:
+    """Rin-Rf around an op-amp with the summing node degree-3 internal."""
+    plan = _inverting_amp_plan()
+    matches = list(
+        find_motif_matches(build_circuit_graph(plan), OPAMP_INVERTING)
+    )
+    assert len(matches) == 1
+    assert matches[0].components == {"R1", "R2", "U1"}
+
+
+def test_opamp_inverting_matches_when_output_has_a_signal_subtype_role() -> None:
+    """A motif's generic "signal" net must still match a net the planner tagged
+    with a specific signal SUBTYPE (analog_sensitive, clock, ...). Tagging the
+    op-amp output analog_sensitive (a documented role hint) must NOT break
+    opamp_inverting recognition."""
+    parts = [
+        Part(refdes="J1", lib_ref="HDR"), Part(refdes="R1", lib_ref="RES"),
+        Part(refdes="R2", lib_ref="RES"), Part(refdes="U1", lib_ref="OPAMP"),
+        Part(refdes="J2", lib_ref="HDR"),
+    ]
+    nets = [
+        _net("VIN", [("J1", "1"), ("R1", "1")], role="analog_sensitive"),
+        _net("SUMMING", [("R1", "2"), ("R2", "1"), ("U1", "2")]),
+        # Output carries a specific signal subtype, not the bare "signal" role.
+        _net("VOUT", [("R2", "2"), ("U1", "1"), ("J2", "1")],
+             role="analog_sensitive"),
+        _net("GND", [("U1", "3"), ("J1", "2"), ("J2", "2")], is_ground=True),
+    ]
+    matches = list(find_motif_matches(
+        build_circuit_graph(_plan(parts, nets)), OPAMP_INVERTING))
+    assert len(matches) == 1
+    assert matches[0].components == {"R1", "R2", "U1"}
+
+
+def test_signal_motif_still_rejects_power_and_ground() -> None:
+    """The signal-family widening must NOT let a "signal" net match power or
+    ground -- those are not signals."""
+    from eda_agent.design.motifs import _node_match
+    sig = {"bipartite": "net", "role": "signal"}
+    assert _node_match({"bipartite": "net", "role": "clock"}, sig) is True
+    assert _node_match({"bipartite": "net", "role": "analog_sensitive"}, sig)
+    assert _node_match({"bipartite": "net", "role": "power"}, sig) is False
+    assert _node_match({"bipartite": "net", "role": "ground"}, sig) is False
+
+
+def test_opamp_inverting_does_not_match_feedback_divider() -> None:
+    """A regulator feedback divider has its lower resistor on GROUND, so the
+    opamp's signal-role VIN cannot map onto that ground net -- no false match
+    (this is what keeps fb_divider and opamp_inverting disjoint)."""
+    plan = _plan(
+        parts=[
+            Part(refdes="R1", lib_ref="RES"),
+            Part(refdes="R2", lib_ref="RES"),
+            Part(refdes="U1", lib_ref="REG"),
+        ],
+        nets=[
+            _net("VOUT", [("R1", "1"), ("U1", "3")], is_power=True),
+            _net("FB", [("R1", "2"), ("R2", "1"), ("U1", "5")]),
+            _net("GND", [("R2", "2"), ("U1", "2")], is_ground=True),
+        ],
+    )
+    matches = list(
+        find_motif_matches(build_circuit_graph(plan), OPAMP_INVERTING)
+    )
+    assert matches == []
+
+
+def test_fb_divider_does_not_match_inverting_amp() -> None:
+    """Symmetric guard: the inverting amp has no resistor to ground and a
+    signal (not power) output, so fb_divider cannot claim it."""
+    plan = _inverting_amp_plan()
+    matches = list(
+        find_motif_matches(build_circuit_graph(plan), FB_DIVIDER)
+    )
+    assert matches == []
+
+
+def test_recognize_opamp_inverting_end_to_end() -> None:
+    """Through the full pipeline the inverting amp resolves to opamp_inverting
+    and not voltage_divider (the two R's share a degree-3 summing node, which
+    voltage_divider's degree-2 MID rejects)."""
+    kept = recognize_motifs(_inverting_amp_plan())
+    names = sorted(m.motif_name for m in kept)
+    assert "opamp_inverting" in names
     assert "voltage_divider" not in names
 
 

@@ -366,6 +366,82 @@ def _route_l_path(
 # ---------------------------------------------------------------------------
 
 
+def _count_bends(segs: list[tuple[int, int, int, int]]) -> int:
+    """Number of CORNER points in a segment set (the readability metric).
+
+    A corner is a point where a horizontal and a vertical segment meet at a
+    shared ENDPOINT -- the wire visibly changes direction. A pin tapping into
+    a trunk mid-span is a T-junction, not a corner, and is correctly NOT
+    counted (the trunk is one long segment, so the tap point is interior to
+    it). Fewer corners reads cleaner.
+    """
+    incident: dict[tuple[int, int], list[bool]] = {}
+    for x1, y1, x2, y2 in segs:
+        horiz = y1 == y2
+        for p in ((x1, y1), (x2, y2)):
+            incident.setdefault(p, []).append(horiz)
+    bends = 0
+    for flags in incident.values():
+        if any(flags) and not all(flags):
+            bends += 1
+    return bends
+
+
+def _net_obstacle_crossings(
+    segs: list[tuple[int, int, int, int]],
+    stub_ends: list[tuple[int, int]],
+    obstacles: list[tuple[int, int, int, int]],
+) -> int:
+    """Segments crossing a component body, exempting a segment whose own
+    endpoint is a net pin sitting inside that body (a legitimate stub start)."""
+    pin_set = set(stub_ends)
+    count = 0
+    for sx1, sy1, sx2, sy2 in segs:
+        for rx1, ry1, rx2, ry2 in obstacles:
+            exempt = any(
+                (px, py) in pin_set and rx1 <= px <= rx2 and ry1 <= py <= ry2
+                for (px, py) in ((sx1, sy1), (sx2, sy2))
+            )
+            if exempt:
+                continue
+            if _segment_crosses_rect(sx1, sy1, sx2, sy2, rx1, ry1, rx2, ry2):
+                count += 1
+                break
+    return count
+
+
+def _trunk_candidates(
+    stub_ends: list[tuple[int, int]],
+) -> list[list[tuple[int, int, int, int]]]:
+    """Trunk-and-stub (single-spine rectilinear Steiner) routings.
+
+    A straight TRUNK at the MEDIAN coordinate (the 1-D Steiner-optimal spine
+    position) with each pin tapping in via one perpendicular stub. Returns the
+    horizontal-trunk and vertical-trunk variants; the caller scores both
+    against obstacles and the other topologies. This is the canonical clean
+    schematic routing for a shared net -- minimal corners, short total wire.
+    """
+    xs = [p[0] for p in stub_ends]
+    ys = [p[1] for p in stub_ends]
+
+    def _median(vals: list[int]) -> int:
+        s = sorted(vals)
+        return (s[len(s) // 2] // 100) * 100
+
+    out: list[list[tuple[int, int, int, int]]] = []
+    # Horizontal trunk at median y; vertical stubs.
+    ty = _median(ys)
+    h: list[tuple[int, int, int, int]] = [(min(xs), ty, max(xs), ty)]
+    h += [(x, y, x, ty) for (x, y) in stub_ends if y != ty]
+    out.append(h)
+    # Vertical trunk at median x; horizontal stubs.
+    tx = _median(xs)
+    v: list[tuple[int, int, int, int]] = [(tx, min(ys), tx, max(ys))]
+    v += [(x, y, tx, y) for (x, y) in stub_ends if x != tx]
+    out.append(v)
+    return out
+
+
 def _route_signal_pins(
     stub_ends: list[tuple[int, int]],
     obstacles: list[tuple[int, int, int, int]] | None = None,
@@ -396,112 +472,64 @@ def _route_signal_pins(
         segs.extend(_route_l_path(x1, y1, x2, y2, obstacles))
         return segs
 
-    # 3+ pin: try CHAIN topology (sort by x then y, connect consecutive
-    # pairs) and STAR topology (hub at a smartly-chosen point), pick the
-    # one with fewer crossings. Chain avoids the central hub crowding;
-    # star is sometimes shorter total but tends to cross the middle.
-    def _count_chain_crossings(pts: list[tuple[int, int]]) -> tuple[int, list[tuple[int, int, int, int]]]:
-        cs = 0
-        ss: list[tuple[int, int, int, int]] = []
-        for i in range(len(pts) - 1):
-            x1, y1 = pts[i]
-            x2, y2 = pts[i + 1]
-            spoke = _route_l_path(x1, y1, x2, y2, obstacles)
-            ss.extend(spoke)
-            for (sx1, sy1, sx2, sy2) in spoke:
-                for rx1, ry1, rx2, ry2 in obstacles:
-                    owns_a = rx1 <= x1 <= rx2 and ry1 <= y1 <= ry2
-                    owns_b = rx1 <= x2 <= rx2 and ry1 <= y2 <= ry2
-                    if owns_a or owns_b:
-                        continue
-                    if _segment_crosses_rect(sx1, sy1, sx2, sy2, rx1, ry1, rx2, ry2):
-                        cs += 1
-                        break
-        return cs, ss
+    # 3+ pins: enumerate CHAIN (consecutive pins), STAR (shared hub) and
+    # TRUNK (median spine, pins tap in) topologies, then pick the one with the
+    # fewest body crossings, then the fewest CORNERS (the readability metric),
+    # then the shortest wire. Trunk-and-stub is the canonical clean schematic
+    # form and usually wins; chain/star are kept because one of them can route
+    # cleanly around obstacles that a straight trunk would cut through.
+    candidate_sets: list[list[tuple[int, int, int, int]]] = []
 
-    # Try chain in x-then-y sort and in y-then-x sort.
+    # Chain in x-then-y and y-then-x pin orders.
     by_x = sorted(stub_ends, key=lambda p: (p[0], p[1]))
     by_y = sorted(stub_ends, key=lambda p: (p[1], p[0]))
-    best_segs: list[tuple[int, int, int, int]] = []
-    best_crossings = -1
     for chain in (by_x, by_y):
-        cs, ss = _count_chain_crossings(chain)
-        if best_crossings < 0 or cs < best_crossings:
-            best_crossings = cs
-            best_segs = ss
+        cs: list[tuple[int, int, int, int]] = []
+        for i in range(len(chain) - 1):
+            cs.extend(_route_l_path(
+                chain[i][0], chain[i][1], chain[i + 1][0], chain[i + 1][1],
+                obstacles))
+        candidate_sets.append(cs)
 
-    if best_crossings == 0:
-        return best_segs
-
-    # 3+ pin star. Pick the routing HUB so that no L-path spoke is forced to
-    # cross a component body. Candidates:
-    #   * each stub end (using a pin as the hub - cleanest for nets where one
-    #     pin clearly belongs to the IC anchoring the net)
-    #   * the geometric centroid (snapped to grid)
-    #   * the centroid pushed out of any obstacle it lands inside
-    #   * the four corners of the stub-ends bounding box -- gives the star
-    #     a fallback "wrap around" hub when pins are spread diagonally
-    #     and no central hub has a clean spoke set
-    # The candidate with the fewest spoke collisions wins.
-    raw_cx = sum(p[0] for p in stub_ends) // len(stub_ends)
-    raw_cy = sum(p[1] for p in stub_ends) // len(stub_ends)
-    raw_cx = (raw_cx // 100) * 100
-    raw_cy = (raw_cy // 100) * 100
-
-    candidates: list[tuple[int, int]] = [(raw_cx, raw_cy)]
-    candidates.extend(stub_ends)
-    # Centroid pushed to each obstacle edge if the centroid is interior.
+    # Star hubs: centroid, each pin, centroid pushed out of any obstacle it
+    # sits in, and the stub-ends bounding-box corners (a wrap-around fallback).
+    raw_cx = (sum(p[0] for p in stub_ends) // len(stub_ends) // 100) * 100
+    raw_cy = (sum(p[1] for p in stub_ends) // len(stub_ends) // 100) * 100
+    hubs: list[tuple[int, int]] = [(raw_cx, raw_cy), *stub_ends]
     for rx1, ry1, rx2, ry2 in obstacles:
         if rx1 < raw_cx < rx2 and ry1 < raw_cy < ry2:
-            candidates.append((rx1 - 100, raw_cy))
-            candidates.append((rx2 + 100, raw_cy))
-            candidates.append((raw_cx, ry1 - 100))
-            candidates.append((raw_cx, ry2 + 100))
-    # Bounding-box corners of the stub ends (grid-snapped).
+            hubs += [(rx1 - 100, raw_cy), (rx2 + 100, raw_cy),
+                     (raw_cx, ry1 - 100), (raw_cx, ry2 + 100)]
     bb_xmin = (min(p[0] for p in stub_ends) // 100) * 100
     bb_xmax = (max(p[0] for p in stub_ends) // 100) * 100
     bb_ymin = (min(p[1] for p in stub_ends) // 100) * 100
     bb_ymax = (max(p[1] for p in stub_ends) // 100) * 100
-    candidates.extend([
-        (bb_xmin, bb_ymin), (bb_xmax, bb_ymin),
-        (bb_xmin, bb_ymax), (bb_xmax, bb_ymax),
-    ])
-
-    star_best_segs: list[tuple[int, int, int, int]] = []
-    star_best_crossings = -1
-    for (hx, hy) in candidates:
-        cand_segs: list[tuple[int, int, int, int]] = []
-        crossings = 0
+    hubs += [(bb_xmin, bb_ymin), (bb_xmax, bb_ymin),
+             (bb_xmin, bb_ymax), (bb_xmax, bb_ymax)]
+    for (hx, hy) in hubs:
+        spokes: list[tuple[int, int, int, int]] = []
         for (x, y) in stub_ends:
-            if x == hx and y == hy:
-                continue
-            spoke = _route_l_path(x, y, hx, hy, obstacles)
-            cand_segs.extend(spoke)
-            for (sx1, sy1, sx2, sy2) in spoke:
-                for rx1, ry1, rx2, ry2 in obstacles:
-                    owns_start = rx1 <= x <= rx2 and ry1 <= y <= ry2
-                    owns_end = rx1 <= hx <= rx2 and ry1 <= hy <= ry2
-                    if owns_start or owns_end:
-                        continue
-                    if _segment_crosses_rect(
-                        sx1, sy1, sx2, sy2, rx1, ry1, rx2, ry2
-                    ):
-                        crossings += 1
-                        break
-        # The -1 sentinel means "no candidate yet"; without this guard
-        # the first candidate's `crossings < -1` always fails and
-        # `star_best_segs` stays empty (the pre-2026-05-15 bug).
-        if star_best_crossings < 0 or crossings < star_best_crossings:
-            star_best_crossings = crossings
-            star_best_segs = cand_segs
-            if crossings == 0:
-                break
+            if (x, y) != (hx, hy):
+                spokes.extend(_route_l_path(x, y, hx, hy, obstacles))
+        if spokes:
+            candidate_sets.append(spokes)
 
-    # Pick whichever topology won. Chain's stored `best_crossings` is
-    # already non-negative; star_best_crossings is non-negative iff at
-    # least one star candidate was evaluated.
-    if star_best_crossings >= 0 and star_best_crossings < best_crossings:
-        return star_best_segs
+    # Trunk-and-stub (median spine), horizontal and vertical.
+    candidate_sets.extend(_trunk_candidates(stub_ends))
+
+    best_key: tuple[int, int, int] | None = None
+    best_segs: list[tuple[int, int, int, int]] = []
+    for cand in candidate_sets:
+        if not cand:
+            continue
+        key = (
+            _net_obstacle_crossings(cand, stub_ends, obstacles),
+            _count_bends(cand),
+            _path_length(cand),
+        )
+        if best_key is None or key < best_key:
+            best_key = key
+            best_segs = cand
     return best_segs
 
 

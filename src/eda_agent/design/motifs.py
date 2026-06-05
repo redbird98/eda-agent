@@ -112,6 +112,66 @@ def _net_role_tag(net: Net) -> str:
 # ---------------------------------------------------------------------------
 
 
+# Connector roles that DELIVER power to the board. A net that carries a
+# decoupling cap to ground AND reaches one of these is a power rail even when
+# the planner forgot to flag it (easy to miss on a raw input / regulator
+# output, which are not the obvious "VCC").
+_POWER_DELIVERY_ROLES = frozenset({
+    "input_conn", "vin_conn", "power_in",
+    "output_conn", "vout_conn", "power_out",
+})
+
+
+def _infer_power_nets(plan: DesignPlan) -> set[str]:
+    """Power rails the planner did not flag, found structurally and SAFELY.
+
+    A net is inferred power when it (a) is the non-ground leg of a two-pin
+    capacitor whose other leg is a ground net -- the decoupling signature --
+    AND (b) reaches a power-delivery connector (``_POWER_DELIVERY_ROLES``).
+    The connector guard is what keeps this from misfiring on an RC filter's
+    output node: a filter's mid/out node has the same cap-to-ground signature
+    but never touches a power connector, so it stays ``signal`` and the
+    rc_lowpass / rc_highpass motifs still match it.
+
+    Mirrors the PCB engine's structural decap-rail detection, but tighter:
+    the PCB ``fanout >= 3`` rule would also tag a filter node, which on the
+    schematic side would wrongly suppress a legitimate filter motif.
+    """
+    ground = {
+        n.name for n in plan.nets
+        if n.is_ground or (n.role or "") == "ground"
+    }
+    if not ground:
+        return set()
+    power_parts = {
+        p.refdes for p in plan.parts
+        if (p.role or "") in _POWER_DELIVERY_ROLES
+    }
+    if not power_parts:
+        return set()
+
+    nets_by_name = {n.name: n for n in plan.nets}
+    parts_nets: dict[str, set[str]] = {}
+    for n in plan.nets:
+        for pr in n.pins:
+            parts_nets.setdefault(pr.refdes, set()).add(n.name)
+
+    inferred: set[str] = set()
+    for p in plan.parts:
+        if _kind_from_refdes(p.refdes) != "C":
+            continue
+        legs = parts_nets.get(p.refdes, set())
+        if len(legs) != 2 or not (legs & ground):
+            continue
+        rail = next(iter(legs - ground), None)
+        rn = nets_by_name.get(rail) if rail else None
+        if rn is None or rn.is_power or rn.is_ground or (rn.role or "") in ("power", "ground"):
+            continue
+        if {pr.refdes for pr in rn.pins} & power_parts:
+            inferred.add(rail)
+    return inferred
+
+
 def build_circuit_graph(plan: DesignPlan) -> nx.MultiGraph:
     """Build the bipartite component-net graph the matcher operates on.
 
@@ -127,6 +187,7 @@ def build_circuit_graph(plan: DesignPlan) -> nx.MultiGraph:
     multiple pins (rare in schematics, common in transistors).
     """
     G = nx.MultiGraph()
+    inferred_power = _infer_power_nets(plan)
     for p in plan.parts:
         G.add_node(
             ("C", p.refdes),
@@ -135,10 +196,15 @@ def build_circuit_graph(plan: DesignPlan) -> nx.MultiGraph:
             zone=p.zone,
         )
     for n in plan.nets:
+        role = _net_role_tag(n)
+        # Promote a structurally-detected, planner-unflagged power rail so its
+        # decoupling caps recognise as bypass_cap (not a stray rc_lowpass).
+        if role == "signal" and n.name in inferred_power:
+            role = "power"
         G.add_node(
             ("N", n.name),
             bipartite="net",
-            role=_net_role_tag(n),
+            role=role,
         )
         for pr in n.pins:
             G.add_edge(("C", pr.refdes), ("N", n.name), pin=str(pr.pin))
@@ -221,7 +287,16 @@ def _node_match(host_attrs: dict, pat_attrs: dict) -> bool:
     pat_role = pat_attrs.get("role")
     if pat_role is None or pat_role == "*":
         return True
-    return host_attrs.get("role") == pat_role
+    host_role = host_attrs.get("role")
+    if pat_role == "signal":
+        # A motif's generic "signal" net matches any SIGNAL-FAMILY net, not
+        # just role=="signal": a net the planner tagged with a specific signal
+        # subtype (analog_sensitive, clock, control, differential, switch,
+        # feedback, high_current) is still a signal, so the motif must still
+        # fire. Without this, adding a documented role hint silently breaks
+        # recognition. Power and ground are NOT signal.
+        return host_role not in ("power", "ground")
+    return host_role == pat_role
 
 
 class _MotifMatcher(GraphMatcher):
@@ -610,6 +685,80 @@ RC_HIGHPASS = Motif(
 )
 
 
+# Pi (C-L-C) EMI / power-line filter: an input cap to ground, a series
+# inductor, and an output cap to ground. The canonical conducted-EMI
+# filter on a noisy supply input or an RF/audio rail. Distinct from
+# lc_output (single cap + inductor anchored on a switching node U): a pi
+# filter has TWO caps to the SAME ground, bridged by the inductor, and no
+# IC. IN/OUT roles are wildcards so it matches both a power-rail filter
+# (IN/OUT power) and a signal-line filter (IN/OUT signal); the structural
+# signature (two C-to-ground around one L) is the constraint. The input
+# cap must sit on the SAME net as one inductor terminal, so a decoupling
+# cap on an unrelated net cannot be mistaken for the input cap.
+PI_FILTER = Motif(
+    name="pi_filter",
+    pattern=_make_pattern(
+        components={"Cin": "C", "L": "L", "Cout": "C"},
+        nets={"IN": None, "OUT": None, "GND": "ground"},
+        edges=[
+            ("Cin", "IN"),
+            ("Cin", "GND"),
+            ("L", "IN"),
+            ("L", "OUT"),
+            ("Cout", "OUT"),
+            ("Cout", "GND"),
+        ],
+    ),
+    # IN and OUT can fan out (the source feeds IN, the load draws OUT), so
+    # neither is closed; GND is shared with the rest of the design.
+    internal_nets=frozenset(),
+    # Inductor centred, caps dropping to ground on each side: IN -> Cin\,
+    # L across the top, Cout / -> OUT. Separations exceed 2*BBOX_HALF_2PIN.
+    canonical={"Cin": (-1100, -1000), "L": (0, 0), "Cout": (1100, -1000)},
+    specificity=5,
+)
+
+
+# Full-wave diode-bridge rectifier (4 discrete diodes): the AC/DC front
+# end on any mains or transformer input. Topologically a single bipartite
+# 4-cycle -- two AC nodes and two DC rails (VPLUS power, VMINUS ground),
+# each node bridged by two diodes:
+#     AC1 -D1- VPLUS -D2- AC2 -D4- VMINUS -D3- AC1
+# The matcher ignores pin polarity, so it is the 4-cycle plus the
+# AC/AC/power/ground roles that identify a bridge -- an ESD array (N
+# diodes in a STAR to one ground) or a 2-diode steering pair has the wrong
+# structure and cannot match. A single-package bridge (DB#/BR#) is ONE
+# part and needs no motif; this is for the discrete-diode build.
+DIODE_BRIDGE = Motif(
+    name="diode_bridge",
+    pattern=_make_pattern(
+        components={"D1": "D", "D2": "D", "D3": "D", "D4": "D"},
+        nets={
+            "AC1": "signal",
+            "AC2": "signal",
+            "VPLUS": "power",
+            "VMINUS": "ground",
+        },
+        edges=[
+            ("D1", "AC1"), ("D1", "VPLUS"),
+            ("D2", "AC2"), ("D2", "VPLUS"),
+            ("D3", "VMINUS"), ("D3", "AC1"),
+            ("D4", "VMINUS"), ("D4", "AC2"),
+        ],
+    ),
+    # All four rails fan out (AC to the source, VPLUS/VMINUS to the
+    # smoothing cap and the rest of the supply), so none are closed.
+    internal_nets=frozenset(),
+    # Classic diamond: AC on the sides, DC top/bottom. D1/D2 feed VPLUS
+    # (top), D3/D4 return VMINUS (bottom).
+    canonical={
+        "D1": (-700, 700), "D2": (700, 700),
+        "D3": (-700, -700), "D4": (700, -700),
+    },
+    specificity=8,
+)
+
+
 # ---------------------------------------------------------------------------
 # IC-anchored motifs -- a central U is referenced for VF2 matching but
 # kept as a singleton (shared across motifs). Canonical positions are
@@ -757,6 +906,41 @@ RC_COMPENSATION = Motif(
 )
 
 
+# Inverting op-amp gain stage: Rin from the input signal to the summing
+# node (U's inverting input), Rf bridging the summing node and the output.
+# The summing node (SUMMING) is the virtual-ground inverting input -- it is
+# internal degree-3 (Rin + Rf + U). The feedback resistor Rf is what
+# distinguishes this from fb_divider: Rf touches BOTH of U's motif nets
+# (SUMMING and VOUT), whereas a feedback divider's two resistors each touch
+# only one U net. The non-inverting amp's gain network (Rf from VOUT to IN-,
+# Rg from IN- to GND) is topologically the same as fb_divider and is already
+# covered there; only the INVERTING configuration (input via Rin, no ground
+# leg) is new here. Keeping VIN role=signal blocks a feedback divider from
+# matching (its ground leg would map VIN onto a ground net -> role mismatch).
+OPAMP_INVERTING = Motif(
+    name="opamp_inverting",
+    pattern=_make_pattern(
+        components={"Rin": "R", "Rf": "R", "U": "U"},
+        nets={"VIN": "signal", "SUMMING": "signal", "VOUT": "signal"},
+        edges=[
+            ("Rin", "VIN"),
+            ("Rin", "SUMMING"),
+            ("Rf", "SUMMING"),
+            ("Rf", "VOUT"),
+            ("U", "SUMMING"),
+            ("U", "VOUT"),
+        ],
+    ),
+    internal_nets=frozenset({"SUMMING"}),
+    # Input resistor and feedback resistor stacked on U's input (left) side.
+    # Separations exceed 2 * BBOX_HALF_2PIN so the splatted parts don't
+    # overlap each other after the pre-splat shove.
+    canonical={"Rin": (-1700, -600), "Rf": (-1700, 600)},
+    specificity=6,
+    ic_anchor="U",
+)
+
+
 # Catalogue order is the registration order. Resolution sorts by
 # specificity, so absolute order here only affects deterministic
 # tie-break for motifs of equal specificity.
@@ -765,6 +949,7 @@ MOTIF_CATALOGUE: list[Motif] = [
     CRYSTAL_LOAD,
     LC_OUTPUT,
     FB_DIVIDER,
+    OPAMP_INVERTING,
     RC_COMPENSATION,
     BOOT_CAP,
     # Self-contained.
@@ -772,6 +957,8 @@ MOTIF_CATALOGUE: list[Motif] = [
     RC_LOWPASS,
     RC_HIGHPASS,
     RC_SNUBBER,
+    PI_FILTER,
+    DIODE_BRIDGE,
     BYPASS_CAP,
     PULL_UP_R,
     PULL_DOWN_R,
@@ -794,8 +981,11 @@ __all__ = [
     "BOOT_CAP",
     "BYPASS_CAP",
     "CRYSTAL_LOAD",
+    "DIODE_BRIDGE",
     "FB_DIVIDER",
     "LC_OUTPUT",
+    "OPAMP_INVERTING",
+    "PI_FILTER",
     "PULL_DOWN_R",
     "PULL_UP_R",
     "RC_COMPENSATION",

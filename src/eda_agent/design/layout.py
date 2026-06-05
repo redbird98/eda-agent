@@ -425,7 +425,11 @@ def _sugiyama_to_placed(plan: DesignPlan) -> list[PlacedPart]:
     ]
 
 
-def compute_layout(plan: DesignPlan) -> list[PlacedPart]:
+def compute_layout(
+    plan: DesignPlan, *, engine: str = "auto",
+    ic_pin_offsets: dict[str, dict[str, tuple[int, int]]] | None = None,
+    pin_attract_k: float | None = None,
+) -> list[PlacedPart]:
     """Compute (x, y) for every part in the plan.
 
     Pipeline:
@@ -455,11 +459,23 @@ def compute_layout(plan: DesignPlan) -> list[PlacedPart]:
 
     Output is snapped to a 100-mil grid and clamped to the A4 sheet.
     Rotation stays at 0 (library-native).
+
+    ``engine`` forces the placement core: ``"auto"`` (default) keeps the
+    has-anchors heuristic above; ``"sugiyama"`` / ``"force_directed"`` pin it.
+    The pipeline's best-of runs both and scores them, because neither wins
+    everywhere -- sugiyama is cleaner on a connected signal chain, while
+    force-directed (whose spring graph uses ALL nets, power included) handles a
+    board whose signal graph is split by a power-only bridge (a regulator).
     """
-    if has_anchors(plan):
+    _fd_kw = {} if pin_attract_k is None else {"pin_attract_k": pin_attract_k}
+    if engine == "force_directed":
+        placed = _force_directed_layout(plan, ic_pin_offsets, **_fd_kw)
+    elif engine == "sugiyama":
+        placed = _sugiyama_to_placed(plan)
+    elif has_anchors(plan):
         placed = _sugiyama_to_placed(plan)
     else:
-        placed = _force_directed_layout(plan)
+        placed = _force_directed_layout(plan, ic_pin_offsets, **_fd_kw)
 
     # Unified rotation pass: pick H/V per part from net topology +
     # neighbour positions. Both Sugiyama and FD return rotation=0,

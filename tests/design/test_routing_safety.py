@@ -226,3 +226,242 @@ def test_shorts_detector_ignores_unnamed_wires():
     result = PipelineResult(canvas=canvas)
     _detect_routing_shorts(plan, canvas, result)
     assert not result.failures
+
+
+def test_detect_junctions_is_net_aware():
+    """A junction dot is an electrical connection, so it must only land where
+    SAME-net wires meet. Two different nets that cross (or one ending on the
+    other) must NOT get a dot -- that would short them."""
+    from eda_agent.design._wiring import _detect_junctions
+
+    # Same net 'A': a horizontal trunk with a vertical stub ending on it (T).
+    same_net = [
+        (0, 0, 1000, 0, "A"),      # trunk
+        (500, 0, 500, 400, "A"),   # stub ends on the trunk interior at (500,0)
+    ]
+    assert (500, 0) in _detect_junctions(same_net)
+
+    # Cross net: net 'A' horizontal, net 'B' vertical crossing it at (500,0).
+    # The crossing point must NOT be a junction.
+    cross_net = [
+        (0, 0, 1000, 0, "A"),
+        (500, -400, 500, 400, "B"),   # B passes THROUGH (500,0)
+    ]
+    assert (500, 0) not in _detect_junctions(cross_net)
+
+    # Cross net T: net 'B' stub ENDS on net 'A' trunk at (500,0) -> still no dot.
+    cross_t = [
+        (0, 0, 1000, 0, "A"),
+        (500, 0, 500, 400, "B"),
+    ]
+    assert (500, 0) not in _detect_junctions(cross_t)
+
+    # Backward compat: 4-tuples (no net) behave as one net (per-net callers).
+    legacy = [(0, 0, 1000, 0), (500, 0, 500, 400)]
+    assert (500, 0) in _detect_junctions(legacy)
+
+
+def test_pipeline_places_no_cross_net_junction_dots():
+    """End to end: across several dense single-sheet designs, every junction
+    dot the pipeline emits touches wires of exactly ONE net (no false short)."""
+    import random
+
+    from eda_agent.design.pipeline import build_best_canvas_from_plan
+    from eda_agent.design.plan import DesignPlan, Net, Part, PinRef, Sheet
+    from eda_agent.design.symbols import (
+        SymbolBBox, SymbolModel, SymbolPin,
+    )
+
+    lib = "/fake/lib.SchLib"
+
+    def passive(ref):
+        return SymbolModel(lib_path=lib, lib_ref=ref, pins=(
+            SymbolPin(designator="1", name="1", x=-100, y=0, orientation=2,
+                      length=100, electrical_type="passive"),
+            SymbolPin(designator="2", name="2", x=100, y=0, orientation=0,
+                      length=100, electrical_type="passive")),
+            body_bbox=SymbolBBox(x_min=-50, y_min=-30, x_max=50, y_max=30))
+
+    def ic(ref, n):
+        pins = tuple(SymbolPin(
+            designator=str(i + 1), name=f"P{i+1}",
+            x=(-300 if i % 2 else 300), y=200 - (i // 2) * 100,
+            orientation=(2 if i % 2 else 0), length=100,
+            electrical_type="passive") for i in range(n))
+        return SymbolModel(lib_path=lib, lib_ref=ref, pins=pins,
+                           body_bbox=SymbolBBox(x_min=-200, y_min=-300,
+                                                x_max=200, y_max=300))
+
+    syms = {(lib, "RES"): passive("RES"), (lib, "IC"): ic("IC", 8)}
+
+    class Ext:
+        def extract_one(self, lp, lr):
+            return syms.get((lp, lr))
+
+        def extract_many(self, refs):
+            return {k: syms[k] for k in refs if k in syms}
+
+    def wires_at(cv, x, y):
+        nets = set()
+        for w in cv.wires:
+            on = ((w.x1, w.y1) == (x, y) or (w.x2, w.y2) == (x, y)
+                  or (w.x1 == w.x2 == x and min(w.y1, w.y2) < y < max(w.y1, w.y2))
+                  or (w.y1 == w.y2 == y and min(w.x1, w.x2) < x < max(w.x1, w.x2)))
+            if on:
+                nets.add(w.net)
+        return nets
+
+    for seed in range(6):
+        rnd = random.Random(seed)
+        parts = [Part(refdes="U1", lib_ref="IC", lib_path=lib,
+                      status="existing", sheet="main")]
+        parts += [Part(refdes=f"R{i}", lib_ref="RES", lib_path=lib,
+                       status="existing", sheet="main") for i in range(1, 7)]
+        nets = [Net(name="GND", is_ground=True, pins=(
+            [PinRef(refdes="U1", pin="2")]
+            + [PinRef(refdes=f"R{i}", pin="2") for i in range(1, 7)]))]
+        for i in range(1, 7):
+            nets.append(Net(name=f"S{i}", pins=(
+                PinRef(refdes="U1", pin=str(rnd.randint(3, 8))),
+                PinRef(refdes=f"R{i}", pin="1"))))
+        plan = DesignPlan(spec="x", summary="x",
+                          sheets=[Sheet(name="main", size="A4")],
+                          parts=parts, nets=nets)
+        res = build_best_canvas_from_plan(plan, Ext(), n_tries=3,
+                                          strict_shorts=False)
+        for j in res.canvas.junctions:
+            touched = wires_at(res.canvas, j.x, j.y)
+            assert len(touched) <= 1, (
+                f"seed {seed}: junction ({j.x},{j.y}) bridges nets {touched}")
+
+
+def test_cross_net_meeting_counts_helper():
+    """Detects endpoint coincidence + T-ending across DIFFERENT nets, ignores
+    pure crossings and same-net meetings."""
+    from eda_agent.design._wiring import _cross_net_meeting_counts
+
+    # Cross-net endpoint coincidence at (500,0).
+    assert _cross_net_meeting_counts([
+        (0, 0, 500, 0, "A"), (500, 0, 500, 400, "B")]) == {"A": 1, "B": 1}
+
+    # Cross-net T: B endpoint on A's segment interior.
+    assert _cross_net_meeting_counts([
+        (0, 0, 1000, 0, "A"), (500, 0, 500, 400, "B")]).get("A", 0) >= 1
+
+    # Pure crossing (B passes THROUGH, no endpoint at the cross) -> safe, 0.
+    assert _cross_net_meeting_counts([
+        (0, 0, 1000, 0, "A"), (500, -400, 500, 400, "B")]) == {}
+
+    # Same-net T -> not a cross-net meeting.
+    assert _cross_net_meeting_counts([
+        (0, 0, 1000, 0, "A"), (500, 0, 500, 400, "A")]) == {}
+
+
+def test_pipeline_has_no_cross_net_wire_meetings():
+    """End to end: across dense designs the emitted wires contain NO cross-net
+    meeting (endpoint coincidence or T) -- offenders fall back to labels, so
+    Altium's auto-junction-on-compile can't silently short two nets."""
+    import random
+
+    from eda_agent.design._wiring import _cross_net_meeting_counts
+    from eda_agent.design.pipeline import build_best_canvas_from_plan
+    from eda_agent.design.plan import DesignPlan, Net, Part, PinRef, Sheet
+    from eda_agent.design.symbols import (
+        SymbolBBox, SymbolModel, SymbolPin,
+    )
+
+    lib = "/fake/lib.SchLib"
+
+    def passive(ref):
+        return SymbolModel(lib_path=lib, lib_ref=ref, pins=(
+            SymbolPin(designator="1", name="1", x=-100, y=0, orientation=2,
+                      length=100, electrical_type="passive"),
+            SymbolPin(designator="2", name="2", x=100, y=0, orientation=0,
+                      length=100, electrical_type="passive")),
+            body_bbox=SymbolBBox(x_min=-50, y_min=-30, x_max=50, y_max=30))
+
+    def ic(ref, n):
+        pins = tuple(SymbolPin(
+            designator=str(i + 1), name=f"P{i+1}",
+            x=(-300 if i % 2 else 300), y=200 - (i // 2) * 100,
+            orientation=(2 if i % 2 else 0), length=100,
+            electrical_type="passive") for i in range(n))
+        return SymbolModel(lib_path=lib, lib_ref=ref, pins=pins,
+                           body_bbox=SymbolBBox(x_min=-200, y_min=-300,
+                                                x_max=200, y_max=300))
+
+    syms = {(lib, "RES"): passive("RES"), (lib, "IC"): ic("IC", 8)}
+
+    class Ext:
+        def extract_one(self, lp, lr):
+            return syms.get((lp, lr))
+
+        def extract_many(self, refs):
+            return {k: syms[k] for k in refs if k in syms}
+
+    for seed in range(8):
+        rnd = random.Random(seed)
+        parts = [Part(refdes="U1", lib_ref="IC", lib_path=lib,
+                      status="existing", sheet="main")]
+        parts += [Part(refdes=f"R{i}", lib_ref="RES", lib_path=lib,
+                       status="existing", sheet="main") for i in range(1, 7)]
+        nets = [Net(name="GND", is_ground=True, pins=(
+            [PinRef(refdes="U1", pin="2")]
+            + [PinRef(refdes=f"R{i}", pin="2") for i in range(1, 7)]))]
+        for i in range(1, 7):
+            nets.append(Net(name=f"S{i}", pins=(
+                PinRef(refdes="U1", pin=str(rnd.randint(3, 8))),
+                PinRef(refdes=f"R{i}", pin="1"))))
+        plan = DesignPlan(spec="x", summary="x",
+                          sheets=[Sheet(name="main", size="A4")],
+                          parts=parts, nets=nets)
+        res = build_best_canvas_from_plan(plan, Ext(), n_tries=3,
+                                          strict_shorts=False)
+        segs = [(w.x1, w.y1, w.x2, w.y2, w.net) for w in res.canvas.wires]
+        assert _cross_net_meeting_counts(segs) == {}, f"seed {seed}"
+
+
+def test_detect_routing_short_flags_label_on_foreign_wire():
+    """A net label sitting on a DIFFERENT net's wire merges the two nets in
+    Altium -- _detect_routing_shorts must flag it (the wire-vs-pin check alone
+    would miss this wire-vs-label short)."""
+    from eda_agent.design.canvas import NetLabel
+
+    plan = DesignPlan.model_validate({
+        "spec": "x", "summary": "x",
+        "sheets": [{"name": "main", "size": "A4"}],
+        "parts": [
+            {"refdes": "R1", "lib_ref": "RES", "lib_path": "/fake/l.SchLib",
+             "status": "existing", "sheet": "main"},
+            {"refdes": "R2", "lib_ref": "RES", "lib_path": "/fake/l.SchLib",
+             "status": "existing", "sheet": "main"},
+        ],
+        "nets": [
+            {"name": "GND", "is_ground": True, "pins": [
+                {"refdes": "R1", "pin": "2"}, {"refdes": "R2", "pin": "2"}]},
+            {"name": "S1", "pins": [
+                {"refdes": "R1", "pin": "1"}, {"refdes": "R2", "pin": "1"}]},
+        ],
+    })
+    canvas = SchematicCanvas()
+    canvas.add_sheet(Sheet(name="main", size="A4"))
+    # A GND wire, and an S1 label sitting on its interior -> short.
+    canvas.add_wires([WireSegment(x1=0, y1=0, x2=1000, y2=0,
+                                  sheet="main", net="GND")])
+    canvas.add_labels([NetLabel(text="S1", x=500, y=0, orientation=0,
+                                sheet="main")])
+    result = PipelineResult(canvas=canvas)
+    _detect_routing_shorts(plan, canvas, result)
+    assert any("net label" in f.text and "S1" in f.text
+               for f in result.failures)
+
+    # A same-net label on its own wire is fine (no false positive).
+    ok_canvas = SchematicCanvas()
+    ok_canvas.add_sheet(Sheet(name="main", size="A4"))
+    ok_canvas.add_wires([WireSegment(x1=0, y1=0, x2=1000, y2=0,
+                                     sheet="main", net="GND")])
+    ok_canvas.add_labels([NetLabel(text="GND", x=500, y=0, orientation=0,
+                                   sheet="main")])
+    ok_result = PipelineResult(canvas=ok_canvas)
+    _detect_routing_shorts(plan, ok_canvas, ok_result)
+    assert not any("net label" in f.text for f in ok_result.failures)

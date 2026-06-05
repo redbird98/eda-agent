@@ -63,6 +63,7 @@ from typing import Optional
 
 import networkx as nx
 
+from eda_agent.design.canvas import sheet_dimensions
 from eda_agent.design.plan import DesignPlan
 
 
@@ -151,6 +152,41 @@ def _anchor_role(part_role: Optional[str]) -> Optional[str]:
     return None
 
 
+def _structural_anchor(
+    plan: DesignPlan,
+    edges: list[tuple[str, str]],
+) -> Optional[str]:
+    """A synthetic input anchor for plans with no role-tagged anchor.
+
+    Many plans (zone-based, no explicit input/output roles) would fall
+    back to force-directed, which wiggles a clean signal chain out of
+    order. When the signal graph has a flow endpoint -- a degree-1 node --
+    BFS layering from it lays the graph out left-to-right (a chain becomes
+    a straight ordered ladder). Picks the lowest-refdes endpoint for
+    determinism.
+
+    Returns ``None`` (keep force-directed) when:
+      - there are no signal edges, or
+      - the flow doesn't span MOST parts. A board with a short signal
+        chain plus many power-only parts (decaps on VCC/GND carry no
+        signal edge) would dump those isolated parts into one middle
+        layer where they overlap; force-directed spreads them cleanly.
+        The largest signal-connected component must cover >=60% of parts
+        (and at least 3) before Sugiyama is worthwhile, or
+      - that component is a ring/mesh with no degree-1 endpoint.
+    """
+    if not edges:
+        return None
+    G = nx.Graph()
+    G.add_nodes_from(p.refdes for p in plan.parts)
+    G.add_edges_from(edges)
+    largest = max(nx.connected_components(G), key=len, default=set())
+    if len(largest) < 3 or len(largest) < 0.6 * len(plan.parts):
+        return None
+    leaves = sorted(n for n in largest if G.degree(n) == 1)
+    return leaves[0] if leaves else None
+
+
 def _assign_layers(
     plan: DesignPlan,
     edges: list[tuple[str, str]],
@@ -174,6 +210,13 @@ def _assign_layers(
             inputs.append(p.refdes)
         elif role == "output":
             outputs.append(p.refdes)
+
+    # No role anchor: seed the BFS from a structural flow endpoint so a
+    # chain/tree still lays out left-to-right instead of degenerating.
+    if not inputs and not outputs:
+        anchor = _structural_anchor(plan, edges)
+        if anchor is not None:
+            inputs = [anchor]
 
     layer: dict[str, int] = {}
 
@@ -346,6 +389,22 @@ def _barycenter_sweep(
     return layers
 
 
+def _layout_max(plan: DesignPlan) -> tuple[int, int]:
+    """Usable layout bounds (max_x, max_y) from the (first) sheet's size.
+
+    A bigger sheet => more room, so a large design SPREADS instead of cramming
+    its rows below comfortable spacing (the cause of routing shorts on dense
+    sheets). A4 reproduces the historical 10500x7500 exactly; the margins are
+    the same absolute frame->bounds offsets as A4. Multi-sheet plans use the
+    first sheet's size (the layout is one coordinate space).
+    """
+    size = plan.sheets[0].size if plan.sheets else "A4"
+    frame_w, frame_h = sheet_dimensions(size)
+    max_x = frame_w - (11500 - SHEET_MAX_X_MILS)
+    max_y = frame_h - (7600 - SHEET_MAX_Y_MILS)
+    return max_x, max_y
+
+
 def _assign_coordinates(
     plan: DesignPlan,
     by_layer: dict[int, list[str]],
@@ -362,13 +421,27 @@ def _assign_coordinates(
     interaction with shove's wall-clamping produces residual overlaps
     on the buck plan that shove can't fully repair. Until shove gains
     layer-aware wall handling, even spacing remains the v1 stand-in.
+
+    NOTE: a priority-method y-alignment refinement (slide each node to its
+    neighbours' median to straighten wires; Sugiyama-Tagawa-Toda 1981) was
+    trialled here and REJECTED -- see ``_align`` notes in the module memory.
+    Forced, it is a proxy trap: it trades routed wirelength for crossings
+    inconsistently (helped an asymmetric fan and a 33-part hub on the real
+    ``total``, but tilted already-straight lone-node chains and raised both
+    crossings and wirelength on those). No sugiyama-local gate distinguishes
+    the cases faithfully because the node-centre edge-span proxy disagrees
+    with the routed score. The faithful version is Brandes-Koepf's balanced
+    median-of-four-alignments (keeps a node centred when its up/down pulls
+    conflict, which is exactly the straight-chain case the crude method
+    breaks); that is a larger, separately-validated change.
     """
     layer_indices = sorted(by_layer)
     if not layer_indices:
         return []
 
-    sheet_width = SHEET_MAX_X_MILS - SHEET_ORIGIN_X_MILS
-    sheet_height = SHEET_MAX_Y_MILS - SHEET_ORIGIN_Y_MILS
+    max_x, max_y = _layout_max(plan)
+    sheet_width = max_x - SHEET_ORIGIN_X_MILS
+    sheet_height = max_y - SHEET_ORIGIN_Y_MILS
     n_layers = len(layer_indices)
     layer_x_step = (
         min(LAYER_SPACING_MILS, sheet_width // max(1, n_layers - 1))
@@ -433,15 +506,17 @@ def sugiyama_layout(plan: DesignPlan) -> list[SugiyamaPlacement]:
 
 
 def has_anchors(plan: DesignPlan) -> bool:
-    """True iff at least one part is tagged with an input or output role.
+    """True iff Sugiyama layering can establish a left-to-right order.
 
-    Plans without anchors degenerate to a single layer under Sugiyama
-    -- callers should fall back to force-directed for those.
+    That holds when a part carries an input/output role OR -- absent any
+    role -- the signal graph has a flow endpoint (a degree-1 node) to seed
+    BFS from. A ring/mesh with no endpoint and no role has no clean order,
+    so this returns False and the caller falls back to force-directed.
     """
     for p in plan.parts:
         if _anchor_role(p.role) is not None:
             return True
-    return False
+    return _structural_anchor(plan, _signal_edges(plan)) is not None
 
 
 __all__ = [

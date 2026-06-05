@@ -15,6 +15,7 @@ same names so a future un-mangling pass can flip both at once.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -71,41 +72,51 @@ def _part_parameters(
 
 
 def _detect_junctions(
-    wires: list[tuple[int, int, int, int]],
+    wires: list[tuple[int, int, int, int]]
+    | list[tuple[int, int, int, int, str]],
 ) -> list[tuple[int, int]]:
     """Return the set of points that need a junction dot.
 
-    Two cases need a dot:
+    NET-AWARE: a junction dot is an electrical CONNECTION, so it must only be
+    placed where wires of the SAME net meet. Two different nets whose wires
+    merely cross or touch must NOT get a dot -- that would short them. Wires
+    may therefore carry a 5th element, the net name; same-coordinate meetings
+    of DIFFERENT nets are ignored. Four-tuple wires (no net) are all treated as
+    one net -- correct when the caller already passes a single net's wires.
 
-    1. **Three or more wire endpoints coincide.** Counted from the
-       endpoint multiset. A T-junction adds 3 endpoints to one point
-       (two wires end, one starts/passes); a 4-way junction adds 4.
-    2. **A wire endpoint sits strictly between the endpoints of another
-       wire's axis-aligned segment.** That's the "wire stops on
-       another wire" case Altium's auto-compiler also treats as a
-       junction but our scripted placement doesn't always trigger.
+    Two same-net cases need a dot:
 
-    Wires are ``(x1, y1, x2, y2)`` tuples; only axis-aligned segments
-    (the only kind we emit) are checked.
+    1. **Three or more same-net wire endpoints coincide** (a T- or 4-way join).
+    2. **A same-net wire endpoint sits strictly between the endpoints of
+       another same-net wire's axis-aligned segment** ("wire stops on wire").
+
+    Only axis-aligned segments (the only kind we emit) are checked.
     """
     from collections import Counter
 
-    endpoint_counts: Counter = Counter()
-    for (x1, y1, x2, y2) in wires:
-        endpoint_counts[(x1, y1)] += 1
-        endpoint_counts[(x2, y2)] += 1
+    # Normalise to (x1, y1, x2, y2, net); net=None groups all four-tuples.
+    norm = [
+        (w[0], w[1], w[2], w[3], w[4] if len(w) > 4 else None)
+        for w in wires
+    ]
 
+    # 1. Three+ endpoints of the SAME net coinciding.
+    endpoint_counts: Counter = Counter()
+    for (x1, y1, x2, y2, net) in norm:
+        endpoint_counts[((x1, y1), net)] += 1
+        endpoint_counts[((x2, y2), net)] += 1
     junctions: set[tuple[int, int]] = {
-        pt for pt, c in endpoint_counts.items() if c >= 3
+        pt for (pt, _net), c in endpoint_counts.items() if c >= 3
     }
 
-    endpoints: set[tuple[int, int]] = set()
-    for (x1, y1, x2, y2) in wires:
-        endpoints.add((x1, y1))
-        endpoints.add((x2, y2))
-
-    for (x, y) in endpoints:
-        for (sx1, sy1, sx2, sy2) in wires:
+    # 2. A same-net endpoint terminating on a same-net segment's interior.
+    endpoints_by_net: dict[object, set[tuple[int, int]]] = {}
+    for (x1, y1, x2, y2, net) in norm:
+        s = endpoints_by_net.setdefault(net, set())
+        s.add((x1, y1))
+        s.add((x2, y2))
+    for (sx1, sy1, sx2, sy2, net) in norm:
+        for (x, y) in endpoints_by_net.get(net, ()):
             if (x, y) == (sx1, sy1) or (x, y) == (sx2, sy2):
                 continue
             if sx1 == sx2 and x == sx1:
@@ -116,6 +127,51 @@ def _detect_junctions(
                     junctions.add((x, y))
 
     return sorted(junctions)
+
+
+def _cross_net_meeting_counts(
+    wires: list[tuple[int, int, int, int, str]],
+) -> dict[str, int]:
+    """Per-net count of CROSS-NET wire meetings (the geometries Altium
+    auto-junctions on compile, silently shorting the two nets).
+
+    A meeting is (a) two different nets' wire ENDPOINTS coinciding, or (b) one
+    net's endpoint terminating on a DIFFERENT net's segment interior (a T).
+    Pure crossings -- two segments crossing with no shared point -- are NOT
+    counted: Altium does not auto-junction those, so they are safe. The result
+    maps each offending net to how many meetings it touches, so a caller can
+    greedily fall the worst offender back to labels until none remain.
+    """
+    from collections import defaultdict
+
+    counts: dict[str, int] = defaultdict(int)
+
+    # (a) endpoint coincidences across nets.
+    nets_at: dict[tuple[int, int], set[str]] = defaultdict(set)
+    for (x1, y1, x2, y2, net) in wires:
+        nets_at[(x1, y1)].add(net)
+        nets_at[(x2, y2)].add(net)
+    for nets in nets_at.values():
+        if len(nets) > 1:
+            for n in nets:
+                counts[n] += 1
+
+    # (b) an endpoint of one net terminating on another net's segment interior.
+    for (x1, y1, x2, y2, net) in wires:
+        for (ex, ey) in ((x1, y1), (x2, y2)):
+            for (sx1, sy1, sx2, sy2, snet) in wires:
+                if snet == net:
+                    continue
+                if (ex, ey) == (sx1, sy1) or (ex, ey) == (sx2, sy2):
+                    continue
+                if sx1 == sx2 and ex == sx1 and min(sy1, sy2) < ey < max(sy1, sy2):
+                    counts[net] += 1
+                    counts[snet] += 1
+                elif sy1 == sy2 and ey == sy1 and min(sx1, sx2) < ex < max(sx1, sx2):
+                    counts[net] += 1
+                    counts[snet] += 1
+
+    return dict(counts)
 
 
 def _ground_style(net_name: str) -> str:
@@ -130,6 +186,40 @@ def _ground_style(net_name: str) -> str:
     if "AGND" in upper or "ANALOG" in upper or upper == "AGND":
         return "gnd_signal"
     return "gnd_power"
+
+
+# Explicit power-rail net names (uppercased) recognised when the planner names
+# a rail conventionally but omits is_power. Kept to unambiguous supply rails so
+# a signal that merely contains a voltage (e.g. "ADC_2V5_REF") is NOT pulled
+# onto a port glyph.
+_POWER_RAIL_NAMES = frozenset({
+    "VCC", "VDD", "VEE", "VBAT", "VDDA", "VCCA", "AVDD", "AVCC", "AVEE",
+    "VBUS", "VPP", "VDDIO", "VCCIO", "VREF", "VSYS", "VIO",
+})
+# Bare voltage-rail tokens: V5, V12, V3V3, P3V3, V1V8 (a letter-led name the
+# plan schema allows, all-digits-after). Anchored so suffixes like "_SENSE"
+# break the match.
+_POWER_RAIL_RE = re.compile(r"^[VP][0-9]+([VP][0-9]+)?$")
+
+
+def _is_ground_net(net: Net) -> bool:
+    """True if the net is ground -- by the is_ground flag OR an unambiguous
+    ground name (GND family, VSS, EARTH/PE). Mirrors the name heuristic the
+    port emitter already uses so representation and styling agree."""
+    if net.is_ground:
+        return True
+    upper = net.name.upper()
+    return ("GND" in upper or upper in ("VSS", "VSSA", "EARTH", "PE"))
+
+
+def _is_power_net(net: Net) -> bool:
+    """True if the net is a power rail -- by the is_power flag OR a recognised
+    rail name. Conservative on names (explicit set + strict voltage token) so
+    a signal net is never mistaken for a supply."""
+    if net.is_power:
+        return True
+    upper = net.name.upper()
+    return upper in _POWER_RAIL_NAMES or bool(_POWER_RAIL_RE.match(upper))
 
 
 def _power_port_orientation(pin_orientation: int, is_ground: bool) -> int:
@@ -158,8 +248,12 @@ def _net_representation(
     """Pick the visual representation for a net per discipline rule 3.
 
     Three-tier priority:
-      1. ``is_power`` or ``is_ground`` -> ``'port'``: power-port glyph at
-         every pin (cluster-consolidated by the caller).
+      1. power or ground (the ``is_power``/``is_ground`` flag OR a
+         recognised rail name -- see ``_is_power_net`` / ``_is_ground_net``)
+         -> ``'port'``: power-port glyph at every pin (cluster-consolidated
+         by the caller). Name detection keeps a conventionally-named rail
+         (``GND``, ``VCC``, ``V3V3``) off the wire/label path even when the
+         planner forgets the flag.
       2. ``force_label=True`` -> ``'label_per_pin'``: planner-driven
          override for an intra-block net that would tangle as a wire.
       3. All pins share one zone (functional block) -> ``'wire'``: route
@@ -174,7 +268,7 @@ def _net_representation(
     zones yet — the executor still wires them together. Once the planner
     assigns zones, the rule kicks in.
     """
-    if net.is_power or net.is_ground:
+    if _is_power_net(net) or _is_ground_net(net):
         return "port"
     if net.force_label:
         return "label_per_pin"

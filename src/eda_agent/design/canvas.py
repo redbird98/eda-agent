@@ -34,6 +34,14 @@ from eda_agent.design.symbols import (
 )
 
 
+# Manhattan radius (mils) within which a power/ground net's pins share one
+# rail glyph; pins farther apart each get their own GND/VCC symbol. Shared by
+# the pipeline (preview canvas) and the executor (Altium apply) so the two
+# agree. 1000 mils = 1 inch: adjacent pins cluster, spread pins get per-pin
+# symbols (the universal convention) instead of long cross-sheet rail wires.
+POWER_RAIL_CLUSTER_RADIUS_MILS = 1000
+
+
 # Rotation in degrees -> (cos, sin) for an integer-clean 90 deg step.
 # Using ints keeps every transformed coordinate exact, no floating-point
 # drift on the mil grid.
@@ -83,6 +91,7 @@ class SymbolInstance:
     rotation: int  # 0 / 90 / 180 / 270, CCW
     sheet: str = "main"
     flipped: bool = False  # mirror across vertical axis BEFORE rotation
+    value: str = ""  # component value/part-number, shown under the designator
 
     def pin_world(self, pin_id: str) -> Optional[PinEndpoint]:
         """World-frame endpoint for the named pin (by designator or name).
@@ -201,9 +210,71 @@ class Junction:
     sheet: str = "main"
 
 
+@dataclass(frozen=True)
+class BusSegment:
+    """One Manhattan segment of a bus polyline, world coords in mils.
+
+    A bus carries several nets at once (a data/address bus), so unlike a
+    WireSegment it has no single ``net``; the member nets are identified by the
+    net labels placed on the bus entries that tap it.
+    """
+
+    x1: int
+    y1: int
+    x2: int
+    y2: int
+    sheet: str = "main"
+
+    def length(self) -> int:
+        return abs(self.x1 - self.x2) + abs(self.y1 - self.y2)
+
+
+@dataclass(frozen=True)
+class BusEntry:
+    """A 45-degree entry tapping one signal off a bus.
+
+    Runs from the bus line to the start of a pin's wire stub; Altium draws it
+    as the short diagonal between a wire and a bus. ``net`` is the signal it
+    carries (for emit / debugging).
+    """
+
+    x1: int
+    y1: int
+    x2: int
+    y2: int
+    sheet: str = "main"
+    net: str = ""
+
+
+# Standard schematic sheet drawing areas in mils (landscape). A4 keeps
+# Altium's inner-area default (11500x7600); the rest are the ISO/US series.
+# A planner picks a sheet via the `size` string; the dimensions follow.
+_SHEET_DIMENSIONS: dict[str, tuple[int, int]] = {
+    "A4": (11500, 7600),
+    "A3": (16540, 11690),
+    "A2": (23390, 16540),
+    "A1": (33110, 23390),
+    "A0": (46810, 33110),
+    "A": (11000, 8500),
+    "B": (17000, 11000),
+    "C": (22000, 17000),
+    "D": (34000, 22000),
+    "E": (44000, 34000),
+}
+
+
+def sheet_dimensions(size: str) -> tuple[int, int]:
+    """Drawing-area (width, height) in mils for a sheet size string.
+
+    Unknown sizes fall back to A4. Shared by ``Sheet`` and the layout so the
+    placement area scales with the requested sheet, not a hardcoded A4.
+    """
+    return _SHEET_DIMENSIONS.get(str(size).upper(), (11500, 7600))
+
+
 @dataclass
 class Sheet:
-    """One schematic sheet."""
+    """One schematic sheet. ``width_mils``/``height_mils`` follow ``size``."""
 
     name: str
     title: str = ""
@@ -212,6 +283,14 @@ class Sheet:
     # respect this for the body frame; layout treats it as a soft hint.
     width_mils: int = 11500
     height_mils: int = 7600
+
+    def __post_init__(self) -> None:
+        # Derive the drawing area from the size string so a planner asking for
+        # A3/A2/A0 actually gets that frame -- previously the size was
+        # decorative and every sheet stayed A4. Explicitly-set dimensions
+        # (anything other than the A4 default) are preserved.
+        if self.width_mils == 11500 and self.height_mils == 7600:
+            self.width_mils, self.height_mils = sheet_dimensions(self.size)
 
 
 @dataclass
@@ -232,6 +311,8 @@ class SchematicCanvas:
     labels: list[NetLabel] = field(default_factory=list)
     power_ports: list[PowerPort] = field(default_factory=list)
     junctions: list[Junction] = field(default_factory=list)
+    buses: list[BusSegment] = field(default_factory=list)
+    bus_entries: list[BusEntry] = field(default_factory=list)
 
     def add_sheet(self, sheet: Sheet) -> None:
         if any(s.name == sheet.name for s in self.sheets):
@@ -254,6 +335,12 @@ class SchematicCanvas:
 
     def add_junctions(self, junctions: Iterable[Junction]) -> None:
         self.junctions.extend(junctions)
+
+    def add_buses(self, buses: Iterable[BusSegment]) -> None:
+        self.buses.extend(buses)
+
+    def add_bus_entries(self, entries: Iterable[BusEntry]) -> None:
+        self.bus_entries.extend(entries)
 
     def instance_by_refdes(self, refdes: str) -> Optional[SymbolInstance]:
         for inst in self.instances:
@@ -287,6 +374,12 @@ class SchematicCanvas:
 
     def junctions_on(self, sheet: str) -> list[Junction]:
         return [j for j in self.junctions if j.sheet == sheet]
+
+    def buses_on(self, sheet: str) -> list[BusSegment]:
+        return [b for b in self.buses if b.sheet == sheet]
+
+    def bus_entries_on(self, sheet: str) -> list[BusEntry]:
+        return [e for e in self.bus_entries if e.sheet == sheet]
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-serializable snapshot.
@@ -337,6 +430,16 @@ class SchematicCanvas:
             "junctions": [
                 {"x": j.x, "y": j.y, "sheet": j.sheet}
                 for j in self.junctions
+            ],
+            "buses": [
+                {"x1": b.x1, "y1": b.y1, "x2": b.x2, "y2": b.y2,
+                 "sheet": b.sheet}
+                for b in self.buses
+            ],
+            "bus_entries": [
+                {"x1": e.x1, "y1": e.y1, "x2": e.x2, "y2": e.y2,
+                 "sheet": e.sheet, "net": e.net}
+                for e in self.bus_entries
             ],
         }
 

@@ -13,7 +13,7 @@ Every MCP tool follows `ns_verb_object`:
    `export` · `import` · `open` · `close` · `save` · `attach` · `link` ·
    `find` · `check` · `calc` · `plan` · `sync` · `render`. Domain-idiomatic
    verbs that are already clear (`flip`, `align`, `snap`, `repour`, `tune`,
-   `panelize`, `normalize`, `increment`, `stub`, `bevel`) are kept.
+   `panelize`, `normalize`, `increment`, `stub`, `bevel`, `layout`) are kept.
 3. **Object** (remaining tokens): the noun. The namespace already carries the
    subsystem, so redundant domain words are dropped from the object
    (`get_altium_status` -> `app_get_status`, `create_project` -> `proj_create`).

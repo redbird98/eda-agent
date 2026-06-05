@@ -47,6 +47,16 @@ SNAP_GRID_MILS = 100
 # centre-to-centre and unconnected ones stay well separated on A4.
 _SPRING_K = 0.05           # spring stiffness
 _SPRING_REST_MILS = 1400   # ideal centre-to-centre for parts sharing a net
+# Pin-attractor rest length: how far a discrete settles from the IC pin it
+# wires to. Short, so the part hugs its pin's SIDE of the IC (the repulsion
+# term keeps it from landing on the body).
+_SPRING_REST_PIN_MILS = 500
+# Pin attractors are stiffer than the generic centroid spring so the
+# which-side-of-the-IC signal beats the diffuse repulsion that otherwise
+# sprawls the constellation. (The centroid spring stays soft so unrelated
+# parts still spread out.) FD is chaotic in this stiffness, so the pipeline's
+# best-of sweeps a few values and scores each rather than trusting one.
+_SPRING_K_PIN = 0.08
 _REPEL_K = 6_000_000.0     # repulsion strength (Coulomb-style 1/r^2)
 _REPEL_CUTOFF_MILS = 3000  # ignore repulsion beyond this distance
 _EDGE_PULL_K = 0.35        # bias force toward the chosen sheet edge
@@ -271,8 +281,23 @@ def _initial_positions(
     return pos
 
 
-def _force_directed_layout(plan: DesignPlan) -> list[PlacedPart]:
-    """Run the spring/repulsion solver and return PlacedPart per part."""
+def _force_directed_layout(
+    plan: DesignPlan,
+    ic_pin_offsets: dict[str, dict[str, tuple[int, int]]] | None = None,
+    pin_attract_k: float = _SPRING_K_PIN,
+) -> list[PlacedPart]:
+    """Run the spring/repulsion solver and return PlacedPart per part.
+
+    ``ic_pin_offsets`` maps an IC's refdes to ``{pin_id: (dx, dy)}`` -- each
+    pin's wire-end offset from the IC's centre in the symbol's native (rotation
+    0) frame. When supplied, a discrete wired to an IC on a SIGNAL net is pulled
+    toward that specific pin (centre + offset) instead of toward the IC's
+    centre, so it settles on the pin's SIDE of the IC. This is the difference
+    between "near the chip" and "near the chip's OUT pin"; it makes the placer
+    pin-aware so the output stage lands by OUT and the timing network by the
+    DISCH/THRES pins, without any post-hoc repositioning. ``None`` reproduces
+    the centroid-only behaviour exactly.
+    """
     parts = list(plan.parts)
     if not parts:
         return []
@@ -284,7 +309,32 @@ def _force_directed_layout(plan: DesignPlan) -> list[PlacedPart]:
     pos = _initial_positions(plan, pin_count)
     velocity = {r: [0.0, 0.0] for r in pos}
 
-    spring_pairs = _connected_pairs(plan)
+    # Pin attractors: for each discrete, the IC pins it shares a SIGNAL net with
+    # (power / ground become port glyphs, not routed wires, so they must not
+    # pull placement). Each entry is (ic_refdes, off_x, off_y).
+    offsets = ic_pin_offsets or {}
+    ic_set = set(offsets)
+    pin_attract: dict[str, list[tuple[str, int, int]]] = {}
+    attract_pairs: set[tuple[str, str]] = set()
+    for net in plan.nets:
+        if net.is_power or net.is_ground:
+            continue
+        ic_pins = [(p.refdes, str(p.pin)) for p in net.pins if p.refdes in ic_set]
+        discretes = [p.refdes for p in net.pins if p.refdes not in ic_set]
+        for ic, pin in ic_pins:
+            off = offsets.get(ic, {}).get(pin)
+            if off is None:
+                continue
+            for d in discretes:
+                pin_attract.setdefault(d, []).append((ic, off[0], off[1]))
+                attract_pairs.add(tuple(sorted((d, ic))))
+
+    # Centroid springs for every connected pair EXCEPT those an IC-pin
+    # attractor already handles (so a discrete isn't pulled to both the IC's
+    # centre and its pin -- the pin wins).
+    spring_pairs = {
+        pair for pair in _connected_pairs(plan) if pair not in attract_pairs
+    }
 
     refdes_list = list(pos.keys())
     dt = _DT
@@ -305,6 +355,28 @@ def _force_directed_layout(plan: DesignPlan) -> list[PlacedPart]:
             forces[a][1] += f * uy
             forces[b][0] -= f * ux
             forces[b][1] -= f * uy
+
+        # Pin attractors: pull each discrete toward the specific IC pin it
+        # wires to (IC centre + the pin's offset), so it settles on that pin's
+        # side of the IC. The reaction on the (heavy) IC is small.
+        for d, attractors in pin_attract.items():
+            if d not in pos:
+                continue
+            for ic, off_x, off_y in attractors:
+                if ic not in pos:
+                    continue
+                tx = pos[ic][0] + off_x
+                ty = pos[ic][1] + off_y
+                dx = tx - pos[d][0]
+                dy = ty - pos[d][1]
+                dist = math.hypot(dx, dy) + 1e-3
+                f = (dist - _SPRING_REST_PIN_MILS) * pin_attract_k
+                ux = dx / dist
+                uy = dy / dist
+                forces[d][0] += f * ux
+                forces[d][1] += f * uy
+                forces[ic][0] -= f * ux
+                forces[ic][1] -= f * uy
 
         n = len(refdes_list)
         for i in range(n):

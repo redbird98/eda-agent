@@ -112,6 +112,47 @@ def test_wire_crossings_increase_score():
     assert s_cross.total > s_base.total
 
 
+def test_same_net_crossing_is_a_junction_not_a_fault():
+    """Two wires of the SAME net meeting mid-span is an electrical junction
+    (drawn with a dot), not a readability fault -- it must NOT be counted as
+    a wire crossing. Only different-net crossings are faults."""
+    sym = _passive()
+
+    def _crossing_canvas(net_h: str, net_v: str):
+        c = _canvas_with(
+            SymbolInstance(refdes="R1", symbol=sym, x=1000, y=1000, rotation=0),
+            SymbolInstance(refdes="R2", symbol=sym, x=2000, y=2000, rotation=0),
+        )
+        c.add_wires([
+            WireSegment(x1=500, y1=1500, x2=2500, y2=1500,
+                        sheet="main", net=net_h),
+            WireSegment(x1=1500, y1=500, x2=1500, y2=2500,
+                        sheet="main", net=net_v),
+        ])
+        return c
+
+    same = score_canvas(_crossing_canvas("NETX", "NETX"))
+    diff = score_canvas(_crossing_canvas("NETX", "NETY"))
+    assert same.wire_crossings == 0          # junction, not counted
+    assert diff.wire_crossings == 1          # true cross-net fault
+    assert diff.total > same.total
+
+
+def test_unnamed_wire_crossings_still_count():
+    """A crossing between wires with no net name (empty string) is still a
+    fault -- the same-net exemption requires a real shared net name."""
+    sym = _passive()
+    c = _canvas_with(
+        SymbolInstance(refdes="R1", symbol=sym, x=1000, y=1000, rotation=0),
+        SymbolInstance(refdes="R2", symbol=sym, x=2000, y=2000, rotation=0),
+    )
+    c.add_wires([
+        WireSegment(x1=500, y1=1500, x2=2500, y2=1500, sheet="main", net=""),
+        WireSegment(x1=1500, y1=500, x2=1500, y2=2500, sheet="main", net=""),
+    ])
+    assert score_canvas(c).wire_crossings == 1
+
+
 def test_body_overlap_scores_strongly_penalized():
     """Overlapping bodies are an illegal layout; expect a big penalty."""
     sym = _passive()
@@ -155,3 +196,26 @@ def test_score_breakdown_explains_total():
     ])
     score = score_canvas(canvas)
     assert abs(sum(score.breakdown.values()) - score.total) < 1e-6
+
+
+def test_alignment_penalty_rewards_shared_rows_and_columns():
+    """The new alignment term: parts on shared rows/columns score lower."""
+    sym = _passive()
+    # Three parts on one row -> each shares that row -> zero penalty.
+    aligned = _canvas_with(
+        SymbolInstance(refdes="R1", symbol=sym, x=1000, y=1000, rotation=0),
+        SymbolInstance(refdes="R2", symbol=sym, x=2000, y=1000, rotation=0),
+        SymbolInstance(refdes="R3", symbol=sym, x=3000, y=1000, rotation=0),
+    )
+    # No two parts share a row or column -> full penalty.
+    scattered = _canvas_with(
+        SymbolInstance(refdes="R1", symbol=sym, x=1000, y=1000, rotation=0),
+        SymbolInstance(refdes="R2", symbol=sym, x=2200, y=1700, rotation=0),
+        SymbolInstance(refdes="R3", symbol=sym, x=3500, y=2900, rotation=0),
+    )
+    a = score_canvas(aligned)
+    s = score_canvas(scattered)
+    assert a.alignment_penalty == 0.0
+    assert s.alignment_penalty > 0.5
+    assert "alignment" in a.breakdown
+    assert s.breakdown["alignment"] > a.breakdown["alignment"]

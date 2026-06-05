@@ -19,6 +19,7 @@ from eda_agent.design.sugiyama import (
     _barycenter_sweep,
     _rail_bias,
     _signal_edges,
+    _structural_anchor,
     has_anchors,
     sugiyama_layout,
 )
@@ -513,4 +514,59 @@ def test_has_anchors_false_when_no_role_anchors() -> None:
         ],
         nets=[_net("S", [("R1", "1"), ("R2", "1")])],
     )
+    assert has_anchors(plan) is False
+
+
+# ---------------------------------------------------------------------------
+# Structural anchor: Sugiyama for role-less but flow-heavy plans
+# ---------------------------------------------------------------------------
+
+
+def _chain_plan(n_parts: int):
+    chain = [f"R{i}" for i in range(1, n_parts + 1)]
+    parts = [Part(refdes=r, lib_ref="RES") for r in chain]
+    nets = [_net(f"N{i}", [(chain[i], "2"), (chain[i + 1], "1")])
+            for i in range(len(chain) - 1)]
+    return _plan(parts, nets), chain
+
+
+def test_structural_anchor_picks_chain_endpoint():
+    """A role-less chain has a flow endpoint; the lowest-refdes leaf seeds
+    layering so the chain orders left-to-right."""
+    plan, chain = _chain_plan(5)
+    edges = _signal_edges(plan)
+    assert _structural_anchor(plan, edges) == "R1"
+    layers = _assign_layers(plan, edges)
+    # Strictly increasing layer along the chain (perfect left-to-right).
+    assert [layers[r] for r in chain] == [0, 1, 2, 3, 4]
+    assert has_anchors(plan) is True
+
+
+def test_structural_anchor_skips_power_heavy_plan():
+    """A short signal chain plus many power-only parts (decaps) must NOT use
+    the structural anchor -- the isolated parts would pile into one layer.
+    Force-directed stays the choice."""
+    parts = [Part(refdes="R1", lib_ref="RES"), Part(refdes="R2", lib_ref="RES")]
+    parts += [Part(refdes=f"C{i}", lib_ref="CAP") for i in range(1, 9)]
+    nets = [
+        _net("MID", [("R1", "2"), ("R2", "1")]),  # only signal edge
+        _net("VCC", [("R1", "1")] + [(f"C{i}", "1") for i in range(1, 9)],
+             is_power=True),
+        _net("GND", [("R2", "2")] + [(f"C{i}", "2") for i in range(1, 9)],
+             is_ground=True),
+    ]
+    plan = _plan(parts, nets)
+    # Largest signal component {R1,R2} is 2 of 10 parts -> below threshold.
+    assert _structural_anchor(plan, _signal_edges(plan)) is None
+    assert has_anchors(plan) is False
+
+
+def test_structural_anchor_none_for_ring():
+    """A ring (every node degree 2) has no endpoint -> no structural anchor."""
+    ring = [f"R{i}" for i in range(1, 5)]
+    parts = [Part(refdes=r, lib_ref="RES") for r in ring]
+    nets = [_net(f"N{i}", [(ring[i], "2"), (ring[(i + 1) % 4], "1")])
+            for i in range(4)]
+    plan = _plan(parts, nets)
+    assert _structural_anchor(plan, _signal_edges(plan)) is None
     assert has_anchors(plan) is False

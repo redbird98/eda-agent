@@ -1084,6 +1084,23 @@ def test_route_signal_pins_3pin_with_obstacles_returns_segments() -> None:
         assert sx1 == sx2 or sy1 == sy2
 
 
+def test_multi_pin_net_uses_low_bend_trunk() -> None:
+    """A shared net across several pins routes as a trunk-and-stub (straight
+    median spine + short taps), not a zig-zag chain -- the canonical clean
+    schematic form. Near-collinear pins route with ZERO corners; a scattered
+    set still beats the old chain/star on corner count."""
+    from eda_agent.design.router import _count_bends, _route_signal_pins
+
+    # Four near-collinear pins: a straight trunk, no corners at all.
+    aligned = [(1000, 2000), (2000, 2050), (3000, 1950), (4000, 2000)]
+    assert _count_bends(_route_signal_pins(aligned, [])) == 0
+
+    # Scattered 5-pin net: the trunk keeps corners low (the old chain hit 7).
+    scattered = [(1000, 1000), (1500, 3000), (3000, 1500),
+                 (3500, 3200), (2200, 2000)]
+    assert _count_bends(_route_signal_pins(scattered, [])) <= 3
+
+
 def test_s_bend_detours_around_central_blocker() -> None:
     """A single huge obstacle in the middle still gets routed around
     using x_mid/y_mid past the obstacle edges -- the S-bend doesn't

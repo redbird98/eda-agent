@@ -49,6 +49,7 @@ class LayoutScore:
     aspect_ratio_penalty: float = 0.0
     total_wire_length: int = 0
     port_count: int = 0
+    alignment_penalty: float = 0.0
     breakdown: dict[str, float] = field(default_factory=dict)
 
     def __lt__(self, other: "LayoutScore") -> bool:
@@ -62,6 +63,9 @@ _W_OVERLAP = 1000.0
 _W_ASPECT = 50.0
 _W_LENGTH = 0.01
 _W_PORTS = 25.0
+# Node alignment is a core drawing aesthetic; mild so it nudges toward tidy
+# rows/columns without overriding crossings / overlaps.
+_W_ALIGNMENT = 40.0
 
 
 def score_canvas(
@@ -90,8 +94,9 @@ def score_canvas(
 
     body_rects = [inst.world_bbox() for inst in instances]
     wire_segs = [(w.x1, w.y1, w.x2, w.y2) for w in wires]
+    wire_nets = [w.net for w in wires]
 
-    crossings = _count_wire_crossings(wire_segs)
+    crossings = _count_wire_crossings(wire_segs, wire_nets)
     through_body = _count_wires_through_bodies(
         wire_segs, body_rects, instances
     )
@@ -99,6 +104,7 @@ def score_canvas(
     aspect_pen = _aspect_ratio_penalty(body_rects)
     length = _total_wire_length(wire_segs)
     port_count = len(ports)
+    align_pen = _alignment_penalty(body_rects)
 
     # Try the learned model first; fall back to the heuristic if no
     # quality_model.json is bundled (fresh install, no votes yet).
@@ -116,6 +122,7 @@ def score_canvas(
             "aspect": aspect_pen * _W_ASPECT,
             "length": length * _W_LENGTH,
             "ports": port_count * _W_PORTS,
+            "alignment": align_pen * _W_ALIGNMENT,
         }
         total = sum(breakdown.values())
 
@@ -127,26 +134,70 @@ def score_canvas(
         aspect_ratio_penalty=aspect_pen,
         total_wire_length=length,
         port_count=port_count,
+        alignment_penalty=align_pen,
         breakdown=breakdown,
     )
 
 
-def _count_wire_crossings(segs: list[tuple[int, int, int, int]]) -> int:
+def _alignment_penalty(body_rects, tol: int = 100) -> float:
+    """Fraction of bodies NOT sharing a row or column with another body.
+
+    Body centres are snapped to ``tol`` mils; a body is aligned if its
+    snapped centre-x or centre-y is shared by at least one other body.
+    Returns 0.0 when every body lines up (best) and approaches 1.0 when
+    none do. Single-body sheets are trivially aligned (0.0). ``body_rects``
+    are ``SymbolBBox`` objects (x_min/y_min/x_max/y_max).
+    """
+    if len(body_rects) < 2:
+        return 0.0
+
+    def snap(v: float) -> int:
+        return int(round(v / tol) * tol)
+
+    cxs = [snap((r.x_min + r.x_max) / 2.0) for r in body_rects]
+    cys = [snap((r.y_min + r.y_max) / 2.0) for r in body_rects]
+    xcount: dict[int, int] = {}
+    ycount: dict[int, int] = {}
+    for x in cxs:
+        xcount[x] = xcount.get(x, 0) + 1
+    for y in cys:
+        ycount[y] = ycount.get(y, 0) + 1
+    aligned = sum(
+        1 for i in range(len(body_rects))
+        if xcount[cxs[i]] >= 2 or ycount[cys[i]] >= 2
+    )
+    return 1.0 - aligned / len(body_rects)
+
+
+def _count_wire_crossings(
+    segs: list[tuple[int, int, int, int]],
+    nets: Optional[list[str]] = None,
+) -> int:
     """Pairs of axis-aligned wires that cross.
 
     Only counts true crossings (horizontal segment intersecting
     vertical segment at an interior point of both). Coincident
     parallel overlaps are NOT counted here -- those would inflate the
     score for parallel buses that are legitimately stacked.
+
+    When ``nets`` (a per-segment net name, parallel to ``segs``) is
+    supplied, a crossing between two segments of the SAME net is NOT
+    counted: same-net wires meeting mid-span is an electrical junction
+    (drawn with a dot), not a readability fault. Only crossings between
+    DIFFERENT nets -- where two unrelated signals visually overlap -- are
+    counted. Without ``nets`` every crossing counts (back-compatible).
     """
-    horiz = [(min(x1, x2), max(x1, x2), y1)
-             for (x1, y1, x2, y2) in segs if y1 == y2]
-    vert = [(x1, min(y1, y2), max(y1, y2))
-            for (x1, y1, x2, y2) in segs if x1 == x2]
+    horiz = [(min(x1, x2), max(x1, x2), y1, (nets[i] if nets else None))
+             for i, (x1, y1, x2, y2) in enumerate(segs) if y1 == y2]
+    vert = [(x1, min(y1, y2), max(y1, y2), (nets[i] if nets else None))
+            for i, (x1, y1, x2, y2) in enumerate(segs) if x1 == x2]
     count = 0
-    for hx_lo, hx_hi, hy in horiz:
-        for vx, vy_lo, vy_hi in vert:
+    for hx_lo, hx_hi, hy, hnet in horiz:
+        for vx, vy_lo, vy_hi, vnet in vert:
             if hx_lo < vx < hx_hi and vy_lo < hy < vy_hi:
+                # Same non-empty net => junction, not a crossing fault.
+                if hnet is not None and hnet == vnet and hnet != "":
+                    continue
                 count += 1
     return count
 

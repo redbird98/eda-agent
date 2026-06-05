@@ -23,6 +23,7 @@ from typing import Any, Optional
 
 from pydantic import ValidationError
 
+from eda_agent.design.canvas import POWER_RAIL_CLUSTER_RADIUS_MILS
 from eda_agent.design.layout import PlacedPart, compute_layout
 from eda_agent.design.plan import DesignPlan, Net, Part, PartStatus, PinRef
 from eda_agent.design.router import (
@@ -133,6 +134,7 @@ from eda_agent.design._wiring import (
     _bom_lookup,
     _detect_junctions,
     _ground_style,
+    _is_ground_net,
     _net_representation,
     _part_parameters,
     _power_port_orientation,
@@ -866,7 +868,9 @@ def _place_net_labels(
                 )
                 # Every pin still gets a stub wire from the pin endpoint
                 # outward to the label / port / routing-junction point.
-                pending_wires.append((hot_x, hot_y, end_x, end_y))
+                # Tag the net so junction detection stays net-aware (a dot
+                # only where SAME-net wires meet, never bridging two nets).
+                pending_wires.append((hot_x, hot_y, end_x, end_y, net.name))
                 net_actions.append((pin_ref, (end_x, end_y), pin_orient))
 
             if net_actions:
@@ -906,11 +910,12 @@ def _place_net_labels(
                 # the same obstacle-aware Manhattan router used for signals.
                 # Cuts the buck's 18 stacked GND/VIN/VOUT glyphs down to a
                 # handful and frees vertical space around each pin.
-                is_gnd = net.is_ground or "GND" in net.name.upper()
+                is_gnd = _is_ground_net(net)
                 style = _ground_style(net.name) if is_gnd else "bar"
                 # Greedy clustering: each stub_end joins the first cluster
-                # whose nearest member is within CLUSTER_RADIUS_MILS.
-                CLUSTER_RADIUS_MILS = 2500
+                # whose nearest member is within CLUSTER_RADIUS_MILS. Shared
+                # with the pipeline preview so apply matches the canvas.
+                CLUSTER_RADIUS_MILS = POWER_RAIL_CLUSTER_RADIUS_MILS
                 clusters: list[list[int]] = []  # list of indices into net_actions
                 for i, (_, (ex, ey), _) in enumerate(net_actions):
                     joined = False
@@ -957,7 +962,7 @@ def _place_net_labels(
                         for seg in _route_l_path(
                             pt[0], pt[1], centroid_x, port_y, sheet_obstacles
                         ):
-                            pending_wires.append(seg)
+                            pending_wires.append((*seg, net.name))
             elif representation == "wire":
                 # Block-local net: every pin lives in the same zone, so the
                 # connection is visually traceable within that block. Wire
@@ -965,7 +970,7 @@ def _place_net_labels(
                 for seg in _route_signal_pins(
                     stub_ends, routing_obstacles
                 ):
-                    pending_wires.append(seg)
+                    pending_wires.append((*seg, net.name))
 
             else:  # representation == "label_per_pin"
                 # Cross-block net OR planner-asserted force_label: drop a
@@ -978,8 +983,8 @@ def _place_net_labels(
         # End of net/pin loops for this sheet — flush the three batches.
         if pending_wires:
             wires_payload = "~~".join(
-                f"x1={hx};y1={hy};x2={ex};y2={ey}"
-                for (hx, hy, ex, ey) in pending_wires
+                f"x1={w[0]};y1={w[1]};x2={w[2]};y2={w[3]}"
+                for w in pending_wires
             )
             try:
                 bridge.send_command(

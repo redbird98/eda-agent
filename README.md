@@ -371,7 +371,7 @@ Schematic-side operations plus viewport and sheet management.
 | `obj_crossref_net` | Sch pin list vs PCB pad list for a named net: diff + `in_sync` flag |
 | `obj_run_process` | Run any Altium process command |
 
-### PCB (90 tools)
+### PCB (95 tools)
 
 Queries and modifications on the active PCB document.
 
@@ -414,14 +414,19 @@ Queries and modifications on the active PCB document.
 | `pcb_make_paste_grid` | Split a thermal pad's paste opening into a grid (QFN swimming fix) |
 | `pcb_add_testpoints_for_net_class` | Auto-place SMD or through-hole testpoints above the board for every net in a netclass without existing coverage |
 | `pcb_calc_track_current_capacity` | IPC-2221 current capacity at multiple ΔT (pure Python, no Altium hit) |
+| `pcb_calc_trace_width_for_current` | Inverse IPC-2221: minimum + recommended track width to carry a target current at a given ΔT, copper weight and layer (the design-time complement of the capacity calc). Pure Python; optional resistance / voltage drop for a length |
 | `pcb_calc_impedance` | IPC-2141 microstrip / stripline + Wadell differential variants — pick the right track width for USB/HDMI/PCIe target impedance |
+| `pcb_calc_trace_width_for_impedance` | Inverse of the impedance calc: given a target Z₀ (or differential Zdiff) and the stackup, returns the trace width directly instead of iterating the forward formula. Round-trips with `pcb_calc_impedance`; pure Python |
+| `pcb_calc_termination` | Decide whether a net is electrically long for its edge rate (Johnson & Graham critical-length rule) and, if so, size the terminator — series / parallel / Thevenin split / AC — with nearest-E24 values. Composes with `pcb_calc_impedance` for Z₀; pure Python |
+| `pcb_calc_length_match` | Turn a skew budget (ps, or a fraction of the edge rate) into the length-match window a bus / diff pair must hold, and — given routed lengths — the serpentine compensation each net needs. Design-time complement of `pcb_tune_length` / `pcb_get_trace_lengths`; pure Python |
+| `pcb_calc_thermal_vias` | Size a thermal-via field under a power pad (Fourier conduction `R = L/kA`, vias in parallel): how many vias hit a target K/W or hold a dissipation within a temperature rise. Composes with `required_theta_ja`; pure Python |
 | `pcb_import_placement` | Position components from a coordinate list (designator / x / y / rotation / side) — the inverse of `pcb_export_coordinates` |
 | `pcb_autoplace_silkscreen` | Reposition component designators to clear pads and other silk (first-fit auto-position sweep); pair with the silk audits and `design_visual_review` |
 | `pcb_panelize` | Build a production panel on a blank board: embedded-board array of a source `.PcbDoc` + rectangular outline + corner tooling holes + fiducials |
 | `pcb_add_teardrops` / `pcb_remove_teardrops` | Launch Altium's board-wide Teardrop command (modal, non-suppressible dialog; choose Add/Remove and confirm in Altium) |
 | `pcb_tune_length` | Add approximate routed length to a net with a square serpentine; reports routed length before/after. Open-loop, not DRC-checked (no scriptable interactive tuner exists) |
 
-### Design agent (8 tools)
+### Design agent (14 tools)
 
 A high-level surface for autonomous schematic creation. The MCP client's LLM is the planner; these tools provide the discipline, the inventory, the placer, and the executor.
 
@@ -430,6 +435,12 @@ A high-level surface for autonomous schematic creation. The MCP client's LLM is 
 | `design_get_discipline` | Returns the design discipline doc (datasheet-first part choice, NDA isolation, user-libraries-are-read-only, top-leftmost pin at (0,0) symbol-authoring convention, 100-mil grid, hide non-essential parameters, functional pin layout, ...) plus the `DesignPlan` JSON schema the executor enforces. Always call this first when starting a design task |
 | `design_snapshot_inventory` | Open a list of `.SchLib` paths and report what components they contain (lib_ref, designator prefix, pin count, description, footprint). The planner uses this to bias its part choices toward existing-lib parts |
 | `design_validate_plan` | Schema + cross-check on a candidate `DesignPlan` JSON. No Altium round-trip; cheap pre-flight |
+| `design_compute_component_value` | Compute a manufacturable component value snapped to an IEC 60063 E-series (E6/E12/E24/E48/E96): feedback / unloaded resistor dividers, LED series resistor, first-order RC cut-off, crystal load caps, I²C pull-up window, divider tolerance, op-amp gain resistors, buck inductor, or a bare nearest-preferred snap. Returns the achieved value plus the error versus ideal, so the planner sizes parts deterministically instead of doing the arithmetic by hand |
+| `design_describe_circuits` | Report the electrical behaviour of each recognised sub-circuit in a `DesignPlan` (divider ratios, RC cut-offs, feedback gains, crystal load) computed from the chosen component values. Catches the wrong-but-consistent value error a divider of two valid resistors that produces the wrong ratio that connectivity / equality checks miss. Pure Python, no Altium |
+| `design_review_plan` | One-call offline pre-flight that bundles every plan-level analysis: structural `stats` (part counts by kind, IC/passive split, power & ground rails, widest signal net), the `erc` report, recognised-`circuits` behaviour, the `placement_constraints` that would auto-derive for `pcb_plan_placement`, and `net_classes`. Lets the planner vet a design in a single step before emit. Pure Python |
+| `design_suggest_diff_pair_traces` | Detect every differential pair (nets with role `differential`) and size its controlled-impedance trace width to a target (90 Ω USB / 100 Ω HDMI/LVDS) for the supplied stackup via the IPC-2141 impedance inverse. The trace geometry for every pair in one call. Pure Python |
+| `design_layout_schematic` | Compute a full schematic layout for a `DesignPlan` as pure data, no Altium: per-symbol position + rotation, per-net representation (wire / net_label / power_port), wire routes, glyph placements, junctions, and an aesthetic score. Offline and deterministic, so the planner can evaluate or compare layouts (optionally with `placement_hints`) before `design_execute_plan` |
+| `design_suggest_partition` | Min-cut partition (Kernighan-Lin style) of the plan's parts into N balanced functional groups that minimise the nets crossing between groups. Power/ground rails are excluded so the split follows signal structure. Use it to decide how to break a dense design across schematic sheets or group a PCB into rooms |
 | `design_preview_plan` | Run the full pipeline (motif composer + priors + wiring + routing-shorts detector) WITHOUT touching Altium, returning the canvas snapshot + an SVG preview for the planner to inspect before emit |
 | `design_execute_plan` | Open or create the project, create SchDoc(s) for each plan sheet, place every existing-lib part using the motif composer + canonical priors, route wires between same-block pins, drop labels for cross-block nets, drop power ports for `is_power` / `is_ground` nets, stamp Manufacturer / MPN / Datasheet (hidden by default), save. Halts on any `needs_creation` part with a structured error so the planner can resolve before instantiating. Accepts `placement_hints` for agent-driven layout refinement |
 | `design_audit_schematic` | Returns structured `{overlaps, wire_crossings, stacked_ports}` for the active schematic. Lets the planner read geometric violations and compute corrective placement moves |

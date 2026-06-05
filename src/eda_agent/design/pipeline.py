@@ -33,6 +33,7 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from eda_agent.design.canvas import (
+    POWER_RAIL_CLUSTER_RADIUS_MILS,
     Junction,
     NetLabel,
     PowerPort,
@@ -43,8 +44,11 @@ from eda_agent.design.canvas import (
 )
 from eda_agent.design._wiring import (
     _bom_lookup,
+    _cross_net_meeting_counts,
     _detect_junctions,
     _ground_style,
+    _is_ground_net,
+    _is_power_net,
     _net_representation,
     _part_parameters,
     _power_port_orientation,
@@ -53,7 +57,12 @@ from eda_agent.design.composer import compose_layout
 from eda_agent.design.force_directed import _hard_shove_pass
 from eda_agent.design.layout import compute_layout
 from eda_agent.design.plan import DesignPlan, Net, PartStatus
-from eda_agent.design.priors import apply_placement_priors, load_priors
+from eda_agent.design.priors import (
+    apply_placement_priors,
+    load_priors,
+    resnap_crystal_clusters,
+    resnap_motif_clusters,
+)
 from eda_agent.design.quality import LayoutScore, score_canvas
 from eda_agent.design.router import (
     _pin_direction_vector,
@@ -64,6 +73,12 @@ from eda_agent.design.router import (
 from eda_agent.design.symbols import SymbolExtractor, SymbolModel
 
 logger = logging.getLogger("eda_agent.design.pipeline")
+
+# Pin-aware force-directed attractor-stiffness sweep. build_best builds + scores
+# the FD layout at each value and keeps the lowest, because the score-vs-K
+# landscape is chaotic and the best value varies per board. Dense by default
+# (offline, ~50 ms/eval); the test conftest patches it down for speed.
+_FD_K_SWEEP: tuple = tuple(round(0.02 + i * (0.28 / 99), 4) for i in range(100))
 
 
 def _placement_pass(plan, result):  # type: ignore[no-untyped-def]
@@ -128,6 +143,12 @@ class PipelineResult:
     label_count: int = 0
     power_port_count: int = 0
     junction_count: int = 0
+    # Nets that WOULD have been wired but were demoted to net-labels because
+    # wiring them at this placement would short on another net. A pure
+    # placement-quality signal (connectivity is preserved either way): a layout
+    # that needs FEWER of these is more readable, so best-of prefers it over a
+    # lower-wirelength variant that resorts to more labels.
+    forced_label_count: int = 0
 
     @property
     def ok(self) -> bool:
@@ -250,6 +271,18 @@ def build_canvas_from_plan(
             ),
         ))
 
+    # 2c'. Re-tighten crystal oscillator clusters. The shove sizes parts by
+    # pin count, so it reads a crystal's two small load caps (400 mils off the
+    # crystal) as overlapping and scatters them -- undoing the symmetric prior.
+    # Re-snap them to the crystal's post-shove position so XIN/XOUT stay short.
+    placements = resnap_crystal_clusters(plan, placements)
+
+    # 2c''. Same repair for every OTHER self-contained motif (pi filter, diode
+    # bridge, voltage divider, RC filters): the shove scatters those tight
+    # clusters too, but only crystals had a resnap. Restore each motif's
+    # canonical shape around its post-shove centroid.
+    placements = resnap_motif_clusters(plan, placements)
+
     # 2d. Sheet-edge keep-out. Recenter the placement so every part
     # plus a port-glyph margin fits within the sheet rectangle. Without
     # this, parts placed near the sheet edge by Sugiyama push the
@@ -294,6 +327,7 @@ def build_canvas_from_plan(
             rotation=placement.rotation,
             sheet=placement.sheet,
             flipped=getattr(placement, "flipped", False),
+            value=(part.value or ""),
         ))
     result.placement_count = len(canvas.instances)
 
@@ -340,6 +374,14 @@ def build_canvas_from_plan(
             plan=plan,
             port_hints=port_hints or {},
         )
+
+    # 4b. Bus drawing. Redraw any detected wide inter-IC bus (>= 4 nets) as a
+    # bus glyph -- a thick bus line + 45-degree entries + per-pin labels --
+    # instead of N per-pin labels. Gated to NEVER add crossings and to fall
+    # back to the per-pin form when a clean bus can't be drawn, so it is a
+    # no-op on designs without a bus and never a regression.
+    from eda_agent.design.buses import apply_bus_drawing
+    apply_bus_drawing(canvas, plan)
 
     result.wire_count = len(canvas.wires)
     result.label_count = len(canvas.labels)
@@ -549,12 +591,70 @@ def build_best_canvas_from_plan(
         plan, extractor, placement_hints=placement_hints,
         port_hints=port_hints, strict_shorts=strict_shorts,
     )
+    base_label = "base"
+
+    # Force-directed alternative placement. The base used Sugiyama (the plan
+    # has an anchor role), which excludes power/ground from layering -- so on a
+    # board whose signal graph is split by a power-only bridge (a regulator
+    # that connects ONLY through rails) it leaves parts floating and sprawls.
+    # FD's spring graph uses ALL nets, so it places the whole power tree; it
+    # wins on those boards and loses on clean signal chains. It is an
+    # INDEPENDENT placement (does not reuse base positions), so it can even
+    # rescue a base that failed to route -- evaluate it before the early-out.
+    def _cand_key(res: PipelineResult) -> tuple[int, float]:
+        if not res.canvas.instances:
+            return (2, float("inf"))
+        total = score_canvas(res.canvas, plan).total
+        return (0 if res.ok else 1, total)
+
+    try:
+        from eda_agent.design.layout import compute_layout as _compute_layout
+        # Pin-aware force-directed candidate. FD's spring graph uses ALL nets
+        # (so it places power-bridged boards Sugiyama leaves floating), and with
+        # the IC pin offsets each discrete is pulled toward the specific pin it
+        # wires to -- so the output stage settles by OUT, the timing network by
+        # DISCH/THRES, etc. Run for every board (not just anchored ones) and
+        # score it; it wins where pin-side placement or power-tree handling
+        # helps, and loses to Sugiyama on clean signal chains. ic_pin_offsets
+        # empty (no ICs) reproduces the old centroid FD exactly.
+        ic_off = _ic_pin_offsets(plan, extractor)
+        # FD is chaotic in the pin-attractor stiffness -- one value lands a
+        # clean side-grouped layout while a neighbouring value sprawls. Rather
+        # than trust a single tuned constant (overfitting to one board), SWEEP a
+        # few strengths, build + score each, and keep the lowest. With no ICs
+        # the sweep collapses to one centroid-only FD run (old behaviour).
+        # FD's pin-attractor stiffness has a chaotic, multi-modal score
+        # landscape (good minima sit next to sprawled ones, and the best K
+        # varies per board), so a few hand-picked values miss the optimum.
+        # Sweep it DENSELY (module constant ``_FD_K_SWEEP``) and let the scorer
+        # pick per board -- offline, ~50 ms per eval. No ICs -> one centroid FD
+        # run (old behaviour). The test conftest patches the sweep down for
+        # speed; the pin-side regression test restores the full density.
+        ks: tuple = (None,) if not ic_off else _FD_K_SWEEP
+        for k in ks:
+            fd_placed = _compute_layout(
+                plan, engine="force_directed", ic_pin_offsets=ic_off,
+                pin_attract_k=k)
+            fd_cand = build_canvas_from_plan(
+                plan, extractor,
+                layout_overrides={p.refdes: p for p in fd_placed},
+                placement_hints=placement_hints, port_hints=port_hints,
+                strict_shorts=strict_shorts,
+            )
+            # Prefer an OK candidate, then the lower score.
+            if _cand_key(fd_cand) < _cand_key(base):
+                base, base_label = fd_cand, (
+                    f"pin_aware_fd(k={k})" if ic_off else "force_directed")
+    except Exception:
+        pass  # FD alternative is best-effort; never block the base result
+
     if not base.ok or not base.canvas.instances:
         return base
 
     base_score = score_canvas(base.canvas, plan)
     best_score: LayoutScore = base_score
     best_result: PipelineResult = base
+    best_label = base_label
     base.notes.append(PipelineNote(
         severity="info",
         text=(
@@ -598,15 +698,46 @@ def build_best_canvas_from_plan(
         if variant_score.total < best_score.total:
             best_score = variant_score
             best_result = variant
+            best_label = f"aspect={aspect}"
 
+    # NOTE: the deterministic neat-layout engine (schematic_layout.py) was
+    # trialled here as an extra positions-only variant, but it consistently
+    # lost to the Sugiyama-based placer that the canvas already uses: feeding
+    # only its centres into the canvas discards its crossing-minimal routing,
+    # and the canvas re-routes them with more crossings. It stays available as
+    # a standalone preview (design_layout_schematic) and via
+    # `_neat_engine_overrides`; it is not run in this hot path.
+    n_variants = 1 + len(target_aspects)
     best_result.notes.append(PipelineNote(
         severity="info",
         text=(
-            f"selected layout: score={best_score.total:.1f} "
-            f"out of {1 + len(target_aspects)} variants"
+            f"selected layout: {best_label} score={best_score.total:.1f} "
+            f"out of {n_variants} variants"
         ),
     ))
     return best_result
+
+
+def _neat_engine_overrides(plan):  # type: ignore[no-untyped-def]
+    """Placement overrides from the deterministic neat-layout engine.
+
+    Best-effort: runs ``compute_schematic_layout`` and maps its placed
+    symbols to canvas :class:`PlacedPart` overrides. Returns ``None`` on any
+    failure so the pipeline degrades to the rescale variants alone.
+    """
+    try:
+        from eda_agent.design.layout import PlacedPart
+        from eda_agent.design.schematic_layout import compute_schematic_layout
+        layout = compute_schematic_layout(plan)
+        if not layout.placed:
+            return None
+        return {
+            r: PlacedPart(refdes=s.refdes, sheet=s.sheet,
+                          x_mils=s.x_mils, y_mils=s.y_mils, rotation=s.rotation)
+            for r, s in layout.placed.items()
+        }
+    except Exception:
+        return None
 
 
 def _canvas_instance_to_placement(inst):  # type: ignore[no-untyped-def]
@@ -766,6 +897,39 @@ def _detect_routing_shorts(
                 f"pin {refdes}.{pin_id} (plan net {pin_net!r}) at "
                 f"({x}, {y}). Altium would auto-merge the two nets; "
                 f"emit blocked."
+            ),
+        ))
+
+    # Net-label coincidences. A net label attaches its net to whatever pin or
+    # wire sits at its point, so a label of net A landing on a FOREIGN pin or
+    # on a FOREIGN net's wire merges A into that net -- a short Altium realises
+    # on compile that neither the wire-vs-pin check above nor ERC reports.
+    label_shorts: list[tuple[str, str, int, int]] = []
+    for lb in canvas.labels:
+        for refdes, pin_id, pin_net in points.get((lb.x, lb.y), []):
+            if pin_net and pin_net != lb.text:
+                label_shorts.append(
+                    (lb.text, f"pin {refdes}.{pin_id} (net {pin_net!r})",
+                     lb.x, lb.y))
+        for wire in canvas.wires:
+            if not wire.net or wire.net == lb.text:
+                continue
+            if _point_on_segment(lb.x, lb.y, wire.x1, wire.y1,
+                                  wire.x2, wire.y2):
+                label_shorts.append(
+                    (lb.text, f"wire on net {wire.net!r}", lb.x, lb.y))
+                break
+    seen_labels: set[tuple[str, str]] = set()
+    for text, what, x, y in label_shorts:
+        key = (text, what)
+        if key in seen_labels:
+            continue
+        seen_labels.add(key)
+        result.failures.append(PipelineNote(
+            severity="error",
+            text=(
+                f"routing short: net label {text!r} at ({x}, {y}) sits on "
+                f"{what}; Altium would merge the nets; emit blocked."
             ),
         ))
 
@@ -942,6 +1106,7 @@ def _wire_sheet(
             pn = plan_pin_to_net.get((inst.refdes, endpoint.pin_id), "")
             pin_world_coords.append((endpoint.x, endpoint.y, pn))
 
+    shorted_to_label = 0
     for net in nets:
         net_actions = sheet_net_actions.get(net.name)
         if not net_actions:
@@ -987,8 +1152,28 @@ def _wire_sheet(
                 sheet_height_mils=sh,
             )
         elif representation == "wire":
-            for seg in _route_signal_pins(stub_ends, routing_obstacles):
-                sheet_wire_segments.append((seg[0], seg[1], seg[2], seg[3], net.name))
+            segs = _route_signal_pins(stub_ends, routing_obstacles)
+            # A routed segment passing through a pin NOT on this net is a
+            # short Altium would auto-merge. At density the obstacle-aware
+            # router can't always avoid this; rather than block the whole
+            # emit, fall back to per-pin net labels for THIS net (labels
+            # never short). A labelled connection beats no output.
+            foreign_pins = [(x, y) for (x, y, pn) in pin_world_coords
+                            if pn != net.name]
+            would_short = any(
+                _point_on_segment(px, py, s[0], s[1], s[2], s[3])
+                for s in segs for (px, py) in foreign_pins
+            )
+            if would_short:
+                shorted_to_label += 1
+                for (end_x, end_y) in stub_ends:
+                    canvas.add_labels([NetLabel(
+                        text=net.name, x=end_x, y=end_y,
+                        orientation=0, sheet=sheet_name)])
+            else:
+                for seg in segs:
+                    sheet_wire_segments.append(
+                        (seg[0], seg[1], seg[2], seg[3], net.name))
         else:  # "label_per_pin"
             for (end_x, end_y) in stub_ends:
                 canvas.add_labels([NetLabel(
@@ -996,38 +1181,78 @@ def _wire_sheet(
                     orientation=0, sheet=sheet_name,
                 )])
 
+    # Cross-net WIRE meetings: two nets whose wires share an endpoint, or one
+    # ending on the other's segment, are auto-junctioned by Altium on compile
+    # -- a silent short the pin-based guard above does not see (it is wire-on-
+    # wire, not at a pin). Fall the worst offender back to labels (no wires =>
+    # no meeting) and repeat until none remain. Dropping a net removes ALL its
+    # segments, so the loop terminates in at most one pass per offending net.
+    while True:
+        offenders = _cross_net_meeting_counts(sheet_wire_segments)
+        if not offenders:
+            break
+        worst = max(offenders, key=lambda n: (offenders[n], n))
+        sheet_wire_segments[:] = [
+            s for s in sheet_wire_segments if s[4] != worst
+        ]
+        for (_pin_ref, (end_x, end_y), _orient) in sheet_net_actions.get(worst, []):
+            canvas.add_labels([NetLabel(
+                text=worst, x=end_x, y=end_y, orientation=0, sheet=sheet_name)])
+        shorted_to_label += 1
+
+    # Guarantee power/ground connectivity. A power spoke that the cull loop
+    # above dropped leaves its pins on bare net labels -- but a net label sat
+    # on a pin with no wire under it does NOT connect the pin in Altium (it
+    # reads as a floating label + floating power object in ERC). Repair every
+    # such pin with a power port placed COINCIDENT with the pin: a power port
+    # on a pin connects directly, with no wire to route, cull, or short.
+    _repair_floating_power_pins(canvas, sheet_name, plan, sheet_wire_segments)
+
+    if shorted_to_label > 0:
+        result.forced_label_count += shorted_to_label
+        result.notes.append(PipelineNote(
+            severity="warning",
+            text=(
+                f"sheet {sheet_name!r}: {shorted_to_label} signal net(s) "
+                f"labelled instead of wired because wiring them would short on "
+                f"another net's pin or wire at this placement density. "
+                f"Connectivity is preserved via the labels (a net label is "
+                f"electrically identical to a wire); this is a local placement-"
+                f"density artifact, not an error."
+            ),
+        ))
+
     # Flush wires to canvas + detect junctions on the assembled list.
     wire_objects = [
         WireSegment(x1=x1, y1=y1, x2=x2, y2=y2, sheet=sheet_name, net=net_name)
         for (x1, y1, x2, y2, net_name) in sheet_wire_segments
     ]
     canvas.add_wires(wire_objects)
-    raw_wires = [(x1, y1, x2, y2) for (x1, y1, x2, y2, _) in sheet_wire_segments]
-    for jx, jy in _detect_junctions(raw_wires):
+    # Pass the net tag so a junction dot is only placed where SAME-net wires
+    # meet -- a dot at a cross-net wire crossing would short the two nets.
+    for jx, jy in _detect_junctions(sheet_wire_segments):
         canvas.add_junctions([Junction(x=jx, y=jy, sheet=sheet_name)])
 
 
 def _cluster_radius_for_net(
     net_actions: list[tuple[Any, tuple[int, int], int]],
 ) -> int:
-    """Pick a Manhattan clustering radius adapted to the net.
+    """Pick a Manhattan clustering radius for a power/ground net's pins.
 
-    Behaviour:
-    - Small power nets (≤6 pins): one giant cluster (radius
-      effectively infinite). Without this rule a 9-part board with
-      its GND pins spread over ~5000 mils gets 3 GND glyphs, which
-      looks like a different netlist to a reviewer.
-    - Larger nets: keep the legacy 2500-mil radius so dense designs
-      (a 40-pin buck GND rail) still split into one cluster per
-      functional block instead of one giant rats-nest port.
+    Power and ground pins within one radius of each other share a single
+    rail glyph (a local GND/VCC symbol) wired with short spokes; pins
+    farther apart each get their OWN symbol. This is the universal
+    schematic convention -- a reviewer reads every GND glyph as the same
+    net, and per-pin symbols beat cross-sheet rail wires that tangle the
+    drawing. An earlier rule made nets of <=6 pins one giant cluster to
+    avoid "multiple GND glyphs", but that produced a long-spoke rats-nest
+    (a 6-pin GND spread over a sheet became 18 wire segments and 13
+    crossings); per-pin glyphs cut that to 6 crossings.
 
-    Tuning: 6 is the rough break point between "small indicator
-    board" and "real product"; 2500 mils matches the executor's
-    historical value and is what the obstacle-aware router expects.
+    ``POWER_RAIL_CLUSTER_RADIUS_MILS`` (1000 mils = 1 inch) is shared with
+    the executor's apply path so the preview matches what is placed.
     """
-    if len(net_actions) <= 6:
-        return 10**9
-    return 2500
+    return POWER_RAIL_CLUSTER_RADIUS_MILS
 
 
 def _shift_centroid_clear_of_pins(
@@ -1085,7 +1310,7 @@ def _emit_port_cluster(
     through one. Together these eliminate the silent-short failure mode
     where the spoke wire bridges unrelated nets via coincident endpoints.
     """
-    is_gnd = net.is_ground or "GND" in net.name.upper()
+    is_gnd = _is_ground_net(net)
     style = _ground_style(net.name) if is_gnd else "bar"
     cluster_radius = _cluster_radius_for_net(net_actions)
     clusters: list[list[int]] = []
@@ -1169,3 +1394,123 @@ def _emit_port_cluster(
                 pt[0], pt[1], centroid_x, port_y, spoke_obstacles
             ):
                 sheet_wire_segments.append((seg[0], seg[1], seg[2], seg[3], net.name))
+
+
+def _repair_floating_power_pins(
+    canvas: SchematicCanvas,
+    sheet_name: str,
+    plan: DesignPlan,
+    sheet_wire_segments: list[tuple[int, int, int, int, str]],
+) -> None:
+    """Ensure every power/ground pin actually connects in Altium.
+
+    A power pin connects when a wire ends on it, or a power port sits exactly
+    on it. The clustered port + spoke path (``_emit_port_cluster``) wires the
+    pins to a shared glyph, but a spoke can be dropped by the cross-net cull
+    above; the dropped net then falls to bare labels that float (a net label
+    with no wire under it does not bond the pin). This pass finds any power /
+    ground pin that ends up neither wire-connected nor under a port and drops a
+    power port COINCIDENT with it -- the one Altium primitive that bonds a pin
+    with no wire, so it cannot be culled or short. It also clears that net's
+    now-redundant floating labels and any orphaned cluster glyph (a port left
+    sitting on neither a pin nor a surviving spoke end), which would otherwise
+    read as floating power objects in ERC. Fully-wired nets are left untouched.
+    """
+    pin_xy: dict[tuple[str, str], tuple[int, int]] = {}
+    for inst in canvas.instances_on(sheet_name):
+        for ep in inst.all_pin_endpoints():
+            pin_xy[(inst.refdes, ep.pin_id)] = (ep.x, ep.y)
+
+    for net in plan.nets:
+        if not (_is_power_net(net) or _is_ground_net(net)):
+            continue
+        net_pins = [
+            pin_xy[(pr.refdes, pr.pin)]
+            for pr in net.pins
+            if (pr.refdes, pr.pin) in pin_xy
+        ]
+        if not net_pins:
+            continue
+        wire_ends: set[tuple[int, int]] = set()
+        for (x1, y1, x2, y2, nm) in sheet_wire_segments:
+            if nm == net.name:
+                wire_ends.add((x1, y1))
+                wire_ends.add((x2, y2))
+        port_pts = {
+            (p.x, p.y)
+            for p in canvas.power_ports
+            if p.sheet == sheet_name and p.text == net.name
+        }
+        floating = [
+            pt for pt in net_pins
+            if pt not in wire_ends and pt not in port_pts
+        ]
+        if not floating:
+            continue  # net is fully connected -- leave the working path alone
+
+        style = _ground_style(net.name) if _is_ground_net(net) else "bar"
+        canvas.add_power_ports([
+            PowerPort(text=net.name, x=px, y=py, style=style, sheet=sheet_name)
+            for (px, py) in floating
+        ])
+        # This net's labels never bonded (power nets carry ports, not labels);
+        # drop them so they do not linger as floating net labels.
+        canvas.labels[:] = [
+            l for l in canvas.labels
+            if not (l.sheet == sheet_name and l.text == net.name)
+        ]
+        # Drop orphaned glyphs: a port of this net sitting on neither a pin nor
+        # a surviving spoke end is electrically floating.
+        keep = set(net_pins) | wire_ends
+        canvas.power_ports[:] = [
+            p for p in canvas.power_ports
+            if not (
+                p.sheet == sheet_name
+                and p.text == net.name
+                and (p.x, p.y) not in keep
+            )
+        ]
+
+
+def _ic_pin_offsets(
+    plan: DesignPlan,
+    extractor: SymbolExtractor,
+    *,
+    ic_pin_threshold: int = 4,
+) -> dict[str, dict[str, tuple[int, int]]]:
+    """Each IC pin's WIRE-end offset from the IC centre, native (rot-0) frame.
+
+    ``{ic_refdes: {pin_id: (dx, dy)}}`` for every part with at least
+    ``ic_pin_threshold`` pins. Feeds the pin-aware force-directed placer so a
+    discrete is pulled toward the specific pin it wires to. Built from the
+    extracted symbol geometry (the same wire end the router and the canvas use
+    -- never the label/body end). Best-effort: returns what it can resolve.
+    """
+    pin_count: dict[str, int] = {}
+    for net in plan.nets:
+        for pr in net.pins:
+            pin_count[pr.refdes] = pin_count.get(pr.refdes, 0) + 1
+    ics = {p.refdes for p in plan.parts
+           if pin_count.get(p.refdes, 0) >= ic_pin_threshold}
+    if not ics:
+        return {}
+    refs = list({(p.lib_path, p.lib_ref) for p in plan.parts
+                 if p.refdes in ics and p.lib_path})
+    if not refs:
+        return {}
+    try:
+        symbols = extractor.extract_many(refs)
+    except Exception:
+        return {}
+    out: dict[str, dict[str, tuple[int, int]]] = {}
+    for part in plan.parts:
+        if part.refdes not in ics:
+            continue
+        s = symbols.get((part.lib_path, part.lib_ref))
+        if s is None:
+            continue
+        inst = SymbolInstance(refdes=part.refdes, symbol=s, x=0, y=0, rotation=0)
+        out[part.refdes] = {
+            ep.pin_id: (ep.x, ep.y) for ep in inst.all_pin_endpoints()
+        }
+    return out

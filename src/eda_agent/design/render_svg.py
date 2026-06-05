@@ -27,6 +27,8 @@ from typing import Optional
 
 from eda_agent.design.canvas import (
     Junction,
+    BusEntry,
+    BusSegment,
     NetLabel,
     PowerPort,
     SchematicCanvas,
@@ -47,6 +49,7 @@ class RenderOptions:
     body_fill: str = "#fffce6"  # pale yellow, the Altium default body fill
     pin_stroke: str = "#000000"
     wire_stroke: str = "#0066cc"  # Altium default wire blue
+    bus_stroke: str = "#0033aa"   # Altium bus: a thicker, darker blue
     label_color: str = "#0066cc"
     power_port_stroke: str = "#cc2200"
     junction_fill: str = "#0066cc"
@@ -78,6 +81,10 @@ def render_canvas_svg(
     # Order matters for visual stacking: wires under bodies under ports.
     for wire in canvas.wires_on(sheet_obj.name):
         parts.append(_svg_wire(wire, sheet_obj, options))
+    for entry in canvas.bus_entries_on(sheet_obj.name):
+        parts.append(_svg_bus_entry(entry, sheet_obj, options))
+    for bus in canvas.buses_on(sheet_obj.name):
+        parts.append(_svg_bus(bus, sheet_obj, options))
     for inst in canvas.instances_on(sheet_obj.name):
         parts.append(_svg_instance(inst, sheet_obj, options))
     for junction in canvas.junctions_on(sheet_obj.name):
@@ -167,11 +174,21 @@ def _svg_instance(
         f'height="{y1 - y0:.1f}" fill="{options.body_fill}" '
         f'stroke="{options.body_stroke}" stroke-width="1"/>'
     )
-    # Refdes label at top-left of body.
+    # Designator and value stacked above the body's top-left corner -- clear
+    # of the pin stubs (which leave the body's edge centres) and reading as
+    # the conventional refdes-over-value annotation pair. Value sits on the
+    # line just above the body; refdes one line higher.
+    has_value = bool(inst.value)
+    refdes_y = y0 - (15 if has_value else 4)
     out.append(
-        f'<text x="{x0 + 4:.1f}" y="{y0 - 4:.1f}" font-size="11" '
+        f'<text x="{x0 + 4:.1f}" y="{refdes_y:.1f}" font-size="11" '
         f'fill="#222">{html_escape(inst.refdes)}</text>'
     )
+    if has_value:
+        out.append(
+            f'<text x="{x0 + 4:.1f}" y="{y0 - 4:.1f}" font-size="10" '
+            f'fill="#1565c0">{html_escape(inst.value)}</text>'
+        )
     # Pins: a line from the body-attach end (pin endpoint - length*dir)
     # to the world endpoint, then the pin number near the endpoint and
     # the pin name near the body-attach end.
@@ -231,6 +248,28 @@ def _svg_wire(
     return (
         f'<line x1="{x1:.1f}" y1="{y1:.1f}" x2="{x2:.1f}" y2="{y2:.1f}" '
         f'stroke="{options.wire_stroke}" stroke-width="2">{title_el}</line>'
+    )
+
+
+def _svg_bus(bus: BusSegment, sheet: Sheet, options: RenderOptions) -> str:
+    x1, y1 = _mils_to_svg(bus.x1, bus.y1, sheet, options)
+    x2, y2 = _mils_to_svg(bus.x2, bus.y2, sheet, options)
+    return (
+        f'<line x1="{x1:.1f}" y1="{y1:.1f}" x2="{x2:.1f}" y2="{y2:.1f}" '
+        f'stroke="{options.bus_stroke}" stroke-width="4"/>'
+    )
+
+
+def _svg_bus_entry(
+    entry: BusEntry, sheet: Sheet, options: RenderOptions
+) -> str:
+    x1, y1 = _mils_to_svg(entry.x1, entry.y1, sheet, options)
+    x2, y2 = _mils_to_svg(entry.x2, entry.y2, sheet, options)
+    title = html_escape(entry.net) if entry.net else ""
+    title_el = f"<title>{title}</title>" if title else ""
+    return (
+        f'<line x1="{x1:.1f}" y1="{y1:.1f}" x2="{x2:.1f}" y2="{y2:.1f}" '
+        f'stroke="{options.bus_stroke}" stroke-width="2">{title_el}</line>'
     )
 
 

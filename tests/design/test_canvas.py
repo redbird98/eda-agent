@@ -173,3 +173,25 @@ def test_canvas_to_dict_includes_lib_keys_not_full_symbols():
     assert "pins" not in d["instances"][0]
     assert d["instances"][0]["lib_path"] == sym.lib_path
     assert d["instances"][0]["lib_ref"] == sym.lib_ref
+
+
+def test_sheet_size_drives_dimensions():
+    """The size string sets the drawing area: A4 keeps the inner default,
+    larger sizes scale up (previously the size was decorative -> always A4)."""
+    assert (Sheet(name="s", size="A4").width_mils,
+            Sheet(name="s", size="A4").height_mils) == (11500, 7600)
+    a3 = Sheet(name="s", size="A3")
+    assert a3.width_mils > 11500 and a3.height_mils > 7600
+    a2 = Sheet(name="s", size="A2")
+    assert a2.width_mils > a3.width_mils and a2.height_mils > a3.height_mils
+
+
+def test_sheet_explicit_dimensions_preserved():
+    """An explicit, non-default width/height is not overwritten by size."""
+    s = Sheet(name="s", size="A3", width_mils=9000, height_mils=6000)
+    assert s.width_mils == 9000 and s.height_mils == 6000
+
+
+def test_sheet_unknown_size_falls_back_to_a4():
+    s = Sheet(name="s", size="weird")
+    assert s.width_mils == 11500 and s.height_mils == 7600
