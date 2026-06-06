@@ -1135,7 +1135,7 @@ Begin
                 Try
                     If PcbComp.Name.Text = Designator Then
                     Begin
-                        Try PcbComp.SetState_Selected(True); Except End;
+                        Try PcbComp.Selected := True; Except End;
                         Found := True;
                     End;
                 Except End;
@@ -1230,7 +1230,7 @@ Begin
                             SchComp := SchObj;
                             If SchComp.Designator.Text = Designator Then
                             Begin
-                                Try SchComp.SetState_Selected(True); Except End;
+                                Try SchComp.Selection := True; Except End;
                                 Break;
                             End;
                         Except End;
@@ -1585,7 +1585,7 @@ Begin
                     Begin
                         Try
                             Comp := Obj;
-                            If Not Comp.Designator.IsLocked Then
+                            If Not Comp.DesignatorLocked Then
                             Begin
                                 SchBeginModify(Comp);
                                 Comp.Designator.Text := ExtractDesignatorPrefix(Comp.Designator.Text) + '?';
@@ -1616,7 +1616,7 @@ Begin
                 Begin
                     Try
                         Comp := Obj;
-                        If Comp.Designator.IsLocked Then
+                        If Comp.DesignatorLocked Then
                         Begin
                             Inc(SkipCount);
                         End
@@ -2361,6 +2361,121 @@ Begin
 End;
 
 {..............................................................................}
+{ Proj_GetVariantMatrix - The fitted / not-fitted matrix across all variants.  }
+{                                                                              }
+{ Iterates EVERY flattened component (rows) and reports its status under each  }
+{ variant (columns): Fitted / Not Fitted / Alternate, via                      }
+{ DM_FindComponentVariationByUniqueId (Nil = fitted original). This is the     }
+{ data behind the conventional "print all variants" CSV that merges with a BOM.}
+{ Unlike get_variants (which lists only per-variant DEVIATIONS), every         }
+{ component appears here, so the matrix is complete.                           }
+{                                                                              }
+{ Params: project_path (optional; defaults to the focused project).           }
+{ Response: variants (name array), rows (each designator + a cells array       }
+{   parallel to variants), component_count.                                    }
+{..............................................................................}
+
+Function Proj_GetVariantMatrix(Params : String; RequestId : String) : String;
+Var
+    ProjectPath : String;
+    Workspace : IWorkspace;
+    Project : IProject;
+    Flat : IDocument;
+    Variant : IProjectVariant;
+    CompVar : IComponentVariation;
+    Comp : IComponent;
+    I, V, W, NVar, NComp : Integer;
+    VariantsJson, RowsJson, CellsJson, Desig, Kind : String;
+Begin
+    ProjectPath := ExtractJsonValue(Params, 'project_path');
+    ProjectPath := StringReplace(ProjectPath, '\\', '\', -1);
+
+    Workspace := GetWorkspace;
+    If Workspace = Nil Then Begin Result := BuildErrorResponse(RequestId, 'NO_WORKSPACE', 'No workspace'); Exit; End;
+
+    If ProjectPath <> '' Then Project := FindProjectByPath(Workspace, ProjectPath)
+    Else Project := Workspace.DM_FocusedProject;
+    If Project = Nil Then Begin Result := BuildErrorResponse(RequestId, 'NO_PROJECT', 'No project found'); Exit; End;
+
+    SmartCompile(Project);
+    Flat := Project.DM_DocumentFlattened;
+    If Flat = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NOT_COMPILED',
+            'Could not get the flattened document; compile the project first');
+        Exit;
+    End;
+
+    NVar := Project.DM_ProjectVariantCount;
+    NComp := Flat.DM_ComponentCount;
+
+    { Variant-name header. }
+    VariantsJson := '[';
+    For V := 0 To NVar - 1 Do
+    Begin
+        Variant := Project.DM_ProjectVariants(V);
+        If V > 0 Then VariantsJson := VariantsJson + ',';
+        If Variant <> Nil Then
+            VariantsJson := VariantsJson + '"' + EscapeJsonString(Variant.DM_Name) + '"'
+        Else
+            VariantsJson := VariantsJson + '""';
+    End;
+    VariantsJson := VariantsJson + ']';
+
+    { One row per component; a cell per variant. }
+    RowsJson := '[';
+    For I := 0 To NComp - 1 Do
+    Begin
+        Comp := Flat.DM_Components(I);
+        If Comp = Nil Then Continue;
+        Desig := '';
+        Try Desig := Comp.DM_PhysicalDesignator; Except End;
+
+        CellsJson := '[';
+        For V := 0 To NVar - 1 Do
+        Begin
+            Variant := Project.DM_ProjectVariants(V);
+            Kind := 'Fitted';
+            { Match by physical designator -- the same authoritative key
+              Proj_GetVariants reads. The DM_UniqueId lookup mis-resolves on
+              boards where the flattened component ids do not line up with the
+              variation keys (verified on a real 6-layer board). }
+            If Variant <> Nil Then
+            Begin
+                Try
+                    For W := 0 To Variant.DM_VariationCount - 1 Do
+                    Begin
+                        CompVar := Variant.DM_Variations(W);
+                        If CompVar = Nil Then Continue;
+                        If CompVar.DM_PhysicalDesignator = Desig Then
+                        Begin
+                            If CompVar.DM_VariationKind = 1 Then Kind := 'Not Fitted'
+                            Else If CompVar.DM_VariationKind = 2 Then Kind := 'Alternate'
+                            Else Kind := 'Fitted';
+                            Break;
+                        End;
+                    End;
+                Except
+                    Kind := 'Fitted';
+                End;
+            End;
+            If V > 0 Then CellsJson := CellsJson + ',';
+            CellsJson := CellsJson + '"' + Kind + '"';
+        End;
+        CellsJson := CellsJson + ']';
+
+        If I > 0 Then RowsJson := RowsJson + ',';
+        RowsJson := RowsJson + '{"designator":"' + EscapeJsonString(Desig) +
+            '","cells":' + CellsJson + '}';
+    End;
+    RowsJson := RowsJson + ']';
+
+    Result := BuildSuccessResponse(RequestId,
+        '{"variants":' + VariantsJson + ',"rows":' + RowsJson +
+        ',"component_count":' + IntToStr(NComp) + '}');
+End;
+
+{..............................................................................}
 { Get the currently active project variant                                     }
 { Params: project_path (optional)                                             }
 {..............................................................................}
@@ -2461,6 +2576,7 @@ Var
     ProjectPath, VarName, VarDesc : String;
     Workspace : IWorkspace;
     Project : IProject;
+    PreCount, PostCount : Integer;
 Begin
     VarName := ExtractJsonValue(Params, 'name');
     VarDesc := ExtractJsonValue(Params, 'description');
@@ -2480,7 +2596,14 @@ Begin
     Else Project := Workspace.DM_FocusedProject;
     If Project = Nil Then Begin Result := BuildErrorResponse(RequestId, 'NO_PROJECT', 'No project found'); Exit; End;
 
-    { Create variant via RunProcess }
+    { The DM API is read-only for variants (no DM_AddProjectVariant); the
+      WorkspaceManager:VariantManagement process is the only script lever and
+      it is unreliable. So we attempt it, then VERIFY via the variant count and
+      report the real outcome -- never a blind success (a false success here
+      masked that no variant was actually created). }
+    PreCount := -1;
+    Try PreCount := Project.DM_ProjectVariantCount; Except End;
+
     ResetParameters;
     AddStringParameter('Action', 'AddVariant');
     AddStringParameter('VariantName', VarName);
@@ -2488,7 +2611,20 @@ Begin
         AddStringParameter('VariantDescription', VarDesc);
     RunProcess('WorkspaceManager:VariantManagement');
 
-    Result := BuildSuccessResponse(RequestId, '{"success":true,"name":"' + EscapeJsonString(VarName) + '","description":"' + EscapeJsonString(VarDesc) + '"}');
+    Try Project.DM_Compile; Except End;
+    PostCount := -1;
+    Try PostCount := Project.DM_ProjectVariantCount; Except End;
+
+    If (PreCount >= 0) And (PostCount > PreCount) Then
+        Result := BuildSuccessResponse(RequestId,
+            '{"success":true,"name":"' + EscapeJsonString(VarName) + '","description":"'
+            + EscapeJsonString(VarDesc) + '","variant_count":' + IntToStr(PostCount) + '}')
+    Else
+        Result := BuildErrorResponse(RequestId, 'CREATE_UNCONFIRMED',
+            'Variant creation could not be confirmed (count ' + IntToStr(PreCount)
+            + ' -> ' + IntToStr(PostCount) + '). Script-based variant creation via '
+            + 'WorkspaceManager:VariantManagement is unreliable; create the variant '
+            + 'in the Variant Management dialog.');
 End;
 
 {..............................................................................}
@@ -3108,8 +3244,10 @@ Var
     Workspace : IWorkspace;
     Project : IProject;
     Doc, PcbDoc : IDocument;
+    Mappings : IComponentMappings;
     I : Integer;
-    SchCompCount, PcbCompCount : Integer;
+    SchCompCount, PcbCompCount, Matched, ExtraSch, ExtraPcb : Integer;
+    MappedOk : Boolean;
     Data : String;
 Begin
     ProjectPath := ExtractJsonValue(Params, 'project_path');
@@ -3124,7 +3262,8 @@ Begin
 
     SmartCompile(Project);
 
-    { Count schematic components (DM_NetCount does not exist in scripting API) }
+    { Logical schematic component count -- a fallback only. The physical
+      counts below (from the component mappings) are what we actually report. }
     SchCompCount := 0;
     For I := 0 To Project.DM_LogicalDocumentCount - 1 Do
     Begin
@@ -3134,20 +3273,42 @@ Begin
         SchCompCount := SchCompCount + Doc.DM_ComponentCount;
     End;
 
-    { Count PCB components }
-    PcbCompCount := 0;
+    { Count components via DM_ComponentMappings (same authoritative path as
+      proj_get_differences). DM_ComponentCount on the PCB's IDocument returns
+      0 -- PCB parts are enumerated through the mappings, not the DM doc -- and
+      the logical sch count above ignores channel expansion, so neither side
+      matches even when in sync. Matched + side-only gives the real physical
+      counts. DM_ComponentMappings takes the PCB PATH (OleStr), not the object. }
+    MappedOk := False;
+    Matched := 0;  ExtraSch := 0;  ExtraPcb := 0;
     PcbDoc := Project.DM_PrimaryImplementationDocument;
     If PcbDoc <> Nil Then
     Begin
         Try
-            PcbCompCount := PcbDoc.DM_ComponentCount;
+            Mappings := Project.DM_ComponentMappings(PcbDoc.DM_FullPath);
+            If Mappings <> Nil Then
+            Begin
+                Try Matched  := Mappings.DM_MatchedComponentCount;          Except End;
+                Try ExtraSch := Mappings.DM_UnmatchedSourceComponentCount;  Except End;
+                Try ExtraPcb := Mappings.DM_UnmatchedTargetComponentCount;  Except End;
+                MappedOk := True;
+            End;
         Except
         End;
     End;
 
+    If MappedOk Then
+    Begin
+        SchCompCount := Matched + ExtraSch;
+        PcbCompCount := Matched + ExtraPcb;
+    End
+    Else
+        PcbCompCount := 0;   { mappings unavailable; sch count stays logical }
+
     Data := '{"sch_components":' + IntToStr(SchCompCount);
     Data := Data + ',"pcb_components":' + IntToStr(PcbCompCount);
-    Data := Data + ',"components_match":' + BoolToJsonStr(SchCompCount = PcbCompCount);
+    Data := Data + ',"components_match":' +
+        BoolToJsonStr(MappedOk And (ExtraSch = 0) And (ExtraPcb = 0));
     If PcbDoc <> Nil Then
         Data := Data + ',"pcb_path":"' + EscapeJsonString(PcbDoc.DM_FullPath) + '"'
     Else
@@ -3505,7 +3666,7 @@ Begin
             Comp := Obj;
             If (Designator = 'all') Or (Comp.Designator.Text = Designator) Then
             Begin
-                Comp.Designator.IsLocked := LockVal;
+                Comp.DesignatorLocked := LockVal;
                 Inc(Count);
             End;
         Except
@@ -4009,6 +4170,7 @@ Begin
         'get_outjob_containers': Result := Proj_GetOutJobContainers(Params, RequestId);
         'run_outjob':        Result := Proj_RunOutJob(Params, RequestId);
         'get_variants':      Result := Proj_GetVariants(Params, RequestId);
+        'get_variant_matrix': Result := Proj_GetVariantMatrix(Params, RequestId);
         'get_active_variant': Result := Proj_GetActiveVariant(Params, RequestId);
         'set_active_variant': Result := Proj_SetActiveVariant(Params, RequestId);
         'create_variant':    Result := Proj_CreateVariant(Params, RequestId);

@@ -1242,6 +1242,11 @@ def register_generic_tools(mcp):
             "generic.get_object_count",
             {"object_type": object_type, "scope": scope_to_wire(scope), "filter": filter},
         )
+        # The PCB active-doc path runs the query handler, which ships a list of
+        # (empty, since no properties were requested) objects alongside the
+        # count. This tool only promises the count -- drop the wasteful array.
+        if isinstance(result, dict):
+            result.pop("objects", None)
         return result
 
     @mcp.tool()

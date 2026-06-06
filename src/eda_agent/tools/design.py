@@ -750,12 +750,21 @@ def register_design_tools(mcp) -> None:
         is offline, so no project needs to be open and no Altium session
         is required.
 
-        Use this to evaluate or compare layouts cheaply before committing:
-        read the ``score`` and the ``placements`` / ``wires``, optionally
-        pin a few refdes with ``placement_hints``, recompute, and only
-        then hand the plan to ``design_execute_plan``. The returned shape
-        matches the ``sch_place_*`` tool surface so a caller can drive the
+        Use this to evaluate or compare layouts cheaply. The returned shape
+        matches the ``sch_place_*`` tool surface so a caller can drive an
         emit directly from this payload.
+
+        IMPORTANT -- this is a DIFFERENT engine from what executes.
+        ``design_layout_schematic`` runs the standalone deterministic
+        neat-layout engine (``schematic_layout.py``). ``design_execute_plan``
+        does NOT use it: it runs the canvas pipeline (Sugiyama placement +
+        motif/prior overlays), which places and routes differently. So the
+        ``score`` and ``placements`` here are NOT guaranteed to match what
+        gets emitted. For an execution-accurate preview (same placement the
+        emit will use, same score), use ``design_preview_plan`` -- it shares
+        the canvas pipeline with ``design_execute_plan``. Reach for this tool
+        when you specifically want the neat engine's crossing-minimal routing
+        as a standalone artifact.
 
         Args:
             plan_json: A DesignPlan as a JSON string or a JSON object/dict.
@@ -833,9 +842,18 @@ def register_design_tools(mcp) -> None:
             }
             for p in flat["placements"]
         ]
+        notes = list(layout.notes)
+        notes.append(
+            "engine=neat (schematic_layout.py); this is NOT the execution "
+            "engine. design_execute_plan uses the canvas pipeline and may "
+            "place/route differently. Use design_preview_plan for an "
+            "execution-accurate layout and score."
+        )
         result = {
             "ok": True,
             "sheet": flat["sheet"],
+            "engine": "neat",
+            "execution_accurate": False,
             "summary": _schematic_summary(
                 flat["score"], net_representation, len(placements)),
             "placements": placements,
@@ -845,7 +863,7 @@ def register_design_tools(mcp) -> None:
             "power_ports": flat["power_ports"],
             "junctions": flat["junctions"],
             "score": flat["score"],
-            "notes": layout.notes,
+            "notes": notes,
         }
         if render_png:
             try:

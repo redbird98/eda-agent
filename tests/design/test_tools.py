@@ -92,6 +92,18 @@ def test_validate_plan_rejects_invalid_json() -> None:
     assert any("invalid JSON" in e for e in result["errors"])
 
 
+def test_layout_schematic_flags_engine_divergence() -> None:
+    # design_layout_schematic runs the neat engine, NOT the execution engine,
+    # so its result must say so -- a caller should not mistake its score /
+    # placements for what design_execute_plan emits.
+    tools = _registered_tools()
+    result = asyncio.run(tools["design_layout_schematic"](plan_json=_valid_plan_json()))
+    assert result["ok"] is True
+    assert result["engine"] == "neat"
+    assert result["execution_accurate"] is False
+    assert any("design_preview_plan" in n for n in result["notes"])
+
+
 def test_validate_plan_rejects_schema_failure() -> None:
     tools = _registered_tools()
     bad = json.dumps({"spec": "x"})  # missing required fields

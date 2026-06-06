@@ -1707,6 +1707,201 @@ def register_pcb_tools(mcp):
         )
 
     @mcp.tool()
+    async def pcb_replicate_layout(
+        mapping: dict[str, str],
+        nets: Optional[list[str]] = None,
+        move_components: bool = False,
+    ) -> dict[str, Any]:
+        """Replicate a routed channel's ROUTING onto a matching channel.
+
+        Where ``pcb_copy_component_placement`` only relocates components,
+        this copies the source group's routing -- tracks, arcs, vias,
+        polygons, regions, fills -- onto the destination group and remaps
+        each copy's net from the source net to the corresponding
+        destination net. The classic multi-channel "lay out channel 1,
+        replicate to channels 2..N" workflow, end to end.
+
+        Positioning: one rigid transform is derived from the FIRST mapping
+        pair (the anchor) -- the copied routing is rotated by
+        ``dstRot - srcRot`` about the source anchor, then translated by
+        ``dstAnchor - srcAnchor``, so it lands on the destination
+        components where they already sit. The destination components are
+        left in place unless ``move_components=True``.
+
+        Which routing is copied (naming-agnostic): routing on nets
+        INTERNAL to the source group -- every component pad on the net
+        belongs to a mapped source component. Nets that escape the group
+        (a shared GND / power pour) are deliberately left alone. Pass an
+        explicit ``nets`` list to override and copy exactly those.
+
+        Preconditions: the destination components must already be placed
+        congruently with the source (e.g. run
+        ``pcb_copy_component_placement`` first, or pass
+        ``move_components=True``). ``congruence_warnings`` in the result
+        counts destination parts that do not match the anchor transform --
+        their routing may not line up.
+
+        Args:
+            mapping: ``{source_designator: dest_designator}``. The first
+                pair is the transform anchor; include every component in
+                the channel so its internal nets are recognised.
+            nets: Optional explicit source net names to copy, instead of
+                the internal-net auto-detection.
+            move_components: Also relocate the destination components onto
+                the rigid transform, guaranteeing the routing aligns.
+                Default False (destination stays where it is).
+
+        Returns:
+            Dict with:
+              - ``copied``: routing primitives replicated
+              - ``net_assigned``: copies given a destination net
+              - ``internal_nets``: source nets selected for copying
+              - ``shared_nets_skipped``: group nets left alone (escape the
+                group)
+              - ``congruence_warnings``: destination parts off the anchor
+                transform (routing may not align)
+              - ``notes``: any caveats
+        """
+        if not mapping:
+            return {"copied": 0, "error": "mapping is empty"}
+        pairs = "|".join(f"{s}={d}" for s, d in mapping.items())
+        args = {"mapping": pairs}
+        if nets:
+            args["nets"] = "|".join(nets)
+        if move_components:
+            args["move_components"] = "true"
+        bridge = get_bridge()
+        return await bridge.send_command_async("pcb.replicate_layout", args)
+
+    @mcp.tool()
+    async def pcb_filter_variant_components(
+        variant_name: str,
+        select: str = "not_fitted",
+    ) -> dict[str, Any]:
+        """Select a variant's components of one fitted-class on the board.
+
+        Classifies every component under ``variant_name`` (fitted original /
+        alternate / not fitted) and selects exactly the chosen class on the
+        active PCB, deselecting the rest -- so, e.g., the not-fitted parts of a
+        variant stand out for review or for building a component class. The
+        agent-callable equivalent of the community VariantFilter script;
+        selection uses the deterministic component API, not a query process.
+
+        Args:
+            variant_name: The project variant to classify against.
+            select: Which class to select -- ``not_fitted`` (default),
+                ``fitted_original``, ``alternate``, or ``all_fitted``
+                (fitted_original + alternate).
+
+        Returns:
+            {"variant", "select", "matched", "designators"} or an error.
+        """
+        bridge = get_bridge()
+        return await bridge.send_command_async(
+            "pcb.filter_variant_components",
+            {"variant_name": variant_name, "select": select},
+        )
+
+    @mcp.tool()
+    async def pcb_renumber_pads(
+        order: str = "lr_tb",
+        start: int = 1,
+        increment: int = 1,
+        prefix: str = "",
+    ) -> dict[str, Any]:
+        """Renumber the current PcbLib footprint's pads in spatial order.
+
+        The non-interactive form of the community RenumberPads tool: instead
+        of clicking each pad in order, the footprint's pads are sorted by
+        position and assigned sequential designators. Rows/columns are banded
+        by a small tolerance so a grid numbers cleanly. Operates on the active
+        PCB library's current footprint.
+
+        Args:
+            order: ``lr_tb`` (default) numbers rows top-to-bottom,
+                left-to-right within a row; ``tb_lr`` numbers columns
+                left-to-right, top-to-bottom within a column.
+            start: First designator number (default 1).
+            increment: Step between successive pads (default 1).
+            prefix: Optional string prefixed to each number (e.g. ``A`` ->
+                ``A1``, ``A2``).
+
+        Returns:
+            {"renumbered", "order", "mapping": [{old, new}, ...]} or an error.
+        """
+        bridge = get_bridge()
+        return await bridge.send_command_async(
+            "pcb.renumber_pads",
+            {
+                "order": order,
+                "start": str(start),
+                "increment": str(increment),
+                "prefix": prefix,
+            },
+        )
+
+    @mcp.tool()
+    async def pcb_copy_tracks_radial(
+        center_x: int,
+        center_y: int,
+        count: int,
+        angle_step: Optional[float] = None,
+    ) -> dict[str, Any]:
+        """Array the selected tracks/arcs/vias radially about a center point.
+
+        Replicates the current selection ``count - 1`` more times, each rotated
+        a further ``angle_step`` degrees about ``(center_x, center_y)`` -- a
+        circular/radial copy. Reuses the same verified Replicate +
+        RotateAroundXY transform as ``pcb_replicate_layout``. Copies are added
+        unselected so the source set stays put.
+
+        Args:
+            center_x: Rotation-center X in mils.
+            center_y: Rotation-center Y in mils.
+            count: Total instances including the original (>= 2).
+            angle_step: Degrees between instances. Defaults to ``360 / count``
+                (a full even ring).
+
+        Returns:
+            {"copied", "count", "angle_step"} or an error.
+        """
+        bridge = get_bridge()
+        args: dict[str, Any] = {
+            "center_x": str(center_x),
+            "center_y": str(center_y),
+            "count": str(count),
+        }
+        if angle_step is not None:
+            args["angle_step"] = str(angle_step)
+        return await bridge.send_command_async("pcb.copy_tracks_radial", args)
+
+    @mcp.tool()
+    async def pcb_scale(
+        ratio: float,
+        anchor: str = "selection_center",
+    ) -> dict[str, Any]:
+        """Scale the selected free primitives by a ratio about an anchor.
+
+        Each coordinate maps ``P' = anchor + ratio*(P - anchor)`` and sizes
+        scale by ``ratio``. Handles free tracks, arcs, vias, pads, fills and
+        text. Primitives inside a component, dimension, or polygon are skipped
+        (as are polygons/regions) -- so this scales free copper and artwork,
+        not footprints. Grounded in the community PCBScale tool.
+
+        Args:
+            ratio: Scale factor (> 0). ``0.95`` shrinks 5%, ``1.05`` grows 5%.
+            anchor: ``selection_center`` (default), ``board_center``, or
+                ``origin``.
+
+        Returns:
+            {"scaled", "skipped", "ratio", "anchor_x", "anchor_y"} or an error.
+        """
+        bridge = get_bridge()
+        return await bridge.send_command_async(
+            "pcb.scale", {"ratio": str(ratio), "anchor": anchor}
+        )
+
+    @mcp.tool()
     async def pcb_place_stitching_vias(
         net: str,
         x1_mils: int,
@@ -2818,6 +3013,58 @@ def register_pcb_tools(mcp):
         bridge = get_bridge()
         result = await bridge.send_command_async("pcb.get_layer_stackup", {})
         return result
+
+    @mcp.tool()
+    async def pcb_export_stackup_csv(output_path: str = "") -> dict[str, Any]:
+        """Write the layer stackup to a conventional fab CSV report.
+
+        Fetches the structured stackup (``pcb_get_layer_stackup``) and writes
+        it as the board-house stackup table: one row per physical layer,
+        copper and dielectric interleaved top-to-bottom, thickness in mil and
+        mm, dielectric constant where it applies. Columns: index, layer, type,
+        material, thickness_mil, thickness_mm, dielectric_constant.
+
+        Args:
+            output_path: Destination .csv file. Defaults to
+                ``workspace/<board>_stackup.csv``.
+
+        Returns:
+            {"output_path", "rows", "layer_count", "total_thickness_mils"} or
+            an error dict if the board / stackup could not be read.
+        """
+        from pathlib import Path
+
+        from ..config import get_config
+        from ..export.stackup_csv import (
+            format_stackup_csv,
+            stackup_total_thickness_mils,
+        )
+
+        bridge = get_bridge()
+        stackup = await bridge.send_command_async("pcb.get_layer_stackup", {})
+        if not isinstance(stackup, dict) or "layers" not in stackup:
+            return {"success": False,
+                    "error": "could not read layer stackup (open a .PcbDoc)"}
+
+        csv_text = format_stackup_csv(stackup)
+        if output_path:
+            out = Path(output_path)
+        else:
+            board = str(stackup.get("board_name") or "board").strip() or "board"
+            safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in board)
+            out = get_config().workspace_dir / f"{safe}_stackup.csv"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(csv_text, encoding="utf-8")
+
+        # rows = data rows (exclude the header line).
+        rows = max(0, csv_text.count("\n") - 1)
+        return {
+            "success": True,
+            "output_path": str(out),
+            "rows": rows,
+            "layer_count": stackup.get("layer_count", len(stackup.get("layers") or [])),
+            "total_thickness_mils": round(stackup_total_thickness_mils(stackup), 3),
+        }
 
     @mcp.tool()
     async def pcb_add_layer(layer: str) -> dict[str, Any]:

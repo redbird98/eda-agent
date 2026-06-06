@@ -193,6 +193,54 @@ def test_cross_check_catches_unknown_zone() -> None:
     assert any("ghost" in p for p in problems)
 
 
+def test_cross_check_catches_zone_on_other_sheet() -> None:
+    # A part on sheet B may not sit in a zone that lives on sheet A. Name-only
+    # membership (the old check) let this slip through.
+    plan = DesignPlan(
+        spec="two-sheet design", summary="part references a zone on another sheet",
+        sheets=[Sheet(name="a"), Sheet(name="b")],
+        zones=[Zone(name="za", sheet="a")],
+        parts=[
+            Part(refdes="R1", lib_ref="RES", sheet="b", zone="za"),
+            Part(refdes="R2", lib_ref="RES", sheet="b"),
+        ],
+        nets=[Net(name="N", pins=[
+            PinRef(refdes="R1", pin="1"), PinRef(refdes="R2", pin="1")])],
+    )
+    problems = plan.cross_check()
+    assert any("R1" in p and "za" in p and "b" in p and "a" in p
+               for p in problems), problems
+
+
+def test_duplicate_sheet_name_rejected() -> None:
+    with pytest.raises(ValidationError, match="duplicate sheet name"):
+        DesignPlan(
+            spec="x", summary="x",
+            sheets=[Sheet(name="main"), Sheet(name="main")],
+            parts=[
+                Part(refdes="R1", lib_ref="RES", sheet="main"),
+                Part(refdes="R2", lib_ref="RES", sheet="main"),
+            ],
+            nets=[Net(name="N", pins=[
+                PinRef(refdes="R1", pin="1"), PinRef(refdes="R2", pin="1")])],
+        )
+
+
+def test_duplicate_zone_name_rejected() -> None:
+    with pytest.raises(ValidationError, match="duplicate zone name"):
+        DesignPlan(
+            spec="x", summary="x",
+            sheets=[Sheet(name="main")],
+            zones=[Zone(name="z", sheet="main"), Zone(name="z", sheet="main")],
+            parts=[
+                Part(refdes="R1", lib_ref="RES", sheet="main", zone="z"),
+                Part(refdes="R2", lib_ref="RES", sheet="main", zone="z"),
+            ],
+            nets=[Net(name="N", pins=[
+                PinRef(refdes="R1", pin="1"), PinRef(refdes="R2", pin="1")])],
+        )
+
+
 def test_part_status_default_is_existing() -> None:
     p = Part(refdes="U1", lib_ref="STM32F103", sheet="main")
     assert p.status == PartStatus.EXISTING

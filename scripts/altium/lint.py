@@ -411,8 +411,25 @@ RULE_KNOWN_WRONG_PROCESS = LineRule(
 )
 
 
+# AddFilter_LayerSet expects a MkSet(...) value; an IPCB_LayerSet OBJECT
+# (LayerSet.SignalLayers / LayerSet.AllLayers) must go through
+# AddFilter_IPCB_LayerSet instead. Passing the object to AddFilter_LayerSet
+# raises EVariantTypeCastError (Dispatch->String) at runtime and halts the
+# loop. Bit us four times across audit + diff-pair length helpers.
+RULE_LAYERSET_OBJECT_FILTER = LineRule(
+    name="layerset-object-to-addfilter-layerset",
+    pattern=re.compile(r"\.AddFilter_LayerSet\s*\(\s*LayerSet\."),
+    severity="error",
+    memory="delphiscript_interface_narrowing.md",
+    description=(
+        "AddFilter_LayerSet(LayerSet.*) passes an IPCB_LayerSet object where a "
+        "set is expected -> EVariantTypeCastError. Use AddFilter_IPCB_LayerSet."),
+)
+
+
 LINE_RULES = [
     RULE_EMPTY_LITERAL_ARG,
+    RULE_LAYERSET_OBJECT_FILTER,
     RULE_INSERT_INDEX,
     RULE_CLEAR_ON_STRINGLIST,
     RULE_TYPECAST,

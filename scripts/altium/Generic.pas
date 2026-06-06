@@ -1318,6 +1318,20 @@ End;
 { Deselect all objects on the active document                                }
 {..............................................................................}
 
+{ ISch_Document has NO ClearSelection method (raises "Undeclared identifier:
+  ClearSelection"). Use the Sch:DeSelectAll process -- iterating objects and
+  setting .Selection := False faults on sub-objects (parameters, pin labels)
+  that don't expose Selection, and that "Undeclared identifier" modal bypasses
+  Try/Except. The process is what Edit|Deselect All runs (see Application.pas). }
+Procedure SchDeselectAllObjects(SchDoc : ISch_Document);
+Begin
+    If SchDoc = Nil Then Exit;
+    Try
+        ResetParameters;
+        RunProcess('Sch:DeSelectAll');
+    Except End;
+End;
+
 Function Gen_DeselectAll(RequestId : String) : String;
 Var
     SchDoc : ISch_Document;
@@ -1326,7 +1340,7 @@ Begin
     SchDoc := SchServer.GetCurrentSchDocument;
     If SchDoc <> Nil Then
     Begin
-        SchDoc.ClearSelection;
+        SchDeselectAllObjects(SchDoc);
         SchDoc.GraphicallyInvalidate;
         Result := BuildSuccessResponse(RequestId, '{"deselected":true}');
         Exit;
@@ -2433,6 +2447,8 @@ Var
     X1, Y1, X2, Y2, TmpI : Integer;
     SchDoc : ISch_Document;
     Sym : ISch_SheetSymbol;
+    FNObj : ISch_SheetFileName;
+    NMObj : ISch_SheetName;
     FileNameStr, NameStr : String;
 Begin
     X1 := StrToIntDef(ExtractJsonValue(Params, 'x1'), 0);
@@ -2464,18 +2480,28 @@ Begin
         Exit;
     End;
 
+    { ISch_SheetSymbol has no Corner property (unlike ISch_Rectangle) -- using
+      it raises "Undeclared identifier: Corner". Size is set via XSize/YSize
+      from the bottom-left Location (Altium SDK: SetState_XSize/YSize). }
     Sym.Location := Point(MilsToCoord(X1), MilsToCoord(Y1));
-    Sym.Corner := Point(MilsToCoord(X2), MilsToCoord(Y2));
-    { SheetFileName is the link to the child sheet file, must match an
-      existing .SchDoc in the project. SheetName is the display label
-      shown inside the sheet-symbol block. }
-    Sym.SheetFileName := FileNameStr;
+    Sym.XSize := MilsToCoord(X2 - X1);
+    Sym.YSize := MilsToCoord(Y2 - Y1);
     If NameStr = '' Then NameStr := ChangeFileExt(FileNameStr, '');
-    Sym.SheetName := NameStr;
 
     SchServer.ProcessControl.PreProcess(SchDoc, '');
     SchDoc.RegisterSchObjectInContainer(Sym);
     SchRegisterObject(SchDoc, Sym);
+
+    { SheetFileName (link to the child .SchDoc) and SheetName (display label)
+      are complex-text SUB-OBJECTS, not direct properties -- assigning
+      Sym.SheetFileName raises "Property does not exist or is readonly". Set via
+      GetState_SchSheetFileName/Name + SetState_Text, after the symbol is
+      registered so the sub-objects exist (Altium SDK / UpdateSheetSymbolFN). }
+    FNObj := Nil; Try FNObj := Sym.GetState_SchSheetFileName; Except End;
+    If FNObj <> Nil Then FNObj.SetState_Text(FileNameStr);
+    NMObj := Nil; Try NMObj := Sym.GetState_SchSheetName; Except End;
+    If NMObj <> Nil Then NMObj.SetState_Text(NameStr);
+
     SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
     SchDoc.GraphicallyInvalidate;
 
@@ -3624,7 +3650,7 @@ Begin
     End;
 
     // Clear current selection first
-    SchDoc.ClearSelection;
+    SchDeselectAllObjects(SchDoc);
 
     // Select matching objects
     MatchCount := 0;
@@ -3651,7 +3677,7 @@ Begin
         RunProcess('Sch:CopyToClipboard');
 
     // Clear selection after copy
-    SchDoc.ClearSelection;
+    SchDeselectAllObjects(SchDoc);
     SchDoc.GraphicallyInvalidate;
 
     Result := BuildSuccessResponse(RequestId,
@@ -4349,8 +4375,7 @@ Var
     X, Y, W, H : Integer;
     HarnessType : String;
     SchDoc : ISch_Document;
-    Harness : ISch_GraphicalObject;
-    LL, UR : TLocation;
+    Harness : ISch_HarnessConnector;
 Begin
     X := StrToIntDef(ExtractJsonValue(Params, 'x'), 0);
     Y := StrToIntDef(ExtractJsonValue(Params, 'y'), 0);
@@ -4372,12 +4397,14 @@ Begin
         Exit;
     End;
 
-    LL := Point(MilsToCoord(X), MilsToCoord(Y));
-    UR := Point(MilsToCoord(X + W), MilsToCoord(Y + H));
-
+    { ISch_HarnessConnector is an ISch_RectangularGroup -- no Corner property
+      (using it raises "Undeclared identifier: Corner", and the local must be
+      typed as the derived interface, not ISch_GraphicalObject). Size via
+      XSize/YSize from the bottom-left Location, like ISch_SheetSymbol. }
     SchServer.ProcessControl.PreProcess(SchDoc, '');
-    Try Harness.Location := LL; Except End;
-    Try Harness.Corner := UR; Except End;
+    Harness.Location := Point(MilsToCoord(X), MilsToCoord(Y));
+    Harness.XSize := MilsToCoord(W);
+    Harness.YSize := MilsToCoord(H);
     If HarnessType <> '' Then
         Try Harness.HarnessType := HarnessType; Except End;
 
@@ -4575,11 +4602,10 @@ End;
 
 Function Gen_AddDatafileLink(Params : String; RequestId : String) : String;
 Var
-    Designator, FilePath, KindStr : String;
+    Designator, FilePath, KindStr, EntityName : String;
     SchDoc : ISch_Document;
     Comp : ISch_Component;
     Impl : ISch_Implementation;
-    Link : ISch_GraphicalObject;
     Iterator : ISch_Iterator;
     Obj : ISch_GraphicalObject;
     Found : Boolean;
@@ -4613,14 +4639,15 @@ Begin
             Impl := GetFirstSchImplementation(Comp);
             If Impl <> Nil Then
             Begin
+                { ISch_Implementation.AddDataFileLink is a PROCEDURE taking
+                  (anEntityName, aLocation, aFileKind : WideString), NOT a
+                  function returning a link object. Calling it as a no-arg
+                  function (Link := Impl.AddDataFileLink) faults. The link's
+                  "file" is its Location; EntityName is a label (use the file
+                  name); FileKind is the model kind. (Altium SDK.) }
+                EntityName := ExtractFileName(FilePath);
                 SchServer.ProcessControl.PreProcess(SchDoc, 'Add datafile link');
-                Try Link := Impl.AddDataFileLink; Except End;
-                If Link <> Nil Then
-                Begin
-                    Try Link.FileName := FilePath; Except End;
-                    If KindStr <> '' Then
-                        Try Link.Kind := KindStr; Except End;
-                End;
+                Try Impl.AddDataFileLink(EntityName, FilePath, KindStr); Except End;
                 SchServer.ProcessControl.PostProcess(SchDoc, 'Add datafile link');
                 Found := True;
             End;

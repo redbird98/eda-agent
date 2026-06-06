@@ -289,6 +289,29 @@ A free text label.
 **`Justification`** — text anchor. **`FontId`** — the font (via `FontManager`).
 **`IsHidden : Boolean`**. **`Color : Integer`**.
 
+### `ISch_SheetSymbol` / `ISch_HarnessConnector`
+`ISch_RectangularGroup` descendants. They have no `Corner`; size them from the
+bottom-left `Location` plus **`XSize` / `YSize : TCoord`** (`SetState_XSize` /
+`SetState_YSize`). Type the local as the derived interface, not `ISch_GraphicalObject`.
+```pascal
+Sym.Location := Point(MilsToCoord(X), MilsToCoord(Y));
+Sym.XSize := MilsToCoord(W);
+Sym.YSize := MilsToCoord(H);
+```
+A sheet symbol's **`SheetFileName`** (link to the child `.SchDoc`) and **`SheetName`**
+(display label) are `ISch_ComplexText` sub-objects, written via `SetState_Text` after
+the symbol is registered in its container:
+```pascal
+SchDoc.RegisterSchObjectInContainer(Sym);
+FN := Sym.GetState_SchSheetFileName;   FN.SetState_Text(FileNameStr);   { ISch_SheetFileName }
+NM := Sym.GetState_SchSheetName;       NM.SetState_Text(NameStr);       { ISch_SheetName }
+```
+
+### Selection
+SCH objects carry **`Selection : Boolean`**; the PCB equivalent is **`Selected : Boolean`**.
+`ISch_Document` has no document-level clear — deselect the active sheet with
+`ResetParameters; RunProcess('Sch:DeSelectAll')`.
+
 ---
 
 ## 2.7 `ISch_Implementation` — model / footprint links

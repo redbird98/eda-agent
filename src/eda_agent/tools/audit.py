@@ -317,8 +317,11 @@ def register_audit_tools(mcp):
             item carries ``{net, layer, x_mils, y_mils, angle_deg}``.
         """
         bridge = get_bridge()
+        # Nested board+spatial iteration over every track endpoint; on a dense
+        # board (10k+ tracks) the response can land past the default 10 s
+        # window even though the work itself is sub-second once warm.
         return await bridge.send_command_async(
-            "audit.find_acute_angles", {})
+            "audit.find_acute_angles", {}, timeout=45.0)
 
     @mcp.tool()
     async def audit_find_placeholder_values() -> dict[str, Any]:

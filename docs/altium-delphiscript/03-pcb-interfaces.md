@@ -564,8 +564,12 @@ before the first walk.
 Restricts the walk to the given object kinds.
 
 **`AddFilter_LayerSet(MkSet(eXxxLayer, …))`** / **`AddFilter_IPCB_LayerSet(LayerSet)`**
-Restricts to the given layers (the `IPCB_LayerSet` form takes a prebuilt set
-object).
+Restricts to the given layers. The two overloads are NOT interchangeable:
+`AddFilter_LayerSet` takes a `MkSet(...)` value; `AddFilter_IPCB_LayerSet` takes
+an `IPCB_LayerSet` *object* such as `LayerSet.SignalLayers` / `LayerSet.AllLayers`.
+Passing a `LayerSet.*` object to `AddFilter_LayerSet` raises
+`EVariantTypeCastError` ("Could not convert variant of type (Dispatch) into type
+(String)").
 
 **`AddFilter_Area(X1, Y1, X2, Y2 : TCoord)`**
 Restricts a spatial iterator to a rectangular region.

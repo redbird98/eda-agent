@@ -112,10 +112,17 @@ def _placement_pass(plan, result):  # type: ignore[no-untyped-def]
 
 @dataclass
 class PipelineNote:
-    """One human-readable note from the pipeline run."""
+    """One human-readable note from the pipeline run.
+
+    ``refdes`` carries the affected part as structured data when the note
+    is about a specific part (e.g. a needs_creation skip), so callers read
+    it directly instead of re-parsing ``text`` -- formatted text is for
+    humans, not a data channel.
+    """
 
     severity: str  # "info" | "warning" | "error"
     text: str
+    refdes: Optional[str] = None
 
 
 @dataclass
@@ -203,6 +210,7 @@ def build_canvas_from_plan(
                     f"skipping {part.refdes}: status=needs_creation "
                     f"(lib_ref={part.lib_ref!r})"
                 ),
+                refdes=part.refdes,
             ))
             continue
         if not part.lib_path:

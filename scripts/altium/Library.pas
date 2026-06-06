@@ -901,6 +901,154 @@ Begin
     Result := BuildSuccessResponse(RequestId, RespJson);
 End;
 
+{ Lib_GetFootprintPads - Read the pad geometry of one footprint in the active }
+{ (or named) PcbLib, for export (e.g. KiCad .kicad_mod). Coordinates are in   }
+{ mils relative to the library origin (the footprint reference point), which  }
+{ is the same frame Lib_AddFootprintPad writes in.                            }
+{                                                                              }
+{ Params:                                                                      }
+{   footprint_name - optional; defaults to the library's current component.   }
+{   library_path   - optional .PcbLib to focus first; defaults to focused doc.}
+{                                                                              }
+{ Response: name, pad_count, and a pads array; each pad carries name, x, y,   }
+{   size_x, size_y, shape, layer, hole, rotation -- dimensions in mils, angles }
+{   in degrees.                                                                }
+Function Lib_GetFootprintPads(Params : String; RequestId : String) : String;
+Var
+    LibPath, FocusedPath, FpWanted, FpName : String;
+    ShapeStr, LayerStr, PadsJson, RespJson : String;
+    Workspace : IWorkspace;
+    Doc : IDocument;
+    PcbLib : IPCB_Library;
+    Iter : IPCB_LibraryIterator;
+    Footprint, Target : IPCB_LibComponent;
+    GrpIter : IPCB_GroupIterator;
+    Pad : IPCB_Pad;
+    XOrg, YOrg : TCoord;
+    Count : Integer;
+Begin
+    FpWanted := ExtractJsonValue(Params, 'footprint_name');
+    LibPath := ExtractJsonValue(Params, 'library_path');
+    LibPath := StringReplace(LibPath, '\\', '\', -1);
+
+    Workspace := GetWorkspace;
+    If Workspace = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_WORKSPACE', 'No workspace');
+        Exit;
+    End;
+    FocusedPath := '';
+    Doc := Workspace.DM_FocusedDocument;
+    If Doc <> Nil Then Try FocusedPath := Doc.DM_FullPath; Except End;
+    If LibPath = '' Then LibPath := FocusedPath;
+    If LibPath = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_LIBRARY',
+            'No library is active and library_path was not supplied');
+        Exit;
+    End;
+    If (FocusedPath = '') Or (UpperCase(FocusedPath) <> UpperCase(LibPath)) Then
+    Begin
+        ResetParameters;
+        AddStringParameter('ObjectKind', 'Document');
+        AddStringParameter('FileName', LibPath);
+        RunProcess('WorkspaceManager:OpenObject');
+    End;
+    PcbLib := PCBServer.GetCurrentPCBLibrary;
+    If PcbLib = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCBLIB',
+            'Failed to focus PCB library at ' + LibPath);
+        Exit;
+    End;
+
+    { Pick the target footprint: by name if given, else the current one. }
+    Target := Nil;
+    If FpWanted = '' Then
+        Target := PcbLib.CurrentComponent
+    Else
+    Begin
+        Iter := PcbLib.LibraryIterator_Create;
+        Try
+            Footprint := Iter.FirstPCBObject;
+            While Footprint <> Nil Do
+            Begin
+                FpName := '';
+                Try FpName := Footprint.Name; Except End;
+                If UpperCase(FpName) = UpperCase(FpWanted) Then
+                Begin
+                    Target := Footprint;
+                    Break;
+                End;
+                Footprint := Iter.NextPCBObject;
+            End;
+        Finally
+            PcbLib.LibraryIterator_Destroy(Iter);
+        End;
+    End;
+
+    If Target = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_FOOTPRINT',
+            'Footprint not found: ' + FpWanted);
+        Exit;
+    End;
+
+    FpName := '';
+    Try FpName := Target.Name; Except End;
+    XOrg := 0;  YOrg := 0;
+    Try XOrg := PcbLib.Board.XOrigin; Except End;
+    Try YOrg := PcbLib.Board.YOrigin; Except End;
+
+    PadsJson := '[';
+    Count := 0;
+    GrpIter := Target.GroupIterator_Create;
+    Try
+        GrpIter.AddFilter_ObjectSet(MkSet(ePadObject));
+        Pad := GrpIter.FirstPCBObject;
+        While Pad <> Nil Do
+        Begin
+            ShapeStr := 'round';
+            Try
+                If Pad.TopShape = eRectangular Then ShapeStr := 'rectangular'
+                Else If Pad.TopShape = eOctagonal Then ShapeStr := 'octagonal'
+                Else If Pad.TopShape = eRoundRectangle Then ShapeStr := 'roundrectangle'
+                Else ShapeStr := 'round';
+            Except End;
+
+            LayerStr := 'top';
+            Try
+                If (Pad.Layer = eMultiLayer) Or (Pad.HoleSize > 0) Then LayerStr := 'multi'
+                Else If Pad.Layer = eBottomLayer Then LayerStr := 'bottom'
+                Else LayerStr := 'top';
+            Except End;
+
+            If Count > 0 Then PadsJson := PadsJson + ',';
+            PadsJson := PadsJson +
+                '{"name":"' + EscapeJsonString(Pad.Name) + '"' +
+                ',"x":' + IntToStr(CoordToMils(Pad.X - XOrg)) +
+                ',"y":' + IntToStr(CoordToMils(Pad.Y - YOrg)) +
+                ',"size_x":' + IntToStr(CoordToMils(Pad.TopXSize)) +
+                ',"size_y":' + IntToStr(CoordToMils(Pad.TopYSize)) +
+                ',"shape":"' + ShapeStr + '"' +
+                ',"layer":"' + LayerStr + '"' +
+                ',"hole":' + IntToStr(CoordToMils(Pad.HoleSize)) +
+                ',"rotation":' + FloatToJsonStr(Pad.Rotation) + '}';
+            Inc(Count);
+            Pad := GrpIter.NextPCBObject;
+        End;
+    Finally
+        Target.GroupIterator_Destroy(GrpIter);
+    End;
+    PadsJson := PadsJson + ']';
+
+    RespJson :=
+        '{"name":"' + EscapeJsonString(FpName) + '"' +
+        ',"pad_count":' + IntToStr(Count) +
+        ',"pads":' + PadsJson + '}';
+    Result := BuildSuccessResponse(RequestId, RespJson);
+End;
+
 Function Lib_LinkFootprint(Params : String; RequestId : String) : String;
 Var
     FootprintName, LibraryName : String;
@@ -3887,6 +4035,7 @@ Begin
         'add_footprint_arc':    Result := Lib_AddFootprintArc(Params, RequestId);
         'add_footprint_text':   Result := Lib_AddFootprintText(Params, RequestId);
         'get_footprints':       Result := Lib_GetFootprints(Params, RequestId);
+        'get_footprint_pads':   Result := Lib_GetFootprintPads(Params, RequestId);
         'extract_intlib':       Result := Lib_ExtractIntLib(Params, RequestId);
         'link_footprint':       Result := Lib_LinkFootprint(Params, RequestId);
         'link_3d_model':        Result := Lib_Link3DModel(Params, RequestId);

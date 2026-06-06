@@ -1267,6 +1267,139 @@ def register_project_tools(mcp):
         return result
 
     @mcp.tool()
+    async def proj_export_variant_matrix_csv(
+        output_path: str = "",
+        project_path: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Write the variant fitted/not-fitted matrix to a CSV.
+
+        Builds the conventional component-by-variant table: one row per
+        flattened component, one column per variant, each cell
+        ``Fitted`` / ``Not Fitted`` / ``Alternate``. Unlike
+        ``proj_list_variants`` (which lists only per-variant deviations), every
+        component appears, so the file merges cleanly with a BOM in a
+        spreadsheet.
+
+        Args:
+            output_path: Destination .csv. Defaults to
+                ``workspace/variant_matrix.csv``.
+            project_path: Optional project path. If None, uses the focused
+                project.
+
+        Returns:
+            {"output_path", "component_count", "variant_count"} or an error.
+        """
+        from pathlib import Path
+
+        from ..config import get_config
+        from ..export.variant_matrix_csv import format_variant_matrix_csv
+
+        bridge = get_bridge()
+        params: dict[str, Any] = {}
+        if project_path:
+            params["project_path"] = project_path
+        matrix = await bridge.send_command_async(
+            "project.get_variant_matrix", params
+        )
+        if not isinstance(matrix, dict) or "rows" not in matrix:
+            return {"success": False,
+                    "error": "could not read variant matrix (open a PcbDoc project)"}
+
+        csv_text = format_variant_matrix_csv(matrix)
+        if output_path:
+            out = Path(output_path)
+        else:
+            out = get_config().workspace_dir / "variant_matrix.csv"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(csv_text, encoding="utf-8")
+        return {
+            "success": True,
+            "output_path": str(out),
+            "component_count": matrix.get("component_count",
+                                          len(matrix.get("rows") or [])),
+            "variant_count": len(matrix.get("variants") or []),
+        }
+
+    @mcp.tool()
+    async def proj_print_all_variants(
+        output_dir: str = "",
+        project_path: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Export a PDF for every project variant.
+
+        Loops the project's variants; for each it sets that variant active and
+        runs the (silent) PDF export, writing one ``<variant>.pdf`` per
+        variant. The originally-active variant is restored at the end. Composes
+        the existing ``proj_set_active_variant`` + ``proj_export_pdf`` paths --
+        no new export machinery.
+
+        Args:
+            output_dir: Folder for the per-variant PDFs. Defaults to the
+                workspace directory.
+            project_path: Optional project path. If None, uses the focused
+                project.
+
+        Returns:
+            {"exported": [{variant, output_path, ok, error}], "count"} plus
+            ``restored`` (the variant left active at the end).
+        """
+        from pathlib import Path
+
+        from ..config import get_config
+
+        bridge = get_bridge()
+        params: dict[str, Any] = {}
+        if project_path:
+            params["project_path"] = project_path
+
+        listing = await bridge.send_command_async("project.get_variants", params)
+        variants = (listing or {}).get("variants", []) if isinstance(listing, dict) else []
+        active = await bridge.send_command_async("project.get_active_variant", params)
+        original = (active or {}).get("name") if isinstance(active, dict) else None
+
+        base = Path(output_dir) if output_dir else get_config().workspace_dir
+        base.mkdir(parents=True, exist_ok=True)
+
+        def _safe(s: str) -> str:
+            return "".join(c if c.isalnum() or c in "-_." else "_" for c in s) or "variant"
+
+        exported: list[dict[str, Any]] = []
+        for var in variants:
+            vname = var.get("name") if isinstance(var, dict) else str(var)
+            if not vname:
+                continue
+            out_pdf = base / f"{_safe(vname)}.pdf"
+            entry: dict[str, Any] = {"variant": vname, "output_path": str(out_pdf),
+                                     "ok": False, "error": ""}
+            try:
+                set_params = dict(params, variant_name=vname)
+                await bridge.send_command_async("project.set_active_variant", set_params)
+                res = await bridge.send_command_async(
+                    "project.export_pdf", {"output_path": str(out_pdf)}
+                )
+                entry["ok"] = bool(isinstance(res, dict) and res.get("success", True))
+                if isinstance(res, dict) and res.get("error"):
+                    entry["error"] = str(res["error"])
+            except Exception as exc:  # keep going across variants
+                entry["error"] = str(exc)
+            exported.append(entry)
+
+        # Restore the variant that was active before we started.
+        if original:
+            try:
+                await bridge.send_command_async(
+                    "project.set_active_variant", dict(params, variant_name=original)
+                )
+            except Exception:
+                pass
+
+        return {
+            "exported": exported,
+            "count": sum(1 for e in exported if e["ok"]),
+            "restored": original,
+        }
+
+    @mcp.tool()
     async def proj_create_variant(
         name: str,
         description: str = "",
@@ -1622,10 +1755,13 @@ def register_project_tools(mcp):
     async def proj_compare_sch_pcb(
         project_path: Optional[str] = None,
     ) -> dict[str, Any]:
-        """Compare schematic and PCB: compile and report net/component count differences.
+        """Compare schematic and PCB component counts.
 
-        Compiles the project and compares net counts and component counts between
-        the schematic sheets and the primary PCB document.
+        Compiles the project and compares physical component counts between the
+        schematic and the primary PCB document, via the component mappings
+        (matched + side-only) -- the same authoritative path as
+        ``proj_get_differences``. For the per-component breakdown of what is
+        extra on each side, use ``proj_get_differences``.
 
         DATASHEET DISCIPLINE: If the diff reveals mismatched or missing
         parts and you're proposing a fix, the datasheets of the parts
@@ -1636,8 +1772,9 @@ def register_project_tools(mcp):
             project_path: Optional project path. If None, uses active project.
 
         Returns:
-            Dictionary with sch_nets, sch_components, pcb_nets, pcb_components,
-            nets_match (bool), components_match (bool), and pcb_path
+            Dictionary with sch_components, pcb_components, components_match
+            (bool), and pcb_path. (Net-count comparison is not provided here;
+            use ``proj_get_nets`` / ``pcb_get_nets``.)
         """
         bridge = get_bridge()
         params: dict[str, Any] = {}

@@ -571,7 +571,6 @@ Var
     NetsSet, PortNet, SheetPath, LocStr : String;
     ItemsJson, EntryJson : String;
     First : Boolean;
-    Loc : TLocation;
 Begin
     Workspace := GetWorkspace;
     If Workspace = Nil Then
@@ -676,10 +675,7 @@ Begin
 
             Inc(Violations);
             LocStr := '';
-            Try
-                Loc.X := 0; Loc.Y := 0;
-                Try LocStr := Port.DM_LocationString; Except End;
-            Except End;
+            Try LocStr := Port.DM_LocationString; Except End;
             If Not First Then ItemsJson := ItemsJson + ',';
             First := False;
             EntryJson :=
@@ -1579,9 +1575,11 @@ Var
     Workspace : IWorkspace;
     Project : IProject;
     Doc : IDocument;
-    Comp : IComponent;
+    SchDoc : ISch_Document;
+    SchIter : ISch_Iterator;
+    SchComp : ISch_Component;
     I, J, Checked, Violations : Integer;
-    Designator, SheetPath : String;
+    Designator, SheetPath, DocKind : String;
     { Pipe-delimited "|des|@sheet" pairs so each occurrence carries its    }
     { sheet for later violation grouping.                                   }
     OccPairs, EntryJson, ItemsJson : String;
@@ -1609,26 +1607,42 @@ Begin
     Checked := 0;
     OccPairs := '';
 
+    { Iterate the LOADED schematic sheets via SchServer (the same proven path
+      Audit_FindPlaceholderValues uses). DM_Components on a logical doc returns
+      nothing here, so the old DM-model walk silently checked zero. Sheets must
+      be resident -- call proj_load_sheets first. }
     For I := 0 To Project.DM_LogicalDocumentCount - 1 Do
     Begin
         Doc := Nil;
         Try Doc := Project.DM_LogicalDocuments(I); Except End;
         If Doc = Nil Then Continue;
-        Try
-            If UpperCase(Doc.DM_DocumentKind) <> 'SCH' Then Continue;
-        Except Continue; End;
+        DocKind := '';
+        Try DocKind := Doc.DM_DocumentKind; Except End;
+        If DocKind <> 'SCH' Then Continue;
         SheetPath := '';
         Try SheetPath := Doc.DM_FileName; Except End;
-        For J := 0 To Doc.DM_ComponentCount - 1 Do
-        Begin
-            Comp := Nil;
-            Try Comp := Doc.DM_Components(J); Except End;
-            If Comp = Nil Then Continue;
-            Inc(Checked);
-            Designator := '';
-            Try Designator := Comp.DM_PhysicalDesignator; Except End;
-            If Designator = '' Then Continue;
-            OccPairs := OccPairs + '|' + Designator + '@' + SheetPath;
+
+        SchDoc := Nil;
+        Try SchDoc := SchServer.GetSchDocumentByPath(Doc.DM_FullPath); Except End;
+        If SchDoc = Nil Then Continue;
+        SchIter := SchDoc.SchIterator_Create;
+        If SchIter = Nil Then Continue;
+        Try
+            SchIter.AddFilter_ObjectSet(MkSet(eSchComponent));
+            SchComp := SchIter.FirstSchObject;
+            While SchComp <> Nil Do
+            Begin
+                Try
+                    Inc(Checked);
+                    Designator := '';
+                    Try Designator := SchComp.Designator.Text; Except End;
+                    If Designator <> '' Then
+                        OccPairs := OccPairs + '|' + Designator + '@' + SheetPath;
+                Except End;
+                SchComp := SchIter.NextSchObject;
+            End;
+        Finally
+            SchDoc.SchIterator_Destroy(SchIter);
         End;
     End;
     OccPairs := OccPairs + '|';
@@ -1863,7 +1877,7 @@ Var
     Comp : ISch_Component;
     Loc : TLocation;
     I, Checked, Violations, GridMils, XMils, YMils, Dx, Dy : Integer;
-    GridStr, Designator, SheetName, ItemsJson, EntryJson : String;
+    GridStr, Designator, SheetName, DocKind, ItemsJson, EntryJson : String;
     First : Boolean;
 Begin
     Workspace := GetWorkspace;
@@ -1893,9 +1907,9 @@ Begin
         Doc := Nil;
         Try Doc := Project.DM_LogicalDocuments(I); Except End;
         If Doc = Nil Then Continue;
-        Try
-            If UpperCase(Doc.DM_DocumentKind) <> 'SCH' Then Continue;
-        Except Continue; End;
+        DocKind := '';
+        Try DocKind := Doc.DM_DocumentKind; Except End;
+        If DocKind <> 'SCH' Then Continue;
         SheetName := '';
         Try SheetName := Doc.DM_FileName; Except End;
 
@@ -1904,6 +1918,7 @@ Begin
         If SchDoc = Nil Then Continue;
 
         SchIter := SchDoc.SchIterator_Create;
+        If SchIter = Nil Then Continue;
         Try
             SchIter.AddFilter_ObjectSet(MkSet(eSchComponent));
             SchObj := SchIter.FirstSchObject;
@@ -3609,7 +3624,7 @@ Begin
     Iter := Board.BoardIterator_Create;
     Try
         Iter.AddFilter_ObjectSet(MkSet(eTrackObject));
-        Iter.AddFilter_LayerSet(LayerSet.SignalLayers);
+        Iter.AddFilter_IPCB_LayerSet(LayerSet.SignalLayers);
         Iter.AddFilter_Method(eProcessAll);
         Track := Iter.FirstPCBObject;
         While (Track <> Nil) And (Bad < 100) Do
@@ -3753,7 +3768,7 @@ Function Audit_FindInconsistentTrackWidths(Params, RequestId : String) : String;
         GrIter := Net.GroupIterator_Create;
         Try
             GrIter.AddFilter_ObjectSet(MkSet(eTrackObject));
-            GrIter.AddFilter_LayerSet(LayerSet.SignalLayers);
+            GrIter.AddFilter_IPCB_LayerSet(LayerSet.SignalLayers);
             Prim := GrIter.FirstPCBObject;
             While Prim <> Nil Do
             Begin

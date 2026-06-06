@@ -170,6 +170,9 @@ def test_pipeline_skips_needs_creation_with_warning():
     assert "U1" not in refdes_placed
     assert "R1" in refdes_placed
     assert any("U1" in n.text for n in result.notes)
+    # The skip note carries the refdes as structured data, so callers do not
+    # have to parse it out of the warning text.
+    assert any(n.refdes == "U1" for n in result.notes)
 
 
 def test_pipeline_unknown_pin_id_fails():

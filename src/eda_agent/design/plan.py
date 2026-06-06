@@ -314,6 +314,30 @@ class DesignPlan(BaseModel):
             seen.add(n.name)
         return nets
 
+    @field_validator("sheets")
+    @classmethod
+    def _unique_sheet_names(cls, sheets: list[Sheet]) -> list[Sheet]:
+        # Sheets are referenced by name (a part's / zone's ``sheet``), so a
+        # duplicate name makes that lookup ambiguous.
+        seen: set[str] = set()
+        for s in sheets:
+            if s.name in seen:
+                raise ValueError(f"duplicate sheet name {s.name}")
+            seen.add(s.name)
+        return sheets
+
+    @field_validator("zones")
+    @classmethod
+    def _unique_zone_names(cls, zones: list[Zone]) -> list[Zone]:
+        # Zones are referenced by name (a part's ``zone``), so the name must
+        # be unique design-wide for the reference to resolve unambiguously.
+        seen: set[str] = set()
+        for z in zones:
+            if z.name in seen:
+                raise ValueError(f"duplicate zone name {z.name}")
+            seen.add(z.name)
+        return zones
+
     def cross_check(self) -> list[str]:
         """Cross-validation that doesn't fit a single field validator.
 
@@ -324,14 +348,24 @@ class DesignPlan(BaseModel):
         problems: list[str] = []
 
         sheet_names = {s.name for s in self.sheets}
-        zone_names = {z.name for z in self.zones}
+        zone_by_name = {z.name: z for z in self.zones}
         part_refdes = {p.refdes for p in self.parts}
 
         for p in self.parts:
             if p.sheet not in sheet_names:
                 problems.append(f"part {p.refdes}.sheet={p.sheet!r} not in sheets")
-            if p.zone is not None and p.zone not in zone_names:
-                problems.append(f"part {p.refdes}.zone={p.zone!r} not in zones")
+            if p.zone is not None:
+                zone = zone_by_name.get(p.zone)
+                if zone is None:
+                    problems.append(f"part {p.refdes}.zone={p.zone!r} not in zones")
+                elif zone.sheet != p.sheet:
+                    # A part can only sit in a zone that lives on its own sheet;
+                    # referencing a zone on another sheet is a planner mistake
+                    # that name-only membership would let slip through.
+                    problems.append(
+                        f"part {p.refdes} on sheet {p.sheet!r} references zone "
+                        f"{p.zone!r} which is on sheet {zone.sheet!r}"
+                    )
 
         for z in self.zones:
             if z.sheet not in sheet_names:

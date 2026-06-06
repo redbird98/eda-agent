@@ -28,7 +28,8 @@ from eda_agent.design.pipeline import (
     build_best_canvas_from_plan,
     build_canvas_from_plan,
 )
-from eda_agent.design.plan import DesignPlan
+from eda_agent.design.plan import DesignPlan, PartStatus
+from eda_agent.design.plan_erc import check_plan_erc
 from eda_agent.design.render_svg import render_canvas_svg
 from eda_agent.design.symbols import SymbolCache, SymbolExtractor
 
@@ -92,6 +93,14 @@ def execute_plan_via_canvas_from_json(
         return out
     plan = _validate_plan(payload, out)
     if plan is None:
+        return out
+    # Pydantic validation alone is not enough: it does not catch
+    # cross-references (a net naming an unknown refdes, a part on a zone
+    # that lives on another sheet) or connectivity faults (a pin on two
+    # nets, contradictory power/ground flags, a floating net). The
+    # standalone validation tool runs these; the execute path MUST enforce
+    # them itself, or an electrically-broken plan reaches emit.
+    if _enforce_plan_gates(plan, out):
         return out
 
     bridge = bridge or _resolve_bridge()
@@ -302,6 +311,57 @@ def _validate_plan(
         return None
 
 
+def _enforce_plan_gates(plan: DesignPlan, out: dict[str, Any]) -> bool:
+    """Run the mandatory pre-emit gates the canvas execute path owns.
+
+    Mirrors the legacy executor: structural cross-check, then ERC-lite,
+    then the needs_creation halt. Returns True if any gate tripped (the
+    caller should return ``out`` immediately) and leaves ``out['ok']``
+    False with the reasons in ``out['notes']`` / ``out['needs_creation']``.
+
+    These run regardless of which placement engine follows, because they
+    are about the plan being electrically sound and complete, not about
+    layout.
+    """
+    # 1. Structural cross-check (unknown refdes in a net, a part pointing
+    #    at a zone on another sheet, a zone on an unknown sheet).
+    cross = plan.cross_check()
+    if cross:
+        out["ok"] = False
+        out["notes"].extend(cross)
+        return True
+
+    # 2. ERC-lite: shorted pins, contradictory power/ground flags, floating
+    #    nets (errors halt); decoupling / value warnings are surfaced but
+    #    do not block.
+    report = check_plan_erc(plan)
+    for issue in report.warnings:
+        out["notes"].append(f"[erc warning] {issue.code}: {issue.message}")
+    if report.errors:
+        out["ok"] = False
+        for issue in report.errors:
+            out["notes"].append(f"[erc error] {issue.code}: {issue.message}")
+        return True
+
+    # 3. needs_creation halt -- read from the structured plan, never from
+    #    formatted note text. Emitting a partial design (skipping the
+    #    unresolved parts) would mislead a reviewer about completeness.
+    needs_creation = [
+        p.refdes for p in plan.parts if p.status == PartStatus.NEEDS_CREATION
+    ]
+    if needs_creation:
+        out["ok"] = False
+        out["needs_creation"] = needs_creation
+        out["notes"].append(
+            "Plan contains needs_creation parts; refusing to instantiate a "
+            "partial design. Resolve those parts (pick an existing-lib "
+            "equivalent or author a new symbol) and re-run."
+        )
+        return True
+
+    return False
+
+
 def _resolve_bridge() -> Any:
     """Lazy-import the global bridge so this module doesn't pull bridge
     code at import time (keeps it cheap for unit tests that don't need
@@ -329,13 +389,10 @@ def _merge_pipeline_result(
             text = f"[{note.severity}] {text}"
         out["notes"].append(text)
         # Surface needs_creation skips so the MCP caller can act on them.
-        if "needs_creation" in text:
-            # Extract the refdes from the warning text shape:
-            # "skipping {refdes}: status=needs_creation ..."
-            tokens = text.split()
-            if len(tokens) >= 2 and tokens[0] in ("skipping", "[warning]"):
-                refdes = tokens[1].rstrip(":")
-                out["needs_creation"].append(refdes)
+        # Read the structured refdes off the note, never the formatted text
+        # (the old token split returned the literal word "skipping").
+        if note.refdes is not None and note.refdes not in out["needs_creation"]:
+            out["needs_creation"].append(note.refdes)
     for failure in pr.failures:
         out["failures"].append({
             "refdes": "",

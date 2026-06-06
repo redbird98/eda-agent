@@ -1517,6 +1517,82 @@ def register_library_tools(mcp):
         }
 
     @mcp.tool()
+    async def lib_export_kicad_footprint(
+        footprint_name: str = "",
+        output_path: str = "",
+    ) -> dict[str, Any]:
+        """Export a PcbLib footprint to a KiCad ``.kicad_mod`` file.
+
+        Reads the footprint's pads from the active (or named) PCB library and
+        writes a KiCad 6+ S-expression footprint: one pad each
+        (designator -> number, position, size, shape, drill, layer set).
+        Through-hole pads (hole > 0) get a drill and the all-copper layer set;
+        SMD pads get the side's Cu/Paste/Mask set. Altium mils convert to mm
+        and the y axis is flipped (Altium y-up -> KiCad y-down). This is the
+        footprint counterpart to ``lib_export_kicad_symbol``.
+
+        Args:
+            footprint_name: Footprint to export. If empty, exports the
+                library's current footprint.
+            output_path: Destination .kicad_mod file. Defaults to
+                workspace/<name>.kicad_mod.
+
+        Returns:
+            {"output_path", "footprint", "pad_count"} or an error.
+        """
+        from pathlib import Path
+
+        from ..export.kicad_footprint import format_kicad_footprint
+
+        bridge = get_bridge()
+        args: dict[str, Any] = {}
+        if footprint_name:
+            args["footprint_name"] = footprint_name
+        data = await bridge.send_command_async(
+            "library.get_footprint_pads", args
+        )
+        if not isinstance(data, dict) or "pads" not in data:
+            return {"success": False,
+                    "error": "could not read footprint pads (open the PcbLib)"}
+        name = footprint_name or str(data.get("name") or "").strip()
+        if not name:
+            return {"success": False,
+                    "error": "no footprint selected and none named"}
+        pads = data.get("pads", []) or []
+        # Pascal returns x/y/size_x/size_y/hole in mils; map to the writer's
+        # mil-suffixed keys.
+        norm = [
+            {
+                "name": p.get("name", ""),
+                "x_mils": p.get("x", 0),
+                "y_mils": p.get("y", 0),
+                "size_x_mils": p.get("size_x", 0),
+                "size_y_mils": p.get("size_y", 0),
+                "shape": p.get("shape", "round"),
+                "layer": p.get("layer", "top"),
+                "hole_mils": p.get("hole", 0),
+                "rotation": p.get("rotation", 0),
+            }
+            for p in pads
+        ]
+        body = format_kicad_footprint(name, norm)
+
+        if output_path:
+            out = Path(output_path)
+        else:
+            safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in name)
+            out = get_config().workspace_dir / f"{safe}.kicad_mod"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(body, encoding="utf-8")
+
+        return {
+            "success": True,
+            "output_path": str(out),
+            "footprint": name,
+            "pad_count": len(norm),
+        }
+
+    @mcp.tool()
     async def lib_copy_component(
         source_name: str,
         new_name: Optional[str] = None,

@@ -34,6 +34,10 @@ geometry property:
   properties return a **copy** — read into a local, mutate, assign back
   (`Loc := R.Location; Loc.X := …; R.Location := Loc;`); a direct
   `R.Location.X := …` is discarded. (`ISch_Pin.Location` is field-writable.)
+  Also: writing a field of a `TLocation` local that has **never been assigned**
+  (`Var Loc : TLocation; … Loc.X := 0;`) raises a runtime "Undeclared
+  identifier: X". Materialize the record first (`Loc := SomeObj.Location;`)
+  before writing its fields.
 - **`TCoordRect`** — a bounding rectangle (`BoundingRectangle`), corners in
   internal units.
 - **`TPolySegment`** — one segment of a polygon / region outline (line or arc).

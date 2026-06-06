@@ -1577,6 +1577,1074 @@ End;
 
 
 {..............................................................................}
+{ PCB_ReplicateLayout - Replicate a source channel's ROUTING onto a matching   }
+{ destination channel (true multi-channel layout reuse).                       }
+{                                                                              }
+{ Unlike copy_component_placement (which only relocates components), this      }
+{ copies the source group's routing primitives -- tracks, arcs, vias,         }
+{ polygons, regions, fills -- onto the destination group and remaps each       }
+{ copy's net from the source net to the corresponding destination net.        }
+{                                                                              }
+{ Positioning: a single RIGID transform is derived from the FIRST mapping pair }
+{ (the anchor). Each copied primitive is rotated about the source anchor by    }
+{ (dstRot - srcRot) then translated by (dstAnchor - srcAnchor), so the routing }
+{ lands on the destination components in their existing location. The          }
+{ destination components are NOT moved unless move_components=true.            }
+{                                                                              }
+{ Source routing identification (naming-agnostic): routing on nets INTERNAL to }
+{ the source group -- every component pad on the net belongs to a mapped       }
+{ source component. Nets that escape the group (shared GND / power) are        }
+{ intentionally left alone; you do not replicate a global pour per channel.    }
+{ An explicit "nets" override copies exactly those nets' routing instead.      }
+{                                                                              }
+{ Net remapping uses the explicit mapping (source pad net -> destination pad   }
+{ net, matched by pad name) -- deterministic, not the geometric flood-fill the }
+{ reference relied on.                                                          }
+{                                                                              }
+{ Params:                                                                       }
+{   mapping          -- pipe-separated src=dst pairs (e.g. "U1=U2|R1=R5").     }
+{                       First pair is the transform anchor.                    }
+{   nets             -- (optional) pipe-separated source net names to copy,    }
+{                       overriding the internal-net auto-detection.            }
+{   move_components  -- (optional) "true" to also relocate the destination     }
+{                       components onto the rigid transform (guarantees the    }
+{                       routing aligns). Default false.                        }
+{                                                                              }
+{ Response: copied (int, primitives replicated), net_assigned (int),           }
+{   internal_nets (int), shared_nets_skipped (int), congruence_warnings (int,  }
+{   dst pairs that do not match the anchor transform -- routing may not align),}
+{   notes (string).                                                            }
+{..............................................................................}
+
+Function PCB_ReplicateLayout(Params, RequestId : String) : String;
+Var
+    Board : IPCB_Board;
+    Mapping, NetsOverride, Remaining, Pair, SrcDes, DstDes : String;
+    MoveCompStr : String;
+    MoveComps, UseOverride : Boolean;
+    PipePos, EqPos, I : Integer;
+    SrcList, DstList : TStringList;
+    SrcGroup : TStringList;            { source refdes set                     }
+    GroupNets, OutsideNets : TStringList;
+    InternalNets : TStringList;       { source nets fully inside the group    }
+    NetMap : TStringList;             { Values: srcNet -> dstNet              }
+    DstPadNet : TStringList;          { Values: padName -> netName (per dst)  }
+    Src0, Dst0, CmpSrc, CmpDst, Comp : IPCB_Component;
+    SrcAnchorX, SrcAnchorY, DstAnchorX, DstAnchorY, DX, DY : TCoord;
+    DRot, ExpX, ExpY : Double;
+    PadIter : IPCB_GroupIterator;
+    Pad : IPCB_Pad;
+    Iter : IPCB_BoardIterator;
+    Prim, NewPrim : IPCB_Primitive;
+    NetObj : IPCB_Net;
+    SrcNetName, DstNetName, NetName, RefName : String;
+    IsGroup : Boolean;
+    CopiedCount, NetAssignedCount, SharedSkipped, CongruenceWarn : Integer;
+    Tol : TCoord;
+    Notes : String;
+Begin
+    Board := Nil;
+    Try Board := GetPCBBoardAnywhere; Except End;
+    If Board = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_BOARD',
+            'No active PCB board. Open the .PcbDoc and try again.');
+        Exit;
+    End;
+
+    Mapping := ExtractJsonValue(Params, 'mapping');
+    If Mapping = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAMS',
+            'mapping is required (pipe-separated src=dst pairs; first pair is '
+            + 'the transform anchor)');
+        Exit;
+    End;
+    NetsOverride := ExtractJsonValue(Params, 'nets');
+    UseOverride := (NetsOverride <> '');
+    MoveCompStr := LowerCase(ExtractJsonValue(Params, 'move_components'));
+    MoveComps := (MoveCompStr = 'true') Or (MoveCompStr = '1');
+
+    SrcList := TStringList.Create;
+    DstList := TStringList.Create;
+    SrcGroup := TStringList.Create;
+    GroupNets := TStringList.Create;       GroupNets.Duplicates := dupIgnore;
+    OutsideNets := TStringList.Create;     OutsideNets.Duplicates := dupIgnore;
+    InternalNets := TStringList.Create;    InternalNets.Duplicates := dupIgnore;
+    NetMap := TStringList.Create;
+    CopiedCount := 0;
+    NetAssignedCount := 0;
+    SharedSkipped := 0;
+    CongruenceWarn := 0;
+    Notes := '';
+    Tol := MilsToCoord(10);
+
+    Try
+        { 1. Parse the mapping into parallel component lists. }
+        Remaining := Mapping;
+        While Length(Remaining) > 0 Do
+        Begin
+            PipePos := Pos('|', Remaining);
+            If PipePos = 0 Then
+            Begin
+                Pair := Remaining;
+                Remaining := '';
+            End
+            Else
+            Begin
+                Pair := Copy(Remaining, 1, PipePos - 1);
+                Remaining := Copy(Remaining, PipePos + 1, Length(Remaining));
+            End;
+            Pair := Trim(Pair);
+            If Pair = '' Then Continue;
+            EqPos := Pos('=', Pair);
+            If EqPos <= 0 Then Continue;
+            SrcDes := Trim(Copy(Pair, 1, EqPos - 1));
+            DstDes := Trim(Copy(Pair, EqPos + 1, Length(Pair)));
+            If (SrcDes = '') Or (DstDes = '') Then Continue;
+            SrcList.Add(SrcDes);
+            DstList.Add(DstDes);
+            SrcGroup.Add(SrcDes);
+        End;
+
+        If SrcList.Count = 0 Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'MISSING_PARAMS',
+                'mapping had no valid src=dst pairs');
+            Exit;
+        End;
+
+        { 2. Resolve the anchor pair and derive the rigid transform. }
+        Src0 := Board.GetPcbComponentByRefDes(SrcList.Get(0));
+        Dst0 := Board.GetPcbComponentByRefDes(DstList.Get(0));
+        If (Src0 = Nil) Or (Dst0 = Nil) Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'NOT_FOUND',
+                'anchor pair not found: ' + SrcList.Get(0) + '=' + DstList.Get(0));
+            Exit;
+        End;
+        If Src0.Layer <> Dst0.Layer Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'CROSS_SIDE',
+                'anchor source and destination are on different board sides; '
+                + 'cross-side (mirrored) replication is not supported');
+            Exit;
+        End;
+        SrcAnchorX := Src0.x;   SrcAnchorY := Src0.y;
+        DstAnchorX := Dst0.x;   DstAnchorY := Dst0.y;
+        DRot := Dst0.Rotation - Src0.Rotation;
+        DX := DstAnchorX - SrcAnchorX;
+        DY := DstAnchorY - SrcAnchorY;
+
+        { 3. Build the source-net -> dest-net map from matched pad names, and
+             optionally relocate destination components onto the transform. }
+        For I := 0 To SrcList.Count - 1 Do
+        Begin
+            CmpSrc := Board.GetPcbComponentByRefDes(SrcList.Get(I));
+            CmpDst := Board.GetPcbComponentByRefDes(DstList.Get(I));
+            If (CmpSrc = Nil) Or (CmpDst = Nil) Then Continue;
+
+            { Congruence: does this dst sit where the anchor transform predicts? }
+            If I > 0 Then
+            Begin
+                ExpX := DstAnchorX + (CmpSrc.x - SrcAnchorX);
+                ExpY := DstAnchorY + (CmpSrc.y - SrcAnchorY);
+                { Rotation about the anchor is ignored in this cheap check when
+                  DRot=0 (the common case); a rotated channel still reports via
+                  the position delta below. }
+                If (Abs(CmpDst.x - ExpX) > Tol) Or (Abs(CmpDst.y - ExpY) > Tol) Then
+                    Inc(CongruenceWarn);
+            End;
+
+            If MoveComps Then
+            Begin
+                Try
+                    PCBServer.SendMessageToRobots(CmpDst.I_ObjectAddress,
+                        c_Broadcast, PCBM_BeginModify, c_NoEventData);
+                    CmpDst.x := DstAnchorX + (CmpSrc.x - SrcAnchorX);
+                    CmpDst.y := DstAnchorY + (CmpSrc.y - SrcAnchorY);
+                    CmpDst.Rotation := CmpSrc.Rotation + DRot;
+                    PCBServer.SendMessageToRobots(CmpDst.I_ObjectAddress,
+                        c_Broadcast, PCBM_EndModify, c_NoEventData);
+                Except End;
+            End;
+
+            { dst pad name -> net. A fresh list per pair: TStringList.Clear is
+              unreliable across the DelphiScript boundary (rebuild instead). }
+            DstPadNet := TStringList.Create;
+            Try
+                PadIter := CmpDst.GroupIterator_Create;
+                PadIter.AddFilter_ObjectSet(MkSet(ePadObject));
+                Pad := PadIter.FirstPCBObject;
+                While Pad <> Nil Do
+                Begin
+                    If Pad.InComponent And (Pad.Net <> Nil) Then
+                        DstPadNet.Values[Pad.Name] := Pad.Net.Name;
+                    Pad := PadIter.NextPCBObject;
+                End;
+                CmpDst.GroupIterator_Destroy(PadIter);
+
+                { src pad net -> dst pad net (matched by pad name) }
+                PadIter := CmpSrc.GroupIterator_Create;
+                PadIter.AddFilter_ObjectSet(MkSet(ePadObject));
+                Pad := PadIter.FirstPCBObject;
+                While Pad <> Nil Do
+                Begin
+                    If Pad.InComponent And (Pad.Net <> Nil) Then
+                    Begin
+                        SrcNetName := Pad.Net.Name;
+                        DstNetName := DstPadNet.Values[Pad.Name];
+                        If (DstNetName <> '') And (NetMap.IndexOfName(SrcNetName) < 0) Then
+                            NetMap.Values[SrcNetName] := DstNetName;
+                    End;
+                    Pad := PadIter.NextPCBObject;
+                End;
+                CmpSrc.GroupIterator_Destroy(PadIter);
+            Finally
+                DstPadNet.Free;
+            End;
+        End;
+
+        { 4. Decide which source nets to copy. }
+        If UseOverride Then
+        Begin
+            Remaining := NetsOverride;
+            While Length(Remaining) > 0 Do
+            Begin
+                PipePos := Pos('|', Remaining);
+                If PipePos = 0 Then
+                Begin
+                    NetName := Remaining;  Remaining := '';
+                End
+                Else
+                Begin
+                    NetName := Copy(Remaining, 1, PipePos - 1);
+                    Remaining := Copy(Remaining, PipePos + 1, Length(Remaining));
+                End;
+                NetName := Trim(NetName);
+                If NetName <> '' Then InternalNets.Add(NetName);
+            End;
+        End
+        Else
+        Begin
+            { Classify every component net as touching the group, the outside,
+              or both. Internal = touches group, never the outside. }
+            Iter := Board.BoardIterator_Create;
+            Iter.AddFilter_ObjectSet(MkSet(eComponentObject));
+            Iter.AddFilter_LayerSet(MkSet(eTopLayer, eBottomLayer));
+            Iter.AddFilter_Method(eProcessAll);
+            Comp := Iter.FirstPCBObject;
+            While Comp <> Nil Do
+            Begin
+                RefName := Comp.Name.Text;
+                IsGroup := (SrcGroup.IndexOf(RefName) >= 0);
+                PadIter := Comp.GroupIterator_Create;
+                PadIter.AddFilter_ObjectSet(MkSet(ePadObject));
+                Pad := PadIter.FirstPCBObject;
+                While Pad <> Nil Do
+                Begin
+                    If Pad.InComponent And (Pad.Net <> Nil) Then
+                    Begin
+                        If IsGroup Then GroupNets.Add(Pad.Net.Name)
+                        Else OutsideNets.Add(Pad.Net.Name);
+                    End;
+                    Pad := PadIter.NextPCBObject;
+                End;
+                Comp.GroupIterator_Destroy(PadIter);
+                Comp := Iter.NextPCBObject;
+            End;
+            Board.BoardIterator_Destroy(Iter);
+
+            For I := 0 To GroupNets.Count - 1 Do
+            Begin
+                NetName := GroupNets.Get(I);
+                If OutsideNets.IndexOf(NetName) < 0 Then
+                    InternalNets.Add(NetName)
+                Else
+                    Inc(SharedSkipped);
+            End;
+        End;
+
+        { 5. Replicate + transform + re-net the source routing. }
+        PCBServer.PreProcess;
+        Try
+            Iter := Board.BoardIterator_Create;
+            Iter.AddFilter_ObjectSet(MkSet(eTrackObject, eArcObject, eViaObject,
+                ePolyObject, eRegionObject, eFillObject));
+            Iter.AddFilter_IPCB_LayerSet(LayerSet.AllLayers);
+            Iter.AddFilter_Method(eProcessAll);
+
+            Prim := Iter.FirstPCBObject;
+            While Prim <> Nil Do
+            Begin
+                If (Prim.Net <> Nil)
+                   And (InternalNets.IndexOf(Prim.Net.Name) >= 0) Then
+                Begin
+                    SrcNetName := Prim.Net.Name;
+                    DstNetName := NetMap.Values[SrcNetName];
+
+                    NewPrim := Nil;
+                    Try
+                        If (Prim.ObjectId = ePolyObject)
+                           Or (Prim.ObjectId = eRegionObject) Then
+                            NewPrim := Prim.ReplicateWithChildren
+                        Else
+                            NewPrim := Prim.Replicate;
+                    Except
+                        NewPrim := Nil;
+                    End;
+
+                    If NewPrim <> Nil Then
+                    Begin
+                        Try
+                            Board.BeginModify;
+                            Board.AddPCBObject(NewPrim);
+                            Board.EndModify;
+
+                            NewPrim.BeginModify;
+                            If Abs(DRot) > 0.0001 Then
+                                NewPrim.RotateAroundXY(SrcAnchorX, SrcAnchorY, DRot);
+                            NewPrim.MoveByXY(DX, DY);
+                            NewPrim.EndModify;
+                            Inc(CopiedCount);
+
+                            { Re-net the copy to the destination net. }
+                            If DstNetName <> '' Then
+                            Begin
+                                NetObj := FindNetByName(Board, DstNetName);
+                                If NetObj <> Nil Then
+                                Begin
+                                    NewPrim.BeginModify;
+                                    NewPrim.Net := NetObj;
+                                    NewPrim.EndModify;
+                                    NetObj.AddPCBObject(NewPrim);
+                                    Inc(NetAssignedCount);
+                                End;
+                            End;
+
+                            PCBServer.SendMessageToRobots(Board.I_ObjectAddress,
+                                c_Broadcast, PCBM_BoardRegisteration,
+                                NewPrim.I_ObjectAddress);
+                        Except End;
+                    End;
+                End;
+                Prim := Iter.NextPCBObject;
+            End;
+            Board.BoardIterator_Destroy(Iter);
+        Finally
+            PCBServer.PostProcess;
+        End;
+
+        { 6. Rebuild connectivity so ratsnest / highlighting reflect the copies. }
+        Try Board.ConnectivelyValidateNets; Except End;
+        Try Board.ViewManager_FullUpdate; Except End;
+
+        If CongruenceWarn > 0 Then
+            Notes := Notes + IntToStr(CongruenceWarn) + ' destination component(s) '
+                + 'do not match the anchor transform; copied routing may not '
+                + 'align there (pass move_components=true to relocate them). ';
+        If (Not UseOverride) And (InternalNets.Count = 0) Then
+            Notes := Notes + 'No internal nets found -- every source net is '
+                + 'shared with the rest of the board, so nothing was copied. '
+                + 'Pass an explicit "nets" list to force specific nets. ';
+
+        SaveDocByPath(Board.FileName);
+
+        Result := BuildSuccessResponse(RequestId,
+            JsonObj(
+                JsonInt('copied', CopiedCount) + ',' +
+                JsonInt('net_assigned', NetAssignedCount) + ',' +
+                JsonInt('internal_nets', InternalNets.Count) + ',' +
+                JsonInt('shared_nets_skipped', SharedSkipped) + ',' +
+                JsonInt('congruence_warnings', CongruenceWarn) + ',' +
+                JsonStr('notes', Trim(Notes))
+            ));
+    Finally
+        SrcList.Free;
+        DstList.Free;
+        SrcGroup.Free;
+        GroupNets.Free;
+        OutsideNets.Free;
+        InternalNets.Free;
+        NetMap.Free;
+    End;
+End;
+
+
+{..............................................................................}
+{ PCB_FilterVariantComponents - Select the components of a chosen fitted-class }
+{ for a named variant, so they stand out on the board (the agent-callable      }
+{ equivalent of the community VariantFilter script).                           }
+{                                                                              }
+{ Classifies every flattened component under the variant via                   }
+{ DM_FindComponentVariationByUniqueId (Nil = fitted original; kind 1 = not     }
+{ fitted; kind 2 = alternate), collects the ones matching the requested set,   }
+{ then selects exactly those on the active board (deselecting the rest). Uses  }
+{ the verified GetPcbComponentByRefDes + Selected API rather than the          }
+{ PCB:RunQuery process, so it is deterministic.                                 }
+{                                                                              }
+{ Params:                                                                       }
+{   variant_name -- required; the variant to classify against.                }
+{   select       -- one of not_fitted (default), fitted_original, alternate,  }
+{                   all_fitted (fitted_original + alternate).                  }
+{                                                                              }
+{ Response: variant, select, matched (count), designators (array).            }
+{..............................................................................}
+
+Function PCB_FilterVariantComponents(Params, RequestId : String) : String;
+Var
+    Workspace : IWorkspace;
+    Project : IProject;
+    Flat : IDocument;
+    Variant, V0 : IProjectVariant;
+    CompVar : IComponentVariation;
+    Comp : IComponent;
+    Board : IPCB_Board;
+    Iter : IPCB_BoardIterator;
+    PcbComp : IPCB_Component;
+    VariantName, SelMode, Desig, Kind, DesigJson : String;
+    I, VarIdx, NVar, Matched, W : Integer;
+    Matches : TStringList;
+    Include, First : Boolean;
+Begin
+    VariantName := ExtractJsonValue(Params, 'variant_name');
+    SelMode := LowerCase(ExtractJsonValue(Params, 'select'));
+    If SelMode = '' Then SelMode := 'not_fitted';
+    If VariantName = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAMS', 'variant_name is required');
+        Exit;
+    End;
+
+    Workspace := GetWorkspace;
+    If Workspace = Nil Then Begin Result := BuildErrorResponse(RequestId, 'NO_WORKSPACE', 'No workspace'); Exit; End;
+    Project := Workspace.DM_FocusedProject;
+    If Project = Nil Then Begin Result := BuildErrorResponse(RequestId, 'NO_PROJECT', 'No focused project'); Exit; End;
+    SmartCompile(Project);
+    Flat := Project.DM_DocumentFlattened;
+    If Flat = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NOT_COMPILED',
+            'Could not get the flattened document; compile the project first');
+        Exit;
+    End;
+
+    Board := Nil;
+    Try Board := GetPCBBoardAnywhere; Except End;
+    If Board = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_BOARD', 'No active PCB board');
+        Exit;
+    End;
+
+    { Find the variant by name. }
+    Variant := Nil;
+    NVar := Project.DM_ProjectVariantCount;
+    For VarIdx := 0 To NVar - 1 Do
+    Begin
+        V0 := Project.DM_ProjectVariants(VarIdx);
+        If (V0 <> Nil) And (V0.DM_Name = VariantName) Then
+        Begin
+            Variant := V0;
+            Break;
+        End;
+    End;
+    If Variant = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NOT_FOUND', 'Variant not found: ' + VariantName);
+        Exit;
+    End;
+
+    { Classify and collect the matching designators. }
+    Matches := TStringList.Create;
+    Try
+        For I := 0 To Flat.DM_ComponentCount - 1 Do
+        Begin
+            Comp := Flat.DM_Components(I);
+            If Comp = Nil Then Continue;
+            Desig := '';
+            Try Desig := Comp.DM_PhysicalDesignator; Except End;
+            { Match by physical designator (the DM_UniqueId lookup mis-resolves }
+            { on some boards -- see Proj_GetVariantMatrix). }
+            Kind := 'fitted_original';
+            Try
+                For W := 0 To Variant.DM_VariationCount - 1 Do
+                Begin
+                    CompVar := Variant.DM_Variations(W);
+                    If CompVar = Nil Then Continue;
+                    If CompVar.DM_PhysicalDesignator = Desig Then
+                    Begin
+                        If CompVar.DM_VariationKind = 1 Then Kind := 'not_fitted'
+                        Else If CompVar.DM_VariationKind = 2 Then Kind := 'alternate'
+                        Else Kind := 'fitted_original';
+                        Break;
+                    End;
+                End;
+            Except End;
+
+            If SelMode = 'all_fitted' Then
+                Include := (Kind = 'fitted_original') Or (Kind = 'alternate')
+            Else If SelMode = 'fitted_original' Then
+                Include := (Kind = 'fitted_original')
+            Else If SelMode = 'alternate' Then
+                Include := (Kind = 'alternate')
+            Else
+                Include := (Kind = 'not_fitted');
+
+            If Include Then
+            Begin
+                Desig := '';
+                Try Desig := Comp.DM_PhysicalDesignator; Except End;
+                If Desig <> '' Then Matches.Add(Desig);
+            End;
+        End;
+
+        { Deselect every board component, then select the matched ones. }
+        PCBServer.PreProcess;
+        Try
+            Iter := Board.BoardIterator_Create;
+            Iter.AddFilter_ObjectSet(MkSet(eComponentObject));
+            Iter.AddFilter_LayerSet(MkSet(eTopLayer, eBottomLayer));
+            Iter.AddFilter_Method(eProcessAll);
+            PcbComp := Iter.FirstPCBObject;
+            While PcbComp <> Nil Do
+            Begin
+                Try PcbComp.Selected := (Matches.IndexOf(PcbComp.Name.Text) >= 0); Except End;
+                PcbComp := Iter.NextPCBObject;
+            End;
+            Board.BoardIterator_Destroy(Iter);
+        Finally
+            PCBServer.PostProcess;
+        End;
+        Try Board.ViewManager_FullUpdate; Except End;
+
+        DesigJson := '[';
+        Matched := 0;
+        First := True;
+        For I := 0 To Matches.Count - 1 Do
+        Begin
+            If Not First Then DesigJson := DesigJson + ',';
+            First := False;
+            DesigJson := DesigJson + '"' + EscapeJsonString(Matches.Get(I)) + '"';
+            Inc(Matched);
+        End;
+        DesigJson := DesigJson + ']';
+
+        Result := BuildSuccessResponse(RequestId,
+            JsonObj(
+                JsonStr('variant', VariantName) + ',' +
+                JsonStr('select', SelMode) + ',' +
+                JsonInt('matched', Matched) + ',' +
+                JsonRaw('designators', DesigJson)
+            ));
+    Finally
+        Matches.Free;
+    End;
+End;
+
+
+{..............................................................................}
+{ CollectSelectedPCBPrims - Fill L with every board primitive of a kind in     }
+{ ObjectSet whose .Selected flag is set. Read selection THIS way, not via       }
+{ Board.SelectecObject[], because a programmatic Prim.Selected := True (e.g.    }
+{ from PCB_FilterVariantComponents) sets the flag but does NOT populate the     }
+{ editor's SelectecObject list -- so a scan on the flag sees both UI and        }
+{ programmatic selections, while SelectecObject misses the latter. A Procedure  }
+{ (not a Function) so the fixed-array return-slot hazard cannot apply.          }
+{..............................................................................}
+Procedure CollectSelectedPCBPrims(Board : IPCB_Board; ObjectSet : TSet;
+    L : TInterfaceList);
+Var
+    Iter : IPCB_BoardIterator;
+    Prim : IPCB_Primitive;
+Begin
+    Iter := Board.BoardIterator_Create;
+    Try
+        Iter.AddFilter_ObjectSet(ObjectSet);
+        Iter.AddFilter_LayerSet(AllLayers);
+        Iter.AddFilter_Method(eProcessAll);
+        Prim := Iter.FirstPCBObject;
+        While Prim <> Nil Do
+        Begin
+            Try If Prim.Selected Then L.Add(Prim); Except End;
+            Prim := Iter.NextPCBObject;
+        End;
+    Finally
+        Board.BoardIterator_Destroy(Iter);
+    End;
+End;
+
+
+{..............................................................................}
+{ PCB_RenumberPads - Renumber the pads of the current PcbLib footprint in a    }
+{ deterministic spatial order (the non-interactive form of the community       }
+{ RenumberPads tool, which renumbers by click order).                          }
+{                                                                              }
+{ Collects the footprint's pads, sorts them by the chosen order, then assigns  }
+{ sequential designators (start, start+increment, ...). Rows are banded by a   }
+{ small Y tolerance so a grid of pads numbers row-by-row rather than           }
+{ interleaving slightly-misaligned pads.                                       }
+{                                                                              }
+{ Params:                                                                       }
+{   order     -- lr_tb (default: rows top-to-bottom, left-to-right in a row),  }
+{                tb_lr (columns left-to-right, top-to-bottom in a column).     }
+{   start     -- first designator number (default 1).                         }
+{   increment -- step between pads (default 1).                               }
+{   prefix    -- optional string prefixed to each number (e.g. "A").          }
+{                                                                              }
+{ Response: renumbered (count), order, mapping (array of old -> new).         }
+{..............................................................................}
+
+Function PCB_RenumberPads(Params, RequestId : String) : String;
+Var
+    PcbLib : IPCB_Library;
+    Footprint : IPCB_LibComponent;
+    GrpIter : IPCB_GroupIterator;
+    Pad : IPCB_Pad;
+    OrderStr, Prefix, MapJson, OldName, NewName : String;
+    StartIdx, Increment, N, I, J, P, BestPos, Num, K : Integer;
+    Ai, Aj, Bj : Integer;
+    Xs, Ys, Order, NewNames : TStringList;   { parallel string lists, no fixed arrays }
+    Tol, Xa, Ya, Xb, Yb : TCoord;
+    Better : Boolean;
+    First : Boolean;
+    Tmp : String;
+Begin
+    OrderStr := LowerCase(ExtractJsonValue(Params, 'order'));
+    If OrderStr = '' Then OrderStr := 'lr_tb';
+    StartIdx := StrToIntDef(ExtractJsonValue(Params, 'start'), 1);
+    Increment := StrToIntDef(ExtractJsonValue(Params, 'increment'), 1);
+    If Increment = 0 Then Increment := 1;
+    Prefix := ExtractJsonValue(Params, 'prefix');
+
+    PcbLib := Nil;
+    Try PcbLib := PCBServer.GetCurrentPCBLibrary; Except End;
+    If PcbLib = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCBLIB',
+            'No PCB library is active. Open the .PcbLib and select a footprint.');
+        Exit;
+    End;
+    Footprint := PcbLib.CurrentComponent;
+    If Footprint = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_FOOTPRINT', 'No footprint is selected');
+        Exit;
+    End;
+
+    Xs := TStringList.Create;
+    Ys := TStringList.Create;
+    Order := TStringList.Create;
+    NewNames := TStringList.Create;
+    Try
+        { Pass 1: collect pad coordinates (stringified) in iteration order. }
+        GrpIter := Footprint.GroupIterator_Create;
+        Try
+            GrpIter.AddFilter_ObjectSet(MkSet(ePadObject));
+            Pad := GrpIter.FirstPCBObject;
+            While Pad <> Nil Do
+            Begin
+                Xs.Add(IntToStr(Pad.X));
+                Ys.Add(IntToStr(Pad.Y));
+                Pad := GrpIter.NextPCBObject;
+            End;
+        Finally
+            Footprint.GroupIterator_Destroy(GrpIter);
+        End;
+        N := Xs.Count;
+        If N = 0 Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'NO_PADS', 'Footprint has no pads');
+            Exit;
+        End;
+
+        { Build an index permutation and selection-sort it into the order.    }
+        { Row/column banding: pads within Tol on the banding axis are one row. }
+        For I := 0 To N - 1 Do Order.Add(IntToStr(I));
+        Tol := MilsToCoord(5);
+        For P := 0 To N - 2 Do
+        Begin
+            BestPos := P;
+            For J := P + 1 To N - 1 Do
+            Begin
+                Aj := StrToInt(Order.Get(BestPos));
+                Bj := StrToInt(Order.Get(J));
+                Xa := StrToInt(Xs.Get(Aj));  Ya := StrToInt(Ys.Get(Aj));
+                Xb := StrToInt(Xs.Get(Bj));  Yb := StrToInt(Ys.Get(Bj));
+                If OrderStr = 'tb_lr' Then
+                Begin
+                    { columns: primary X asc, secondary Y desc (top first) }
+                    If Abs(Xb - Xa) > Tol Then Better := (Xb < Xa)
+                    Else Better := (Yb > Ya);
+                End
+                Else
+                Begin
+                    { lr_tb rows: primary Y desc (top first), secondary X asc }
+                    If Abs(Yb - Ya) > Tol Then Better := (Yb > Ya)
+                    Else Better := (Xb < Xa);
+                End;
+                If Better Then BestPos := J;
+            End;
+            If BestPos <> P Then
+            Begin
+                Tmp := Order.Get(P);
+                Order.Strings[P] := Order.Get(BestPos);
+                Order.Strings[BestPos] := Tmp;
+            End;
+        End;
+
+        { Map original-iteration-index -> new designator, keyed by index    }
+        { string via Values (avoids pre-populating with empty strings).      }
+        Num := StartIdx;
+        For P := 0 To N - 1 Do
+        Begin
+            AI := StrToInt(Order.Get(P));
+            NewNames.Values[IntToStr(AI)] := Prefix + IntToStr(Num);
+            Num := Num + Increment;
+        End;
+
+        { Pass 2: iterate pads again (stable order) and assign the new names. }
+        MapJson := '[';
+        First := True;
+        K := 0;
+        PCBServer.PreProcess;
+        Try
+            GrpIter := Footprint.GroupIterator_Create;
+            Try
+                GrpIter.AddFilter_ObjectSet(MkSet(ePadObject));
+                Pad := GrpIter.FirstPCBObject;
+                While (Pad <> Nil) And (K < N) Do
+                Begin
+                    OldName := Pad.Name;
+                    NewName := NewNames.Values[IntToStr(K)];
+                    Try
+                        PCBServer.SendMessageToRobots(Pad.I_ObjectAddress, c_Broadcast,
+                            PCBM_BeginModify, c_NoEventData);
+                        Pad.Name := NewName;
+                        PCBServer.SendMessageToRobots(Pad.I_ObjectAddress, c_Broadcast,
+                            PCBM_EndModify, c_NoEventData);
+                    Except End;
+                    If Not First Then MapJson := MapJson + ',';
+                    First := False;
+                    MapJson := MapJson + '{"old":"' + EscapeJsonString(OldName) +
+                        '","new":"' + EscapeJsonString(NewName) + '"}';
+                    Inc(K);
+                    Pad := GrpIter.NextPCBObject;
+                End;
+            Finally
+                Footprint.GroupIterator_Destroy(GrpIter);
+            End;
+        Finally
+            PCBServer.PostProcess;
+        End;
+        MapJson := MapJson + ']';
+
+        Try SaveDocByPath(PcbLib.Board.FileName); Except End;
+
+        Result := BuildSuccessResponse(RequestId,
+            JsonObj(
+                JsonInt('renumbered', N) + ',' +
+                JsonStr('order', OrderStr) + ',' +
+                JsonRaw('mapping', MapJson)
+            ));
+    Finally
+        Xs.Free;
+        Ys.Free;
+        Order.Free;
+        NewNames.Free;
+    End;
+End;
+
+
+{..............................................................................}
+{ PCB_CopyTracksRadial - Replicate the selected tracks/arcs/vias rotated about }
+{ a center point, N-1 times, to build a radial / circular array. Reuses the    }
+{ verified Replicate + RotateAroundXY transform (see PCB_ReplicateLayout).      }
+{                                                                              }
+{ The original selection is the source for every copy; copies are added        }
+{ unselected so the source set stays stable across rotations.                  }
+{                                                                              }
+{ Params:                                                                       }
+{   center_x, center_y -- rotation centre in mils (required).                 }
+{   count              -- total instances including the original (>= 2).      }
+{   angle_step         -- degrees between instances (default 360/count).      }
+{                                                                              }
+{ Response: copied (primitives created), count, angle_step.                   }
+{..............................................................................}
+
+Function PCB_CopyTracksRadial(Params, RequestId : String) : String;
+Var
+    Board : IPCB_Board;
+    Cx, Cy : TCoord;
+    Count, K, I, SelCount, Copied : Integer;
+    StepStr : String;
+    StepDeg, Ang : Double;
+    Prim, NewPrim : IPCB_Primitive;
+    Sel : TInterfaceList;
+Begin
+    Cx := MilsToCoord(StrToIntDef(ExtractJsonValue(Params, 'center_x'), 0));
+    Cy := MilsToCoord(StrToIntDef(ExtractJsonValue(Params, 'center_y'), 0));
+    Count := StrToIntDef(ExtractJsonValue(Params, 'count'), 0);
+    StepStr := ExtractJsonValue(Params, 'angle_step');
+
+    Board := Nil;
+    Try Board := GetPCBBoardAnywhere; Except End;
+    If Board = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_BOARD', 'No active PCB board');
+        Exit;
+    End;
+    If Count < 2 Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'BAD_PARAMS', 'count must be >= 2');
+        Exit;
+    End;
+
+    { Snapshot the selected source primitives (by .Selected flag, not the
+      editor SelectecObject list) so the copies we add do not feed back in. }
+    Sel := CreateObject(TInterfaceList);
+    CollectSelectedPCBPrims(Board, MkSet(eTrackObject, eArcObject, eViaObject), Sel);
+    SelCount := Sel.Count;
+    If SelCount = 0 Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_SELECTION',
+            'Select the tracks/arcs/vias to array first');
+        Exit;
+    End;
+
+    If StepStr <> '' Then StepDeg := StrToFloatDef(StepStr, 0)
+    Else StepDeg := 360.0 / Count;
+
+    Copied := 0;
+    PCBServer.PreProcess;
+    Try
+        For K := 1 To Count - 1 Do
+        Begin
+            Ang := K * StepDeg;
+            For I := 0 To SelCount - 1 Do
+            Begin
+                Prim := Sel.Items[I];
+                If (Prim = Nil) Then Continue;
+                NewPrim := Nil;
+                Try NewPrim := Prim.Replicate; Except NewPrim := Nil; End;
+                If NewPrim <> Nil Then
+                Begin
+                    Try
+                        Board.AddPCBObject(NewPrim);
+                        NewPrim.BeginModify;
+                        NewPrim.RotateAroundXY(Cx, Cy, Ang);
+                        NewPrim.EndModify;
+                        PCBServer.SendMessageToRobots(Board.I_ObjectAddress,
+                            c_Broadcast, PCBM_BoardRegisteration, NewPrim.I_ObjectAddress);
+                        Inc(Copied);
+                    Except End;
+                End;
+            End;
+        End;
+    Finally
+        PCBServer.PostProcess;
+    End;
+    Try Board.ViewManager_FullUpdate; Except End;
+
+    Result := BuildSuccessResponse(RequestId,
+        JsonObj(
+            JsonInt('copied', Copied) + ',' +
+            JsonInt('count', Count) + ',' +
+            JsonStr('angle_step', FloatToStr(StepDeg))
+        ));
+End;
+
+
+{..............................................................................}
+{ PCB_Scale - Scale the selected free primitives by a ratio about an anchor    }
+{ point (the non-interactive form of the community PCBScale tool).             }
+{                                                                              }
+{ Each coordinate maps P' = anchor + ratio*(P - anchor); sizes scale by ratio. }
+{ Scope v1 handles free tracks / arcs / vias / pads / fills / text. Primitives }
+{ inside a component, dimension, or polygon are skipped (the reference marks    }
+{ those incomplete / risky), as are polygons and regions (contour rebuild).    }
+{                                                                              }
+{ Params:                                                                       }
+{   ratio  -- scale factor (required, > 0; 0.95 shrinks, 1.05 grows).         }
+{   anchor -- selection_center (default), board_center, or origin.            }
+{                                                                              }
+{ Response: scaled (count), skipped (count), ratio, anchor_x, anchor_y (mils). }
+{..............................................................................}
+
+Function PCB_Scale(Params, RequestId : String) : String;
+Var
+    Board : IPCB_Board;
+    RatioStr, AnchorMode : String;
+    R : Double;
+    X, Y, L, T, Rt, B : TCoord;
+    BR : TCoordRect;
+    I, SelCount, Scaled, Skipped : Integer;
+    Prim : IPCB_Primitive;
+    Track : IPCB_Track;
+    Arc : IPCB_Arc;
+    Via : IPCB_Via;
+    Pad : IPCB_Pad;
+    Fil : IPCB_Fill;
+    Txt : IPCB_Text;
+    Sel : TInterfaceList;
+Begin
+    RatioStr := ExtractJsonValue(Params, 'ratio');
+    AnchorMode := LowerCase(ExtractJsonValue(Params, 'anchor'));
+    If AnchorMode = '' Then AnchorMode := 'selection_center';
+    R := StrToFloatDef(RatioStr, 0);
+    If R <= 0 Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'BAD_PARAMS', 'ratio must be > 0');
+        Exit;
+    End;
+
+    Board := Nil;
+    Try Board := GetPCBBoardAnywhere; Except End;
+    If Board = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_BOARD', 'No active PCB board');
+        Exit;
+    End;
+    Sel := CreateObject(TInterfaceList);
+    CollectSelectedPCBPrims(Board, MkSet(eTrackObject, eArcObject, eViaObject,
+        ePadObject, eFillObject, eTextObject), Sel);
+    SelCount := Sel.Count;
+    If SelCount = 0 Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_SELECTION',
+            'Select the objects to scale first');
+        Exit;
+    End;
+
+    { Determine the anchor point. }
+    If AnchorMode = 'origin' Then
+    Begin
+        X := 0;  Y := 0;
+    End
+    Else If AnchorMode = 'board_center' Then
+    Begin
+        BR := Board.BoardOutline.BoundingRectangle;
+        X := (BR.Left + BR.Right) Div 2;
+        Y := (BR.Bottom + BR.Top) Div 2;
+    End
+    Else
+    Begin
+        { selection bounding-box centre }
+        Prim := Sel.Items[0];
+        BR := Prim.BoundingRectangle;
+        L := BR.Left;  Rt := BR.Right;  T := BR.Top;  B := BR.Bottom;
+        For I := 1 To SelCount - 1 Do
+        Begin
+            Prim := Sel.Items[I];
+            BR := Prim.BoundingRectangle;
+            If BR.Left   < L  Then L  := BR.Left;
+            If BR.Right  > Rt Then Rt := BR.Right;
+            If BR.Top    > T  Then T  := BR.Top;
+            If BR.Bottom < B  Then B  := BR.Bottom;
+        End;
+        X := (L + Rt) Div 2;
+        Y := (B + T) Div 2;
+    End;
+
+    Scaled := 0;
+    Skipped := 0;
+    PCBServer.PreProcess;
+    Try
+        For I := 0 To SelCount - 1 Do
+        Begin
+            Prim := Sel.Items[I];
+            If Prim = Nil Then Continue;
+            If Prim.InComponent Or Prim.InDimension Or Prim.InPolygon Then
+            Begin
+                Inc(Skipped);
+                Continue;
+            End;
+
+            Try
+                Prim.BeginModify;
+                If Prim.ObjectId = eTrackObject Then
+                Begin
+                    Track := Prim;
+                    Track.X1 := X + Round(R * (Track.X1 - X));
+                    Track.Y1 := Y + Round(R * (Track.Y1 - Y));
+                    Track.X2 := X + Round(R * (Track.X2 - X));
+                    Track.Y2 := Y + Round(R * (Track.Y2 - Y));
+                    Track.Width := Round(Track.Width * R);
+                    Inc(Scaled);
+                End
+                Else If Prim.ObjectId = eArcObject Then
+                Begin
+                    Arc := Prim;
+                    Arc.XCenter := X + Round(R * (Arc.XCenter - X));
+                    Arc.YCenter := Y + Round(R * (Arc.YCenter - Y));
+                    Arc.Radius := Round(Arc.Radius * R);
+                    Arc.LineWidth := Round(Arc.LineWidth * R);
+                    Inc(Scaled);
+                End
+                Else If Prim.ObjectId = eViaObject Then
+                Begin
+                    Via := Prim;
+                    Via.X := X + Round(R * (Via.X - X));
+                    Via.Y := Y + Round(R * (Via.Y - Y));
+                    Via.HoleSize := Round(Via.HoleSize * R);
+                    Via.Size := Round(Via.Size * R);
+                    Inc(Scaled);
+                End
+                Else If Prim.ObjectId = ePadObject Then
+                Begin
+                    Pad := Prim;
+                    Pad.X := X + Round(R * (Pad.X - X));
+                    Pad.Y := Y + Round(R * (Pad.Y - Y));
+                    Pad.HoleSize := Round(Pad.HoleSize * R);
+                    Pad.TopXSize := Round(Pad.TopXSize * R);
+                    Pad.TopYSize := Round(Pad.TopYSize * R);
+                    Inc(Scaled);
+                End
+                Else If Prim.ObjectId = eFillObject Then
+                Begin
+                    Fil := Prim;
+                    Fil.X1Location := X + Round(R * (Fil.X1Location - X));
+                    Fil.Y1Location := Y + Round(R * (Fil.Y1Location - Y));
+                    Fil.X2Location := X + Round(R * (Fil.X2Location - X));
+                    Fil.Y2Location := Y + Round(R * (Fil.Y2Location - Y));
+                    Inc(Scaled);
+                End
+                Else If Prim.ObjectId = eTextObject Then
+                Begin
+                    Txt := Prim;
+                    Txt.XLocation := X + Round(R * (Txt.XLocation - X));
+                    Txt.YLocation := Y + Round(R * (Txt.YLocation - Y));
+                    Txt.Size := Round(Txt.Size * R);
+                    Txt.Width := Round(Txt.Width * R);
+                    Inc(Scaled);
+                End
+                Else
+                    Inc(Skipped);
+                Prim.EndModify;
+                Try Prim.GraphicallyInvalidate; Except End;
+            Except
+                Inc(Skipped);
+            End;
+        End;
+    Finally
+        PCBServer.PostProcess;
+    End;
+    Try Board.ViewManager_FullUpdate; Except End;
+
+    Result := BuildSuccessResponse(RequestId,
+        JsonObj(
+            JsonInt('scaled', Scaled) + ',' +
+            JsonInt('skipped', Skipped) + ',' +
+            JsonStr('ratio', FloatToStr(R)) + ',' +
+            JsonInt('anchor_x', CoordToMils(X)) + ',' +
+            JsonInt('anchor_y', CoordToMils(Y))
+        ));
+End;
+
+
+
+
+{..............................................................................}
 { PCB_LockNetRouting - bulk-lock or unlock track + arc + via primitives on a   }
 { list of nets, optionally also locking the components those nets terminate    }
 { at. Locked primitives are .Moveable = False, which the autorouter and       }
@@ -4406,9 +5474,11 @@ Function PCB_SetTrackWidth(Params : String; RequestId : String) : String;
 Var
     Board : IPCB_Board;
     Iterator : IPCB_BoardIterator;
+    Prim : IPCB_Primitive;
     Track : IPCB_Track;
     NetNameStr, WidthStr, TrackNetName : String;
-    NewWidth, ModCount : Integer;
+    NewWidth, ModCount, I : Integer;
+    Matches : TInterfaceList;
 Begin
     Board := GetPCBBoardAnywhere;
     If Board = Nil Then
@@ -4434,38 +5504,55 @@ Begin
     NewWidth := StrToIntDef(WidthStr, 10);
     ModCount := 0;
 
-    PCBServer.PreProcess;
+    { Collect first, THEN modify. Changing Track.Width while the BoardIterator
+      is still walking corrupts the iterator and hangs the loop -- never mutate
+      during iteration. }
+    Matches := CreateObject(TInterfaceList);
+    Iterator := Board.BoardIterator_Create;
     Try
-        Iterator := Board.BoardIterator_Create;
         Iterator.AddFilter_ObjectSet(MkSet(eTrackObject));
         Iterator.AddFilter_LayerSet(AllLayers);
         Iterator.AddFilter_Method(eProcessAll);
-
-        Track := Iterator.FirstPCBObject;
-        While Track <> Nil Do
+        { Walk + collect as the BASE IPCB_Primitive, exactly like the proven
+          PCB_Scale / CollectSelectedPCBPrims path. A TInterfaceList stores
+          untyped IInterface; assigning a retrieved item straight to a DERIVED
+          IPCB_Track skips QueryInterface and leaves a mistyped pointer whose
+          vtable call faults in oleaut32 (read of FFFFFFFF). Narrow to Track
+          only in a typed local, after retrieval. }
+        Prim := Iterator.FirstPCBObject;
+        While Prim <> Nil Do
         Begin
+            Track := Prim;
             TrackNetName := '';
-            Try
-                If Track.Net <> Nil Then TrackNetName := Track.Net.Name;
-            Except End;
-
-            If TrackNetName = NetNameStr Then
-            Begin
-                PCBServer.SendMessageToRobots(Track.I_ObjectAddress, c_Broadcast,
-                    PCBM_BeginModify, c_NoEventData);
-
-                Track.Width := MilsToCoord(NewWidth);
-
-                PCBServer.SendMessageToRobots(Track.I_ObjectAddress, c_Broadcast,
-                    PCBM_EndModify, c_NoEventData);
-                Inc(ModCount);
-            End;
-            Track := Iterator.NextPCBObject;
+            Try If Track.Net <> Nil Then TrackNetName := Track.Net.Name; Except End;
+            If TrackNetName = NetNameStr Then Matches.Add(Prim);
+            Prim := Iterator.NextPCBObject;
         End;
+    Finally
         Board.BoardIterator_Destroy(Iterator);
+    End;
+
+    PCBServer.PreProcess;
+    Try
+        For I := 0 To Matches.Count - 1 Do
+        Begin
+            Prim := Matches.Items[I];
+            If Prim = Nil Then Continue;
+            { Skip child primitives of a component / polygon / dimension --
+              modifying those faults the same way (see PCB_Scale guard). }
+            If Prim.InComponent Or Prim.InPolygon Or Prim.InDimension Then Continue;
+            Try
+                Track := Prim;
+                Track.BeginModify;
+                Track.Width := MilsToCoord(NewWidth);
+                Track.EndModify;
+                Inc(ModCount);
+            Except End;
+        End;
     Finally
         PCBServer.PostProcess;
     End;
+    Matches.Free;
 
     SaveDocByPath(Board.FileName);
 
@@ -4967,6 +6054,10 @@ Begin
         Rule.Kind := eConfineIn;
         Rule.Enabled := True;
 
+        { Materialize the record by reading it from the rule first; writing a
+          field of a never-assigned TCoordRect local raises "Undeclared
+          identifier: Left" and halts the loop. }
+        CoordRect := Rule.BoundingRect;
         CoordRect.Left := MilsToCoord(RX1);
         CoordRect.Bottom := MilsToCoord(RY1);
         CoordRect.Right := MilsToCoord(RX2);
@@ -6883,7 +7974,7 @@ Function PCB_GetDifferentialPairs(Params : String; RequestId : String) : String;
         GrIter := Net.GroupIterator_Create;
         Try
             GrIter.AddFilter_ObjectSet(MkSet(eTrackObject, eArcObject));
-            GrIter.AddFilter_LayerSet(LayerSet.SignalLayers);
+            GrIter.AddFilter_IPCB_LayerSet(LayerSet.SignalLayers);
             Prim := GrIter.FirstPCBObject;
             While Prim <> Nil Do
             Begin
@@ -7425,7 +8516,7 @@ Begin
 
         Try
             Iter.AddFilter_ObjectSet(MkSet(eTrackObject));
-            Iter.AddFilter_LayerSet(LayerSet.SignalLayers);
+            Iter.AddFilter_IPCB_LayerSet(LayerSet.SignalLayers);
             Iter.AddFilter_Method(eProcessAll);
 
             Track := Iter.FirstPCBObject;
@@ -9621,6 +10712,11 @@ Begin
         'move_component':          Result := PCB_MoveComponent(Params, RequestId);
         'batch_move_components':   Result := PCB_BatchMoveComponents(Params, RequestId);
         'copy_component_placement': Result := PCB_CopyComponentPlacement(Params, RequestId);
+        'replicate_layout':        Result := PCB_ReplicateLayout(Params, RequestId);
+        'filter_variant_components': Result := PCB_FilterVariantComponents(Params, RequestId);
+        'renumber_pads':           Result := PCB_RenumberPads(Params, RequestId);
+        'copy_tracks_radial':      Result := PCB_CopyTracksRadial(Params, RequestId);
+        'scale':                   Result := PCB_Scale(Params, RequestId);
         'set_text_visibility':     Result := PCB_SetTextVisibility(Params, RequestId);
         'lock_net_routing':        Result := PCB_LockNetRouting(Params, RequestId);
         'place_stitching_vias':    Result := PCB_PlaceStitchingVias(Params, RequestId);

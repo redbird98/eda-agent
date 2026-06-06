@@ -291,7 +291,7 @@ These six tools cover most day-to-day work. They accept any object type supporte
 | `app_diag_workspace` | Diagnostic: enumerate the IPC workspace directory and report pending request files. Useful when investigating IPC plumbing |
 | `app_set_intent` | Record the current conversation's intent so the web dashboard can display what the agent is working on |
 
-### Project (51 tools)
+### Project (53 tools)
 
 Lifecycle, parameters, compilation, analysis, outputs, ECO sync, variants.
 
@@ -312,11 +312,12 @@ Lifecycle, parameters, compilation, analysis, outputs, ECO sync, variants.
 | `proj_get_connectivity_many` | Pin-net connectivity for many designators in one round-trip (bulk) |
 | `proj_force_recompile` / `proj_get_compile_freshness` | Explicit SmartCompile cache control: save all dirty docs, invalidate, recompile; report cache age + dirty-in-editor docs |
 | `proj_list_variants` / `proj_get_active_variant` / `proj_set_active_variant` / `proj_create_variant` | Variant management |
+| `proj_export_variant_matrix_csv` / `proj_print_all_variants` | Variant outputs: the fitted/not-fitted matrix CSV (merges with a BOM), and one PDF per variant |
 | `proj_export_pdf` / `proj_export_step` / `proj_export_dxf` / `proj_export_image` / `proj_run_output` | Output generation |
 | `proj_list_outjob_containers` / `proj_run_outjob` / `proj_run_outjob_all` | OutJob execution (`proj_run_outjob_all` fires every container in one pass) |
 | `proj_generate_fab_package` | Run every OutJob container (Gerber / NC drill / IPC-356 / P&P / assembly / BOM) and return a consolidated manifest of produced files; optional STEP / DXF |
 
-### Library (33 tools)
+### Library (34 tools)
 
 Symbol and footprint creation, linking, batch editing, comparison.
 
@@ -371,7 +372,7 @@ Schematic-side operations plus viewport and sheet management.
 | `obj_crossref_net` | Sch pin list vs PCB pad list for a named net: diff + `in_sync` flag |
 | `obj_run_process` | Run any Altium process command |
 
-### PCB (95 tools)
+### PCB (101 tools)
 
 Queries and modifications on the active PCB document.
 
@@ -401,6 +402,7 @@ Queries and modifications on the active PCB document.
 | `pcb_create_room` | Room placement |
 | `pcb_get_unrouted_nets` | Ratsnest / unrouted analysis |
 | `pcb_get_layer_stackup` / `pcb_add_layer` / `pcb_remove_layer` / `pcb_modify_layer` / `pcb_set_layer_visibility` | Layer stack: get, add/remove layers, copper thickness + dielectric properties |
+| `pcb_export_stackup_csv` | Write the layer stack to the conventional fab CSV report (copper/dielectric interleaved, mil + mm, Er) |
 | `pcb_get_mech_layer_names` | Enabled mechanical layers with their custom names |
 | `pcb_get_board_outline` / `pcb_get_board_statistics` / `pcb_get_fab_stats` | Board-level queries. `pcb_get_fab_stats` returns the DFM summary fab houses ask for (min annular ring, min track width, via type counts, distinct hole count) |
 | `pcb_get_selected_objects` | Current selection |
@@ -408,6 +410,11 @@ Queries and modifications on the active PCB document.
 | `pcb_delete_object` | Delete a specific object |
 | `pcb_lock_net_routing` | Lock/unlock tracks + arcs + vias by net, optional component lock |
 | `pcb_copy_component_placement` | Mapping-based clone of layout from src → dst designators |
+| `pcb_replicate_layout` | Multi-channel layout reuse: copy a source channel's routing (tracks/arcs/vias/polys) onto a matching channel with a rigid transform and net remap |
+| `pcb_filter_variant_components` | Select a variant's not-fitted / fitted / alternate components on the board (variant review, component-class building) |
+| `pcb_renumber_pads` | Renumber the current footprint's pads in spatial order (lr_tb / tb_lr), with start/increment/prefix |
+| `pcb_copy_tracks_radial` | Array selected tracks/arcs/vias radially about a center (circular copy via the verified rotate transform) |
+| `pcb_scale` | Scale selected free copper/artwork by a ratio about an anchor (selection/board center or origin) |
 | `pcb_set_text_visibility` | Bulk `NameOn`/`CommentOn` toggle, optional designator filter |
 | `pcb_clear_source_footprint_library` | Clear `SourceFootprintLibrary` so components re-match by lib-ref name from current Available Libraries (library-consolidation housekeeping) |
 | `pcb_place_stitching_vias` | Fill a rectangle with via stitching on a target net (collision-checked, defaults to dry_run) |
