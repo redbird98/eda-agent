@@ -1078,11 +1078,12 @@ Begin
     Begin
         Impl.ModelName := FootprintName;
         Impl.ModelType := cDocKind_PcbLib;
+        { ISch_Implementation has no LibraryIdentifier / UseComponentLibrary
+          property; the footprint binds by ModelName (resolved from available
+          libraries), and an explicit source library is recorded as a PCBLIB
+          datafile link (read back via DatafileLinkCount -- see libUtils.pas). }
         If LibraryName <> '' Then
-        Begin
-            Impl.UseComponentLibrary := False;
-            Impl.LibraryIdentifier := LibraryName;
-        End;
+            Try Impl.AddDataFileLink(FootprintName, LibraryName, 'PCBLIB'); Except End;
         SetOwnerPart(Impl, Component);
         Component.AddSchObject(Impl);
         SchRegisterObject(Component, Impl);
