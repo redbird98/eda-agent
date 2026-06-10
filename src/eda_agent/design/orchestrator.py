@@ -106,9 +106,10 @@ def execute_plan_via_canvas_from_json(
     bridge = bridge or _resolve_bridge()
     if bridge is None:
         out["ok"] = False
+        reason = f" ({_last_bridge_failure})" if _last_bridge_failure else ""
         out["notes"].append(
             "no Altium bridge available; symbol extraction needs Altium "
-            "to load each referenced SchLib."
+            f"to load each referenced SchLib.{reason}"
         )
         return out
 
@@ -217,8 +218,9 @@ def preview_plan_from_json(
     bridge = bridge or _resolve_bridge()
     if bridge is None:
         out["ok"] = False
+        reason = f" ({_last_bridge_failure})" if _last_bridge_failure else ""
         out["notes"].append(
-            "no Altium bridge available; symbol extraction needs Altium."
+            f"no Altium bridge available; symbol extraction needs Altium.{reason}"
         )
         return out
 
@@ -362,17 +364,30 @@ def _enforce_plan_gates(plan: DesignPlan, out: dict[str, Any]) -> bool:
     return False
 
 
+_last_bridge_failure: str = ""
+
+
 def _resolve_bridge() -> Any:
     """Lazy-import the global bridge so this module doesn't pull bridge
     code at import time (keeps it cheap for unit tests that don't need
-    Altium)."""
+    Altium).
+
+    On failure the reason is kept in ``_last_bridge_failure`` so callers
+    can put the REAL cause (e.g. "Altium is not running") in the result
+    notes instead of a generic "no bridge".
+    """
+    global _last_bridge_failure
     try:
         from eda_agent.bridge.altium_bridge import get_bridge
-    except ImportError:
+    except ImportError as exc:
+        _last_bridge_failure = f"bridge module unavailable: {exc}"
         return None
     try:
-        return get_bridge()
+        bridge = get_bridge()
+        _last_bridge_failure = ""
+        return bridge
     except Exception as exc:
+        _last_bridge_failure = f"{type(exc).__name__}: {exc}"
         logger.warning("get_bridge failed: %s", exc)
         return None
 

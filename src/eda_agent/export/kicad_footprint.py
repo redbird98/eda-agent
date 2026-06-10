@@ -50,6 +50,10 @@ def _pad_shape(raw: Any) -> str:
 
 
 def _pad_layers(pad: dict[str, Any], is_smd: bool) -> list[str]:
+    # SMD pads get the paste layer at 1:1 (no solder_paste_margin emitted):
+    # Altium pad data carries no per-pad paste expansion, and stencil
+    # shrink is a fab decision -- KiCad applies its own board-level margin
+    # if the user sets one. Fine-pitch users should review the stencil.
     if not is_smd:
         return ["*.Cu", "*.Mask"]
     side = str(pad.get("layer", "top")).strip().lower()

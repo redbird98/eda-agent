@@ -257,7 +257,12 @@ def ac_termination(
     The cap carries the reflected edge but blocks the DC path, so there is no
     static power. It must hold for the settling, so size the time constant to a
     few one-way flight times (Johnson & Graham use ``RC >= 3 * Td``):
-    ``C = time_constants * Td / Z0``."""
+    ``C = time_constants * Td / Z0``.
+
+    ``time_constants`` is a DIMENSIONLESS multiplier of the one-way flight
+    time Td (default 3.0 = "RC equals three flight times"), not a time
+    value. The flight time itself comes from the length/Er arguments.
+    """
     from eda_agent.design.component_values import nearest_preferred
     if z0 <= 0:
         raise ValueError("Z0 must be positive")

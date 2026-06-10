@@ -1,0 +1,31 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    # windows-latest matches the only supported runtime (the bridge drives
+    # Altium Designer on Windows); the offline engines are platform-neutral
+    # but there is no reason to certify a platform we never run on.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install package with dev extras
+        run: python -m pip install -e ".[dev]"
+
+      - name: DelphiScript lint
+        run: python scripts/altium/lint.py
+
+      - name: Pascal bundle consistency
+        run: python scripts/altium/build.py
+
+      - name: Run test suite
+        run: python -m pytest tests/ -q

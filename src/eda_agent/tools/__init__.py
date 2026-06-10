@@ -1,6 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
-"""MCP Tools for Altium Designer."""
+"""MCP Tools for Altium Designer.
+
+Error-shape convention (two families, consistent within each):
+
+- Bridge-backed tools (anything that round-trips Altium) report failures as
+  ``{"error": "<message>", <count_field>: 0, ...}`` -- or raise, in which
+  case the MCP layer surfaces the exception text. Successful payloads come
+  from the Pascal handler verbatim.
+- Offline calculators (``pcb_calc_*``, ``design_compute_*``, exporters)
+  report ``{"ok": False, "reason": "<message>"}`` and ``{"ok": True, ...}``
+  on success.
+
+New tools should match the family they belong to rather than invent a third
+shape.
+"""
 
 from .application import register_application_tools
 from .project import register_project_tools

@@ -162,18 +162,20 @@ def register_library_tools(mcp):
             Dict with added, failed, total counts.
         """
         op_strs: list[str] = []
+        skipped_invalid = 0
         for p in pins:
             desig = str(p.get("designator", "")).strip()
             name = str(p.get("name", "")).strip()
             if not desig:
+                skipped_invalid += 1
                 continue
             fields = [
                 f"designator={desig}",
                 f"name={name}",
-                f"x={_snap(int(p.get('x', 0)))}",
-                f"y={_snap(int(p.get('y', 0)))}",
-                f"length={_snap(int(p.get('length', 200)))}",
-                f"rotation={int(p.get('rotation', 0))}",
+                f"x={_snap(round(p.get('x', 0)))}",
+                f"y={_snap(round(p.get('y', 0)))}",
+                f"length={_snap(round(p.get('length', 200)))}",
+                f"rotation={round(p.get('rotation', 0))}",
                 f"electrical_type={p.get('electrical_type', 'passive')}",
                 f"hidden={'true' if p.get('hidden') else 'false'}",
             ]
@@ -182,13 +184,21 @@ def register_library_tools(mcp):
             op_strs.append(";".join(fields))
 
         if not op_strs:
-            return {"error": "No valid pins", "added": 0}
+            return {
+                "error": "No valid pins (every entry was missing a designator)",
+                "added": 0,
+                "total": len(pins),
+                "skipped_invalid": skipped_invalid,
+            }
 
         bridge = get_bridge()
-        return await bridge.send_command_async(
+        result = await bridge.send_command_async(
             "library.add_pins",
             {"pins": "~~".join(op_strs)},
         )
+        if isinstance(result, dict) and skipped_invalid:
+            result["skipped_invalid"] = skipped_invalid
+        return result
 
     @mcp.tool()
     async def lib_add_symbol_rectangle(

@@ -50,9 +50,11 @@ def _mm(mils: float) -> str:
 
 
 def _mil(mils: float) -> str:
+    """Format a mil value with 4 decimals (same precision as the mm column,
+    so a thin film doesn't round to zero in one unit but not the other)."""
     if mils is None:
         return ""
-    return f"{float(mils):.3f}"
+    return f"{float(mils):.4f}"
 
 
 def _is_no_dielectric(dtype: Any) -> bool:

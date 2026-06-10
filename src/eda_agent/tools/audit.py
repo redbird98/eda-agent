@@ -968,7 +968,7 @@ def register_audit_tools(mcp):
         bridge = get_bridge()
         return await bridge.send_command_async(
             "audit.find_pads_near_board_edge",
-            {"clearance_mils": str(int(clearance_mils))},
+            {"clearance_mils": str(round(clearance_mils))},
         )
 
     @mcp.tool()
@@ -1029,7 +1029,7 @@ def register_audit_tools(mcp):
         bridge = get_bridge()
         return await bridge.send_command_async(
             "audit.find_off_grid_components",
-            {"grid_mils": str(int(grid_mils))},
+            {"grid_mils": str(round(grid_mils))},
         )
 
     @mcp.tool()

@@ -32,7 +32,9 @@ SECTION_FILES: dict[str, tuple[str, ...]] = {
     "Application":            ("application.py",),
     "Project":                ("project.py",),
     "Library":                ("library.py",),
-    "Schematic and general":  ("generic.py",),
+    # The README section's table includes the audit_* design-lint checks,
+    # so its header count covers both source files.
+    "Schematic and general":  ("generic.py", "audit.py"),
     "PCB":                    ("pcb.py",),
     "Design agent":           ("design.py",),
 }

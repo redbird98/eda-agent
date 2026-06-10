@@ -1,6 +1,6 @@
 # eda-agent
 
-MCP server that lets an AI (or any MCP-compatible client) **interact with a live Altium Designer session**. It exposes 200+ tools covering schematic, PCB, library, project, and design-agent operations over a persistent DelphiScript bridge. The AI reads the design you currently have open, asks questions about it, and can modify it in place while you watch.
+MCP server that lets an AI (or any MCP-compatible client) **interact with a live Altium Designer session**. It exposes 300+ tools covering schematic, PCB, library, project, and design-agent operations over a persistent DelphiScript bridge. The AI reads the design you currently have open, asks questions about it, and can modify it in place while you watch.
 
 > **⚠️ Experimental.** Not all tools are extensively tested. Some can crash the Altium DelphiScript engine. See [Known limitations](#known-limitations) before using on any design you haven't backed up.
 
@@ -31,7 +31,7 @@ This is **not** a batch tool that opens a project, runs a script, and exits. It'
 
 ## Features
 
-- **200+ tools** across application, project, library, schematic/general, PCB, and design-agent categories
+- **300+ tools** across application, project, library, schematic/general, PCB, and design-agent categories
 - **Generic primitives** (`obj_query`, `obj_modify`, `obj_create`, `obj_delete`, `run_process`) that work on almost any schematic or PCB object type via late-binding, avoiding per-type handler proliferation
 - **Bulk batch primitives**: `obj_batch_modify`, `obj_batch_create`, `obj_batch_delete`, `pcb_place_tracks`, `pcb_move_components`, `sch_place_wires`, `place_net_labels`, `place_power_ports`, `sch_place_components`, `sch_set_components_parameters`, `get_sch_doc_pins`, `lib_add_pins`, `proj_get_connectivity_many`, `sim_attach_primitives`. Collapse N LLM turns + N IPC round-trips into one. Typical wall-time savings: 10 to 100x on multi-item edits
 - **Design review snapshot**: `design_review_snapshot` bundles 8 to 12 review reads (project info, components, nets, rules, diff, messages, stats, unrouted, BOM) into a single call. One LLM turn instead of a dozen
@@ -218,7 +218,7 @@ In practice, while an MCP client is attached and sending keep-alive pings every 
 
 ### Tools vary in maturity
 
-Not every one of the 200+ tools has been exercised on every Altium version or design size. The [generic primitives](#generic-primitives) and the core `application` / `project` tools are the best-tested. Some PCB modify operations (polygon repour, room creation, align-components) are less battle-tested. Queries are generally safer than mutations.
+Not every one of the 300+ tools has been exercised on every Altium version or design size. The [generic primitives](#generic-primitives-the-core) and the core `application` / `project` tools are the best-tested. Some PCB modify operations (polygon repour, room creation, align-components) are less battle-tested. Queries are generally safer than mutations.
 
 ## Timeout and server lifecycle
 
@@ -250,7 +250,7 @@ The polling loop goes into idle mode after ~1 second of no MCP commands. In idle
 
 ## Tool reference
 
-200+ tools grouped into six categories. The **generic primitives** are the engine; the rest are convenience wrappers or category-specific operations.
+300+ tools grouped into six categories. The **generic primitives** are the engine; the rest are convenience wrappers or category-specific operations.
 
 ### Generic primitives (the core)
 
@@ -334,7 +334,7 @@ Symbol and footprint creation, linking, batch editing, comparison.
 | `lib_diff_libraries` | Compare two libraries |
 | `lib_update_footprint_heights_from_3d` | Propagate `IPCB_ComponentBody.OverallHeight` up to `Footprint.Height` so placement-collision DRC actually fires (libraries from vendors often ship Height=0) |
 
-### Schematic and general (62 tools)
+### Schematic and general (93 tools)
 
 Schematic-side operations plus viewport and sheet management.
 
@@ -368,7 +368,7 @@ Schematic-side operations plus viewport and sheet management.
 | `sim_get_readiness` / `sim_attach_primitives` / `sim_attach_model` / `sim_run` | SPICE workflow: audit, attach, simulate |
 | `design_review_snapshot` / `design_datasheet_checklist` | One-call full-project review + datasheet discipline |
 | `design_lint_report` | One-call run of all `audit_*` checks (component params, port direction, designator collisions, off-grid, tented vias, near-miss tracks, via antennas, removed pad shapes, off-board components, edge clearance, single-pin nets, MPN inconsistencies, ...) returned as a grouped violation list |
-| `audit_*` (32 tools) | Individual design-lint checks; each returns `{checked, violations, items[]}`. Wired into `design_lint_report` and the dashboard's Status → Health → Design lint panel via `/api/lint` |
+| `audit_*` (31 tools) | Individual design-lint checks; each returns `{checked, violations, items[]}`. Wired into `design_lint_report` and the dashboard's Status → Health → Design lint panel via `/api/lint` |
 | `obj_crossref_net` | Sch pin list vs PCB pad list for a named net: diff + `in_sync` flag |
 | `obj_run_process` | Run any Altium process command |
 

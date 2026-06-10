@@ -1729,21 +1729,26 @@ Begin
             End;
         End;
 
-        { PostProcess + Invalidate + Save every touched doc }
+    Finally
+        { PostProcess + Invalidate + Save every touched doc. This MUST run in
+          the Finally: the PreProcess loop above opened a transaction on each
+          touched sheet, and an exception mid-rename would otherwise leave
+          those sheets in an open transaction that poisons later edits. }
         For I := 0 To TouchedDocs.Count - 1 Do
         Begin
-            SchDoc := SchServer.GetSchDocumentByPath(TouchedDocs[I]);
+            SchDoc := Nil;
+            Try SchDoc := SchServer.GetSchDocumentByPath(TouchedDocs[I]); Except End;
             If SchDoc <> Nil Then
             Begin
-                SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
-                SchDoc.GraphicallyInvalidate;
+                Try SchServer.ProcessControl.PostProcess(SchDoc, 'Edit'); Except End;
+                Try SchDoc.GraphicallyInvalidate; Except End;
             End;
-            SaveDocByPath(TouchedDocs[I]);
+            Try SaveDocByPath(TouchedDocs[I]); Except End;
         End;
 
-    Finally
-        { TInterfaceList owns its interface references, Free to release them }
-        CompList.Free;
+        { No CompList.Free -- releasing a TInterfaceList of live schematic
+          interface refs faults in oleaut32; leave it to the script host.
+          The parallel TStringLists are plain strings and safe to free. }
         Prefixes.Free;
         XCoords.Free;
         YCoords.Free;

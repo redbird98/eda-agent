@@ -3,7 +3,6 @@
 """Application-level tools for Altium Designer MCP Server."""
 
 import re
-from functools import lru_cache
 from typing import Any, Optional
 from .. import __version__ as _mcp_server_version
 from ..bridge import get_bridge, AltiumNotRunningError
@@ -40,9 +39,13 @@ _SESSION_REMINDER = {
 }
 
 
-@lru_cache(maxsize=1)
 def _bundled_script_version() -> Optional[str]:
     """Read SCRIPT_VERSION from the bundled Main.pas.
+
+    Deliberately NOT cached: install-scripts can replace the bundle while
+    this server keeps running, and a cached value then reports a false
+    version mismatch (or false match) until the server restarts. The read
+    is one small file on demand.
 
     Returns None if the file can't be found or parsed, in which case we
     skip the stale-cache comparison and just report whatever Altium

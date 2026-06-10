@@ -17,7 +17,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 _REFDES_PATTERN = r"^[A-Z]+[0-9]+[A-Z]?$"
@@ -150,6 +150,16 @@ class Net(BaseModel):
         "components). Has no effect on power/ground nets, which always use "
         "port glyphs.",
     )
+    force_wires: bool = Field(
+        default=False,
+        description="Hard override: route this net with WIRES regardless of "
+        "every other rule — the power/ground flags, the conventional-rail "
+        "name heuristic (a net named 'VCC' is otherwise treated as a power "
+        "rail even with is_power=False), and the cross-zone label default. "
+        "The explicit escape hatch when the planner wants a drawn wire on a "
+        "net the rules would render as ports or labels. Mutually exclusive "
+        "with force_label.",
+    )
     role: Optional[str] = Field(
         default=None,
         description="Generic electrical role tag the planner asserts so "
@@ -175,9 +185,24 @@ class Net(BaseModel):
             seen.add(key)
         return pins
 
+    @model_validator(mode="after")
+    def _force_flags_exclusive(self) -> "Net":
+        if self.force_label and self.force_wires:
+            raise ValueError(
+                f"net {self.name!r}: force_label and force_wires are "
+                f"mutually exclusive")
+        return self
+
 
 class Zone(BaseModel):
-    """A rough placement region on a sheet, signal flow guidance."""
+    """A rough placement region on a sheet, signal flow guidance.
+
+    Coordinates here are MILLIMETRES (the ``_mm`` suffixes), while the
+    layout/canvas engines work in MILS. Zones are advisory grouping hints
+    only — no engine reads ``origin_mm``/``size_mm`` for geometry today.
+    If that ever changes, convert at the boundary (1 mm = 39.37 mils);
+    feeding these values into mils math silently lands 25.4x off.
+    """
 
     model_config = ConfigDict(extra="forbid")
 

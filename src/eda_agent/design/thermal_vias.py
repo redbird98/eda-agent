@@ -40,6 +40,10 @@ def via_barrel_area_mm2(
 ) -> float:
     """Conducting copper cross-section of one via, mm^2.
 
+    Units are mixed by industry convention and the parameter names say so:
+    ``drill_mm`` is MILLIMETRES, ``plating_um`` is MICROMETRES (25 um = 1 oz
+    barrel plating). Passing a plating value in mm here is 1000x off.
+
     Unfilled (or resin-filled) via: the plated annulus between the drill wall
     and the finished hole. Copper-filled via: the full finished circle.
     """

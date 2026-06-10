@@ -483,10 +483,10 @@ def register_pcb_tools(mcp):
             if not desig:
                 continue
             x_str = (
-                str(int(m["x"])) if "x" in m and m["x"] is not None else ""
+                str(round(m["x"])) if "x" in m and m["x"] is not None else ""
             )
             y_str = (
-                str(int(m["y"])) if "y" in m and m["y"] is not None else ""
+                str(round(m["y"])) if "y" in m and m["y"] is not None else ""
             )
             rot_str = (
                 str(m["rotation"])
@@ -535,8 +535,8 @@ def register_pcb_tools(mcp):
             desig = str(p.get("designator", "")).strip()
             if not desig:
                 continue
-            x_str = str(int(p["x"])) if p.get("x") is not None else ""
-            y_str = str(int(p["y"])) if p.get("y") is not None else ""
+            x_str = str(round(p["x"])) if p.get("x") is not None else ""
+            y_str = str(round(p["y"])) if p.get("y") is not None else ""
             rot_str = str(p["rotation"]) if p.get("rotation") is not None else ""
             layer = p.get("layer")
             if not layer and p.get("side") is not None:
@@ -1955,14 +1955,14 @@ def register_pcb_tools(mcp):
             "pcb.place_stitching_vias",
             {
                 "net": net,
-                "x1_mils": str(int(x1_mils)),
-                "y1_mils": str(int(y1_mils)),
-                "x2_mils": str(int(x2_mils)),
-                "y2_mils": str(int(y2_mils)),
-                "spacing_mils": str(int(spacing_mils)),
-                "via_size_mils": str(int(via_size_mils)),
-                "via_hole_mils": str(int(via_hole_mils)),
-                "clearance_mils": str(int(clearance_mils)),
+                "x1_mils": str(round(x1_mils)),
+                "y1_mils": str(round(y1_mils)),
+                "x2_mils": str(round(x2_mils)),
+                "y2_mils": str(round(y2_mils)),
+                "spacing_mils": str(round(spacing_mils)),
+                "via_size_mils": str(round(via_size_mils)),
+                "via_hole_mils": str(round(via_hole_mils)),
+                "clearance_mils": str(round(clearance_mils)),
                 "dry_run": "true" if dry_run else "false",
             },
             timeout=60.0,
@@ -2633,8 +2633,8 @@ def register_pcb_tools(mcp):
             {
                 "net_class": net_class,
                 "type": type,
-                "pad_size_mils": str(int(pad_size_mils)),
-                "hole_size_mils": str(int(hole_size_mils)),
+                "pad_size_mils": str(round(pad_size_mils)),
+                "hole_size_mils": str(round(hole_size_mils)),
                 "fab_top": "true" if fab_top else "false",
                 "fab_bottom": "true" if fab_bottom else "false",
                 "assy_top": "true" if assy_top else "false",
@@ -2698,8 +2698,8 @@ def register_pcb_tools(mcp):
             {
                 "designator": designator,
                 "pad_name": pad_name,
-                "min_grid_size_mils": str(int(min_grid_size_mils)),
-                "min_gap_mils": str(int(min_gap_mils)),
+                "min_grid_size_mils": str(round(min_grid_size_mils)),
+                "min_gap_mils": str(round(min_gap_mils)),
                 "min_coverage_pct": str(float(min_coverage_pct)),
             },
             timeout=30.0,
@@ -2964,9 +2964,9 @@ def register_pcb_tools(mcp):
         bridge = get_bridge()
         params: dict[str, Any] = {
             "designator": designator,
-            "x": str(int(x)),
-            "y": str(int(y)),
-            "margin_mils": str(int(margin_mils)),
+            "x": str(round(x)),
+            "y": str(round(y)),
+            "margin_mils": str(round(margin_mils)),
         }
         if rotation is not None:
             params["rotation"] = str(rotation)

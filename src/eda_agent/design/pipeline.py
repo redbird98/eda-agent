@@ -653,8 +653,16 @@ def build_best_canvas_from_plan(
             if _cand_key(fd_cand) < _cand_key(base):
                 base, base_label = fd_cand, (
                     f"pin_aware_fd(k={k})" if ic_off else "force_directed")
-    except Exception:
-        pass  # FD alternative is best-effort; never block the base result
+    except Exception as fd_exc:
+        # FD alternative is best-effort; never block the base result -- but
+        # say so, or a persistently-broken FD path silently degrades every
+        # layout to the base engine.
+        base.notes.append(PipelineNote(
+            severity="warning",
+            text=(
+                "force-directed layout alternative failed and was skipped: "
+                f"{type(fd_exc).__name__}: {fd_exc}"),
+        ))
 
     if not base.ok or not base.canvas.instances:
         return base

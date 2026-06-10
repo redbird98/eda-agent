@@ -499,6 +499,41 @@ def _scan_fixed_array_in_function(path: str, lines: list[str]) -> list[Finding]:
     return findings
 
 
+# Freeing a TInterfaceList that held Altium interface refs releases those
+# refs through the COM marshaller and faults in oleaut32 (read of FFFFFFFF).
+# Working tools (PCB_Scale, CollectSelectedPCBPrims callers) leave the list
+# to the script host. Track locals declared `: TInterfaceList` and flag any
+# `.Free` on them. Declarations reset at each Function/Procedure header.
+_IFACE_LIST_DECL = re.compile(
+    r"\b([A-Za-z_][A-Za-z0-9_]*)\s*(?:,\s*[A-Za-z_][A-Za-z0-9_]*\s*)*:\s*TInterfaceList\b")
+
+
+def _scan_interfacelist_free(path: str, lines: list[str]) -> list[Finding]:
+    findings: list[Finding] = []
+    iface_vars: set[str] = set()
+    for i, raw in enumerate(lines, 1):
+        line = strip_comments_and_strings(raw)
+        if re.match(r"^\s*(Function|Procedure)\b", line, re.IGNORECASE):
+            iface_vars = set()
+            continue
+        decl = _IFACE_LIST_DECL.search(line)
+        if decl:
+            names = line.split(":", 1)[0]
+            for name in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", names):
+                iface_vars.add(name)
+            continue
+        m = re.search(r"\b([A-Za-z_][A-Za-z0-9_]*)\.Free\b", line)
+        if m and m.group(1) in iface_vars:
+            findings.append(Finding(
+                file=path, line=i, col=m.start(1) + 1,
+                rule="interfacelist-free",
+                severity="error",
+                snippet=raw,
+                memory="altium_wrong_api_identifier_family.md",
+            ))
+    return findings
+
+
 # Case ... Of with eXxx identifiers -- DelphiScript only allows string or
 # integer-literal arms. Detect `Case <var> Of` followed within ~20 lines
 # by an arm starting with `e[A-Z]`.
@@ -867,6 +902,7 @@ def lint_file(path: str) -> list[Finding]:
                 ))
 
     findings.extend(_scan_fixed_array_in_function(rel, raw_lines))
+    findings.extend(_scan_interfacelist_free(rel, raw_lines))
     findings.extend(_scan_case_on_enum(rel, raw_lines))
     findings.extend(_scan_if_then_try(rel, raw_lines))
     findings.extend(_scan_reserved_in_var_block(rel, raw_lines))

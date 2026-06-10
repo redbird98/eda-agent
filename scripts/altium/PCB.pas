@@ -5552,7 +5552,10 @@ Begin
     Finally
         PCBServer.PostProcess;
     End;
-    Matches.Free;
+    { Do NOT Free a TInterfaceList holding board-primitive interface refs --
+      releasing them through the COM marshaller faults in oleaut32 (read of
+      FFFFFFFF). PCB_Scale / CollectSelectedPCBPrims leave the list to the
+      script host for the same reason. }
 
     SaveDocByPath(Board.FileName);
 
@@ -6745,7 +6748,8 @@ Begin
     Count := CompList.Count;
     If Count < 2 Then
     Begin
-        CompList.Free;
+        { No CompList.Free -- releasing a TInterfaceList of board-component
+          interface refs faults in oleaut32; leave it to the script host. }
         Result := BuildErrorResponse(RequestId, 'TOO_FEW',
             'Need at least 2 components to distribute (matched ' + IntToStr(Count) + ')');
         Exit;
@@ -6774,7 +6778,6 @@ Begin
     End;
 
     SaveDocByPath(Board.FileName);
-    CompList.Free;
 
     Result := BuildSuccessResponse(RequestId,
         '{"distributed":' + IntToStr(Count) + ','
@@ -9876,10 +9879,11 @@ Function PCB_NormalizeVias(Params : String; RequestId : String) : String;
 Var
     Board : IPCB_Board;
     Iter : IPCB_BoardIterator;
-    Obj : IPCB_Primitive;
+    Obj, Prim : IPCB_Primitive;
     Via : IPCB_Via;
     Rule : IPCB_Rule;
-    Checked, Changed : Integer;
+    Matches : TInterfaceList;
+    I, Checked, Changed : Integer;
 Begin
     Board := GetPCBBoardAnywhere;
     If Board = Nil Then
@@ -9890,35 +9894,50 @@ Begin
 
     Checked := 0;
     Changed := 0;
+
+    { Collect first, THEN modify -- mutating primitives while the BoardIterator
+      is walking corrupts the iterator. Collect as the base IPCB_Primitive and
+      never Free the list (releasing board-interface refs faults in oleaut32). }
+    Matches := CreateObject(TInterfaceList);
+    Iter := Board.BoardIterator_Create;
+    Try
+        Iter.AddFilter_ObjectSet(MkSet(eViaObject));
+        Iter.AddFilter_LayerSet(AllLayers);
+        Iter.AddFilter_Method(eProcessAll);
+        Obj := Iter.FirstPCBObject;
+        While Obj <> Nil Do
+        Begin
+            Checked := Checked + 1;
+            Matches.Add(Obj);
+            Obj := Iter.NextPCBObject;
+        End;
+    Finally
+        Board.BoardIterator_Destroy(Iter);
+    End;
+
     PCBServer.PreProcess;
     Try
-        Iter := Board.BoardIterator_Create;
-        Try
-            Iter.AddFilter_ObjectSet(MkSet(eViaObject));
-            Iter.AddFilter_LayerSet(AllLayers);
-            Iter.AddFilter_Method(eProcessAll);
-            Obj := Iter.FirstPCBObject;
-            While Obj <> Nil Do
-            Begin
-                Checked := Checked + 1;
-                Via := Obj;
+        For I := 0 To Matches.Count - 1 Do
+        Begin
+            Prim := Matches.Items[I];
+            If Prim = Nil Then Continue;
+            { Only free vias -- a via owned by a component footprint, polygon,
+              or dimension is a child primitive; modifying it faults. }
+            If Prim.InComponent Or Prim.InPolygon Or Prim.InDimension Then Continue;
+            Try
+                Via := Prim;
                 Rule := Board.FindDominantRuleForObject(Via, eRule_RoutingViaStyle);
                 If Rule <> Nil Then
                 Begin
-                    Try
-                        PCBServer.SendMessageToRobots(Via.I_ObjectAddress, c_Broadcast,
-                            PCBM_BeginModify, c_NoEventData);
-                        Via.Size := Rule.PreferedWidth;
-                        Via.HoleSize := Rule.PreferedHoleWidth;
-                        PCBServer.SendMessageToRobots(Via.I_ObjectAddress, c_Broadcast,
-                            PCBM_EndModify, c_NoEventData);
-                        Changed := Changed + 1;
-                    Except End;
+                    PCBServer.SendMessageToRobots(Via.I_ObjectAddress, c_Broadcast,
+                        PCBM_BeginModify, c_NoEventData);
+                    Via.Size := Rule.PreferedWidth;
+                    Via.HoleSize := Rule.PreferedHoleWidth;
+                    PCBServer.SendMessageToRobots(Via.I_ObjectAddress, c_Broadcast,
+                        PCBM_EndModify, c_NoEventData);
+                    Changed := Changed + 1;
                 End;
-                Obj := Iter.NextPCBObject;
-            End;
-        Finally
-            Board.BoardIterator_Destroy(Iter);
+            Except End;
         End;
     Finally
         PCBServer.PostProcess;
@@ -10186,9 +10205,15 @@ Begin
                 B := Iter.FirstPCBObject;
                 While (B <> Nil) And (A = Nil) Do
                 Begin
-                    a1x := B.x1; a1y := B.y1; a2x := B.x2; a2y := B.y2;
-                    SegLen := Sqrt((a2x - a1x) * (a2x - a1x) + (a2y - a1y) * (a2y - a1y));
-                    If SegLen < MilsToCoord(MinLenMils) Then A := B;
+                    { Never delete a child primitive of a component footprint
+                      (silk ticks, courtyard lines), polygon hatch, or
+                      dimension -- only free routed copper. }
+                    If (Not B.InComponent) And (Not B.InPolygon) And (Not B.InDimension) Then
+                    Begin
+                        a1x := B.x1; a1y := B.y1; a2x := B.x2; a2y := B.y2;
+                        SegLen := Sqrt((a2x - a1x) * (a2x - a1x) + (a2y - a1y) * (a2y - a1y));
+                        If SegLen < MilsToCoord(MinLenMils) Then A := B;
+                    End;
                     B := Iter.NextPCBObject;
                 End;
             Finally
@@ -10240,7 +10265,11 @@ Begin
                         Begin
                             If (A.I_ObjectAddress <> B.I_ObjectAddress)
                                And (A.Layer = B.Layer) And (A.Width = B.Width)
-                               And (TrackNetNm(A) = TrackNetNm(B)) Then
+                               And (TrackNetNm(A) = TrackNetNm(B))
+                               { only merge free routed copper -- never child
+                                 primitives of footprints/polygons/dimensions }
+                               And (Not A.InComponent) And (Not A.InPolygon) And (Not A.InDimension)
+                               And (Not B.InComponent) And (Not B.InPolygon) And (Not B.InDimension) Then
                             Begin
                                 a1x := A.x1; a1y := A.y1; a2x := A.x2; a2y := A.y2;
                                 b1x := B.x1; b1y := B.y1; b2x := B.x2; b2y := B.y2;
@@ -10641,7 +10670,11 @@ Begin
     PCBServer.PreProcess;
     Try
         Target.PointCount := 2 * N;
-        Seg := TPolySegment;
+        { Materialize the record from an existing segment before writing its
+          fields -- `Seg := TPolySegment` does not initialize a record local,
+          and field writes on an unmaterialized record raise "Undeclared
+          identifier" at runtime. }
+        Seg := Target.Segments[0];
         Seg.Kind := ePolySegmentLine;
         For I := 0 To N - 1 Do
         Begin

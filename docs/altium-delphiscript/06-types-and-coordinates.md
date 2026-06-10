@@ -72,7 +72,11 @@ These property types are the `eXxx` ordinals catalogued in
   across the scripting boundary — rebuild the list instead.
 - **`TIniFile`** — read / write `.ini`-style config files.
 - **`TInterfaceList`** — a list of interface references (for collecting objects
-  during iteration before mutating, so the iterator stays valid).
+  during iteration before mutating, so the iterator stays valid). Do **not**
+  call `.Free` on one that held Altium design-object references: releasing
+  each held interface goes through the COM marshaller and faults in
+  `oleaut32` (access violation, read of `FFFFFFFF`). Leave the list for the
+  script host to clean up at script end.
 
 ---
 

@@ -5267,7 +5267,6 @@ Var
     Obj : ISch_GraphicalObject;
     Comp : ISch_Component;
     Impl : ISch_Implementation;
-    Link : ISch_GraphicalObject;
     Designator, FilePath, ModelName, Primitive : String;
     Found : Boolean;
 Begin
@@ -5309,17 +5308,12 @@ Begin
                     SetCompParamText(Comp, 'SimulationFile', FilePath);
 
                     { Also add a datafile link on the first implementation so   }
-                    { the file is tracked as a design asset.                     }
+                    { the file is tracked as a design asset. AddDataFileLink is }
+                    { a 3-arg PROCEDURE (EntityName, Location, FileKind), not a }
+                    { function returning a link object.                          }
                     Impl := GetFirstSchImplementation(Comp);
                     If Impl <> Nil Then
-                    Begin
-                        Try Link := Impl.AddDataFileLink; Except End;
-                        If Link <> Nil Then
-                        Begin
-                            Try Link.FileName := FilePath; Except End;
-                            Try Link.Kind := 'SimModel'; Except End;
-                        End;
-                    End;
+                        Try Impl.AddDataFileLink(ModelName, FilePath, 'SimModel'); Except End;
 
                     Found := True;
                 End;

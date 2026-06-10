@@ -1128,8 +1128,13 @@ Begin
         SetOwnerPart(Impl, Component);
         Component.AddSchObject(Impl);
         SchRegisterObject(Component, Impl);
+        { Bind the actual model file -- without this datafile link the
+          implementation names a model but points at nothing. 'PCB3DLIB' is
+          the 3D-model datafile kind (Altium SDK IntLibSearchDemo.pas). }
+        If ModelPath <> '' Then
+            Try Impl.AddDataFileLink(ModelName, ModelPath, 'PCB3DLIB'); Except End;
 
-        Result := BuildSuccessResponse(RequestId, '{"success":true,"model":"' + EscapeJsonString(ModelName) + '"}');
+        Result := BuildSuccessResponse(RequestId, '{"success":true,"model":"' + EscapeJsonString(ModelName) + '","model_path":"' + EscapeJsonString(ModelPath) + '"}');
     End
     Else
         Result := BuildErrorResponse(RequestId, 'LINK_FAILED', 'Failed to link 3D model');

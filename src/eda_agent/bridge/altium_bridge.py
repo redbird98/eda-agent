@@ -18,66 +18,17 @@ import uuid
 import asyncio
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
+
 from pathlib import Path
 from typing import Any, Optional
 from dataclasses import dataclass, field
 
-# Platform-specific file-locking primitive. Used to serialize bridge IPC
-# across SEPARATE Python processes (the MCP server and a standalone
-# `eda-agent dashboard` running side-by-side both write to
-# `workspace/request_<id>.json`; the Altium polling loop only handles
-# one request file at a time and a race could orphan a response). The
-# in-process threading.Lock further down covers the single-process case;
-# this file lock is what makes two-process coexistence safe.
-if sys.platform == "win32":
-    import msvcrt
-else:
-    import fcntl
-
-@contextmanager
-def _cross_process_lock(lock_path: Path):
-    """Exclusive file lock that works across processes.
-
-    The lock file lives in the workspace dir so both processes (which
-    already agree on workspace_dir via EDA_AGENT_WORKSPACE) target the
-    same path. Released automatically on context exit or process death.
-    """
-    try:
-        lock_path.parent.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        pass
-    fp = open(str(lock_path), "a+b")
-    try:
-        if sys.platform == "win32":
-            # LK_LOCK blocks until acquired (with ~10s retry by default);
-            # we want unbounded wait, so loop on LK_NBLCK with a small
-            # sleep to behave like a blocking acquire that respects
-            # KeyboardInterrupt.
-            while True:
-                try:
-                    msvcrt.locking(fp.fileno(), msvcrt.LK_NBLCK, 1)
-                    break
-                except OSError:
-                    time.sleep(0.01)
-        else:
-            fcntl.flock(fp.fileno(), fcntl.LOCK_EX)
-        yield
-    finally:
-        try:
-            if sys.platform == "win32":
-                # LK_UNLCK needs the file position back where the lock
-                # was acquired (offset 0).
-                try: fp.seek(0)
-                except OSError: pass
-                try: msvcrt.locking(fp.fileno(), msvcrt.LK_UNLCK, 1)
-                except OSError: pass
-            else:
-                fcntl.flock(fp.fileno(), fcntl.LOCK_UN)
-        except Exception:
-            pass
-        try: fp.close()
-        except OSError: pass
+# NOTE: no cross-process or publish lock is needed here. Each caller writes
+# its own request_<id>.json (staged to .json.tmp, then atomically renamed)
+# and polls its own response_<id>.json, so concurrent publishers -- threads
+# or separate processes -- never share a filename. A file-locking primitive
+# that once guarded a single shared pointer file was removed with that
+# design.
 
 from ..config import get_config
 from .process_manager import AltiumProcessManager
@@ -272,11 +223,6 @@ class AltiumBridge:
         self._keepalive_stop = threading.Event()
         self._attach_time: Optional[float] = None
         self._detach_hint_shown = False
-        # Serialise pointer-file writes so two threads (keep-alive + user)
-        # don't overwrite each other's request_pending.id between the body
-        # write and the pointer write. The polling itself is per-response-ID
-        # so the lock is only held for the brief request-publish step.
-        self._publish_lock = threading.Lock()
         # The heavy workspace prep -- pointer file, runtime config, and the
         # Pydantic-schema export -- only needs to run once. Doing it on every
         # _publish_request added 1s+ of disk I/O per IPC call. This flag
@@ -408,6 +354,14 @@ class AltiumBridge:
 
     def _start_keepalive(self) -> None:
         self._stop_keepalive()
+        # A keep-alive (re)start is also the natural moment to clear orphaned
+        # response files: it runs on attach AND whenever a dead thread is
+        # revived by the next tool call, so debris from a crashed call gets
+        # cleaned without waiting for a full re-attach.
+        try:
+            self._sweep_orphan_responses()
+        except Exception:
+            pass
         self._keepalive_stop.clear()
         self._keepalive_thread = threading.Thread(
             target=self._keepalive_loop, daemon=True, name="altium-keepalive"
@@ -431,6 +385,13 @@ class AltiumBridge:
         sentinel_interval = 1.0
         ticks_per_ping = max(1, int(self.KEEPALIVE_INTERVAL / sentinel_interval))
         tick = 0
+        # One slow/failed ping must not kill the keep-alive: a long tool call
+        # holds the serialized bridge past the 5s ping timeout, and a dead
+        # keep-alive lets Altium's 60s idle auto-shutdown stop the polling
+        # loop. Only give up after several consecutive failures, and say so
+        # loudly -- a silently dead keep-alive looks like a transport drop.
+        consecutive_failures = 0
+        max_failures = 3
         while not self._keepalive_stop.wait(sentinel_interval):
             if not self._attached:
                 break
@@ -440,9 +401,18 @@ class AltiumBridge:
                 tick = 0
                 try:
                     self.send_command("application.ping", timeout=5.0)
+                    consecutive_failures = 0
                 except Exception:
-                    logger.debug("Keep-alive ping failed, Altium may have stopped")
-                    break
+                    consecutive_failures += 1
+                    logger.debug(
+                        "Keep-alive ping failed (%d/%d)",
+                        consecutive_failures, max_failures)
+                    if consecutive_failures >= max_failures:
+                        logger.warning(
+                            "Keep-alive exiting after %d consecutive failed "
+                            "pings -- Altium polling loop is likely stopped. "
+                            "It restarts on the next tool call.", max_failures)
+                        break
 
     def _maybe_open_dashboard_sentinel(self) -> None:
         """If the Altium status form dropped open_dashboard.url, open it.
@@ -584,6 +554,22 @@ class AltiumBridge:
                             workspace_dir,
                             f"POLL_PARSE_ERR id={request_id[:8]} "
                             f"err={type(e).__name__} count={parse_errors}",
+                        )
+                    # A handful of parse errors is normal while Pascal is
+                    # mid-write; hundreds means the file is permanently
+                    # corrupt (Pascal died mid-write). Fail fast with an
+                    # accurate diagnosis instead of burning the rest of the
+                    # deadline and reporting "loop not running".
+                    if parse_errors >= 200:
+                        try:
+                            response_path.unlink()
+                        except OSError:
+                            pass
+                        raise AltiumCommandError(
+                            f"Response file for request {request_id[:8]} was "
+                            f"present but unparseable after {parse_errors} "
+                            f"attempts -- Altium likely crashed mid-write. "
+                            f"The corrupt file was removed; retry the call."
                         )
                     # Fall through to the deadline check so a permanently
                     # corrupt file cannot wedge us in an infinite parse loop.

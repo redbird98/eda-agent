@@ -816,6 +816,27 @@ def test_net_representation_power_wins_over_force_label() -> None:
     assert _net_representation(n, {"U1": "buck", "U2": "amp"}) == "port"
 
 
+def test_net_representation_force_wires_beats_everything() -> None:
+    """force_wires is the hard override: it beats the explicit power flag,
+    the conventional-rail name heuristic, and the cross-zone label rule."""
+    flagged = _net("RAW_5V", [("U1", "1"), ("U2", "1")],
+                   is_power=True, force_wires=True)
+    assert _net_representation(flagged, {"U1": "buck", "U2": "amp"}) == "wire"
+
+    # A net NAMED like a rail is normally ported even without the flag --
+    # force_wires is the planner's escape hatch from that heuristic.
+    named = _net("VCC", [("U1", "1"), ("U2", "1")], force_wires=True)
+    assert _net_representation(named, {"U1": "mcu", "U2": "amp"}) == "wire"
+
+
+def test_net_force_label_and_force_wires_are_mutually_exclusive() -> None:
+    import pytest
+
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        _net("X", [("U1", "1"), ("U2", "1")],
+             force_label=True, force_wires=True)
+
+
 def test_executor_cross_block_net_emits_label_per_pin(tmp_path: Path) -> None:
     """Integration: a net spanning two zones gets one label per pin, no wires
     between them.

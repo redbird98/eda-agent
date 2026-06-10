@@ -141,6 +141,11 @@ def _cross_net_meeting_counts(
     counted: Altium does not auto-junction those, so they are safe. The result
     maps each offending net to how many meetings it touches, so a caller can
     greedily fall the worst offender back to labels until none remain.
+
+    The count is an offender SCORE, not a count of distinct short locations:
+    a net that chains several wire endpoints through one meeting point scores
+    once per endpoint, deliberately ranking heavily-entangled nets first for
+    the greedy label-fallback.
     """
     from collections import defaultdict
 
@@ -267,7 +272,12 @@ def _net_representation(
     group. This keeps current behaviour for plans that don't define
     zones yet — the executor still wires them together. Once the planner
     assigns zones, the rule kicks in.
+
+    ``force_wires=True`` beats everything — including the rail-name
+    heuristic — and is the planner's explicit way to demand a drawn wire.
     """
+    if getattr(net, "force_wires", False):
+        return "wire"
     if _is_power_net(net) or _is_ground_net(net):
         return "port"
     if net.force_label:
