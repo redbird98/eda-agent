@@ -873,6 +873,13 @@ def main(argv: Optional[list[str]] = None) -> int:
         extractor = _build_live_extractor()
         mode = "live (Altium bridge)"
 
+    if args.host not in ("127.0.0.1", "localhost", "::1"):
+        print(
+            f"  WARNING: binding to {args.host} exposes this server (and the "
+            f"design data it serves) to the network. There is no "
+            f"authentication; use 127.0.0.1 unless you mean to share it.",
+        )
+
     app = create_app(plan, extractor, plan_name=args.plan.stem)
     print(f"\n  eda-agent vote: serving plan {args.plan.name}")
     print(f"  symbol mode:    {mode}")

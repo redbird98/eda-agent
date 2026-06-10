@@ -511,17 +511,29 @@ _IFACE_LIST_DECL = re.compile(
 def _scan_interfacelist_free(path: str, lines: list[str]) -> list[Finding]:
     findings: list[Finding] = []
     iface_vars: set[str] = set()
+    in_var = False
     for i, raw in enumerate(lines, 1):
         line = strip_comments_and_strings(raw)
         if re.match(r"^\s*(Function|Procedure)\b", line, re.IGNORECASE):
             iface_vars = set()
+            in_var = False
             continue
-        decl = _IFACE_LIST_DECL.search(line)
-        if decl:
-            names = line.split(":", 1)[0]
-            for name in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", names):
-                iface_vars.add(name)
+        if re.match(r"^\s*Var\b", line, re.IGNORECASE):
+            in_var = True
             continue
+        if re.match(r"^\s*Begin\b", line, re.IGNORECASE):
+            in_var = False
+            # fall through: Begin can't declare, but Free checks continue
+        # Only Var-block locals count. A TInterfaceList received as a
+        # PARAMETER is caller-owned -- freeing it would be the caller's
+        # bug, and flagging it here would be a false positive.
+        if in_var:
+            decl = _IFACE_LIST_DECL.search(line)
+            if decl:
+                names = line.split(":", 1)[0]
+                for name in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", names):
+                    iface_vars.add(name)
+                continue
         m = re.search(r"\b([A-Za-z_][A-Za-z0-9_]*)\.Free\b", line)
         if m and m.group(1) in iface_vars:
             findings.append(Finding(

@@ -36,14 +36,23 @@ def _default_workspace_dir() -> Path:
 
 
 def write_workspace_pointer(workspace_dir: Path) -> None:
-    """Write the workspace path to the pointer file that DelphiScript reads."""
+    """Write the workspace path to the pointer file that DelphiScript reads.
+
+    Encoding is ``mbcs`` (the Windows ANSI codepage) because that is what
+    DelphiScript's single-byte file read decodes -- ascii raised
+    UnicodeEncodeError for an accented user-profile path (and that error
+    escaped the OSError guard), while utf-8 would mojibake the same path
+    on the Pascal side.
+    """
     try:
         WORKSPACE_POINTER_FILE.parent.mkdir(parents=True, exist_ok=True)
         path_str = str(workspace_dir)
         if not path_str.endswith("\\"):
             path_str += "\\"
-        WORKSPACE_POINTER_FILE.write_text(path_str, encoding="ascii")
-    except (OSError, PermissionError):
+        WORKSPACE_POINTER_FILE.write_text(path_str, encoding="mbcs")
+    except (OSError, PermissionError, UnicodeEncodeError, LookupError):
+        # LookupError: "mbcs" only exists on Windows; the pointer file is
+        # meaningless elsewhere anyway.
         pass
 
 
@@ -99,7 +108,14 @@ class AltiumConfig(BaseModel):
     def ensure_workspace(self) -> None:
         """Create workspace dir, publish pointer file, persist runtime config,
         and emit JSON schemas for the Pascal side to validate against."""
-        self.workspace_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            self.workspace_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise OSError(
+                f"cannot create the IPC workspace at {self.workspace_dir} "
+                f"({exc}); every Altium tool call depends on this directory. "
+                f"Set EDA_AGENT_WORKSPACE to a writable location."
+            ) from exc
         write_workspace_pointer(self.workspace_dir)
         self.write_runtime_config()
         self._write_schemas()

@@ -1756,6 +1756,14 @@ def main(argv: Optional[list[str]] = None) -> int:
         stream=sys.stderr,
     )
 
+    if args.host not in ("127.0.0.1", "localhost", "::1"):
+        logger.warning(
+            "binding to %s exposes the dashboard (live design data, and "
+            "endpoints that drive Altium) to the network with no "
+            "authentication; use 127.0.0.1 unless you mean to share it.",
+            args.host,
+        )
+
     app = create_app(workspace_dir=args.workspace)
 
     # PID file so `eda-agent stop-dashboard` can find and kill us.

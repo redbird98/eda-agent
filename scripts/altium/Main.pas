@@ -13,7 +13,7 @@ Const
     // returns, mismatch means Altium is running a stale compiled script
     // (DelphiScript caches compiled units until the script project is
     // reopened or Altium is restarted).
-    SCRIPT_VERSION = '2026.06.10.1';
+    SCRIPT_VERSION = '2026.06.10.2';
 
     // Wire protocol version. Bumped whenever the request/response JSON shape
     // changes incompatibly. Python and Pascal must agree; mismatch returns
@@ -838,14 +838,31 @@ End;
 Function BuildErrorResponseDetailed(RequestId : String; ErrorCode : String;
                                     ErrorMsg : String; DetailsJson : String) : String;
 Var
-    EscMsg : String;
+    EscMsg, Ch, HexDigits : String;
+    I, O : Integer;
 Begin
-    // Inline minimal escape (EscapeJsonString not yet declared in build order)
-    EscMsg := StringReplace(ErrorMsg, '\', '\\', -1);
-    EscMsg := StringReplace(EscMsg, '"', '\"', -1);
-    EscMsg := StringReplace(EscMsg, #13, '\r', -1);
-    EscMsg := StringReplace(EscMsg, #10, '\n', -1);
-    EscMsg := StringReplace(EscMsg, #9, '\t', -1);
+    // Inline escape (EscapeJsonString is not yet declared in build order).
+    // Must also \u00XX-escape control and non-ASCII bytes: one raw byte
+    // >127 in an error message (an accented file path, say) makes the whole
+    // response unparseable on the Python side and hides the real error.
+    HexDigits := '0123456789abcdef';
+    EscMsg := '';
+    For I := 1 To Length(ErrorMsg) Do
+    Begin
+        Ch := Copy(ErrorMsg, I, 1);
+        O := Ord(Ch[1]);
+        If O = Ord('\') Then EscMsg := EscMsg + '\\'
+        Else If O = Ord('"') Then EscMsg := EscMsg + '\"'
+        Else If O = 13 Then EscMsg := EscMsg + '\r'
+        Else If O = 10 Then EscMsg := EscMsg + '\n'
+        Else If O = 9 Then EscMsg := EscMsg + '\t'
+        Else If (O < 32) Or (O >= 128) Then
+            EscMsg := EscMsg + '\u00'
+                + Copy(HexDigits, ((O Shr 4) And $F) + 1, 1)
+                + Copy(HexDigits, (O And $F) + 1, 1)
+        Else
+            EscMsg := EscMsg + Ch;
+    End;
     If DetailsJson = '' Then
         Result := '{"protocol_version":' + IntToStr(PROTOCOL_VERSION) +
                   ',"id":"' + RequestId + '","success":false,"data":null,' +

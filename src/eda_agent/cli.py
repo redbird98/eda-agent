@@ -121,6 +121,11 @@ def cmd_install_scripts(dest: Optional[str] = None, force: bool = False) -> int:
             return 1
         print(f"Target directory already exists and contains files:")
         print(f"  {dst}")
+        print(
+            "Overwriting replaces every deployed script -- edits made "
+            "directly in that directory (rather than in the repo) are lost. "
+            "Back them up first if you have any."
+        )
         try:
             reply = input("Overwrite existing files? [y/N] ").strip().lower()
         except EOFError:

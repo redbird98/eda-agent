@@ -80,6 +80,19 @@ End;"""
     assert _findings(lint, src) == []
 
 
+def test_ignores_interfacelist_parameter(lint):
+    """A TInterfaceList received as a parameter is caller-owned; freeing
+    it would be the caller's bug, not this function's -- no flag."""
+    src = """Procedure CollectStuff(Board : IPCB_Board;
+    L : TInterfaceList);
+Var
+    Names : TStringList;
+Begin
+    L.Free;
+End;"""
+    assert _findings(lint, src) == []
+
+
 def test_declarations_reset_per_function(lint):
     src = """Function First : String;
 Var

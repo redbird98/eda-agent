@@ -16,6 +16,7 @@ having to re-parse the board.
 from __future__ import annotations
 
 import html
+import logging
 import math
 from dataclasses import dataclass, field, replace
 from typing import Any, Iterable
@@ -336,8 +337,21 @@ def _compute_viewbox_and_root(geometry: dict[str, Any],
 # ---------------------------------------------------------------------------
 
 
+_color_fallbacks_logged: set[str] = set()
+
+
 def _color_for(layer: str, opt: PcbRenderOptions) -> str:
-    return opt.layer_colors.get(layer) or _DEFAULT_COLORS.get(layer, "#7f8c8d")
+    color = opt.layer_colors.get(layer)
+    if color:
+        return color
+    # Altium's real layer colors should always arrive in layer_colors; a
+    # fallback means the geometry payload lacked this layer. Log once per
+    # layer so a silently-miscolored render is traceable.
+    if layer not in _color_fallbacks_logged:
+        _color_fallbacks_logged.add(layer)
+        logging.getLogger("eda_agent.render").debug(
+            "no Altium color for layer %r; using default palette", layer)
+    return _DEFAULT_COLORS.get(layer, "#7f8c8d")
 
 
 def _embedded_style(opt: PcbRenderOptions) -> str:
@@ -771,6 +785,10 @@ def _arc_path(a: dict[str, Any]) -> str:
     ea = float(a.get("end", 0) or 0)
     if ea < sa:
         ea += 360.0
+    # Clamp oversized sweeps (start=10, end=400 -> 390 degrees): anything
+    # past a full turn IS a full circle, not a spiral the renderer can draw.
+    if ea - sa > 360.0:
+        ea = sa + 360.0
     sweep = ea - sa
     full = abs(sweep - 360.0) < 0.01 or sweep <= 0.01
     sa_r = math.radians(sa)
