@@ -37,6 +37,7 @@ SECTION_FILES: dict[str, tuple[str, ...]] = {
     "Schematic and general":  ("generic.py", "audit.py"),
     "PCB":                    ("pcb.py",),
     "Design agent":           ("design.py",),
+    "Routing":                ("route.py",),
 }
 
 

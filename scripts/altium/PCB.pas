@@ -10726,6 +10726,324 @@ Begin
 End;
 
 {..............................................................................}
+{ PCB_CreateNetsFromList - Create net objects for names not already on the   }
+{ board. First leg of the netlist-driven SCH->PCB bridge (ECO is not          }
+{ scriptable): footprints go down via place_components, nets are created      }
+{ here from the compiled netlist, then PCB_BindPadNets attaches each pad.     }
+{ Params: nets ('|'-separated net names; duplicates collapse to one net).     }
+{ Returns "created" and "existing" counts.                                     }
+{..............................................................................}
+
+Function PCB_CreateNetsFromList(Params : String; RequestId : String) : String;
+Var
+    Board : IPCB_Board;
+    Iter : IPCB_BoardIterator;
+    Net : IPCB_Net;
+    Existing : TStringList;
+    NetsStr, NetName, Remaining : String;
+    PipePos, CreatedCount, ExistingCount : Integer;
+Begin
+    Board := GetPCBBoardAnywhere;
+    If Board = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCB', 'No PCB document is active');
+        Exit;
+    End;
+
+    NetsStr := ExtractJsonValue(Params, 'nets');
+    If NetsStr = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAM', 'nets parameter required');
+        Exit;
+    End;
+
+    { One board scan for the names already present; FindNetByName per         }
+    { requested net would rescan the whole board N times.                      }
+    Existing := TStringList.Create;
+    Iter := Board.BoardIterator_Create;
+    Iter.AddFilter_ObjectSet(MkSet(eNetObject));
+    Iter.AddFilter_LayerSet(AllLayers);
+    Iter.AddFilter_Method(eProcessAll);
+    Net := Iter.FirstPCBObject;
+    While Net <> Nil Do
+    Begin
+        NetName := '';
+        Try NetName := Net.Name; Except End;
+        If (NetName <> '') And (Existing.IndexOf(NetName) < 0) Then
+            Existing.Add(NetName);
+        Net := Iter.NextPCBObject;
+    End;
+    Board.BoardIterator_Destroy(Iter);
+
+    CreatedCount := 0;
+    ExistingCount := 0;
+
+    PCBServer.PreProcess;
+    Try
+        Remaining := NetsStr;
+        While Remaining <> '' Do
+        Begin
+            PipePos := Pos('|', Remaining);
+            If PipePos > 0 Then
+            Begin
+                NetName := Copy(Remaining, 1, PipePos - 1);
+                Remaining := Copy(Remaining, PipePos + 1, Length(Remaining));
+            End
+            Else
+            Begin
+                NetName := Remaining;
+                Remaining := '';
+            End;
+            If NetName = '' Then Continue;
+
+            If Existing.IndexOf(NetName) >= 0 Then
+            Begin
+                ExistingCount := ExistingCount + 1;
+                Continue;
+            End;
+
+            Net := PCBServer.PCBObjectFactory(eNetObject, eNoDimension, eCreate_Default);
+            If Net = Nil Then Continue;
+            Net.Name := NetName;
+            Board.AddPCBObject(Net);
+            PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
+                PCBM_BoardRegisteration, Net.I_ObjectAddress);
+            { Track the new name so a duplicate later in the list counts as   }
+            { existing instead of creating a second net object.               }
+            Existing.Add(NetName);
+            CreatedCount := CreatedCount + 1;
+        End;
+    Finally
+        PCBServer.PostProcess;
+    End;
+
+    Existing.Free;
+    SaveDocByPath(Board.FileName);
+
+    Result := BuildSuccessResponse(RequestId,
+        '{"created":' + IntToStr(CreatedCount)
+        + ',"existing":' + IntToStr(ExistingCount) + '}');
+End;
+
+{ Find a placed component by designator with a board-iterator Name.Text scan. }
+{ Matches the field PCB_PlaceComponents stamps (Comp.Name.Text), so parts     }
+{ placed earlier in the same bridge session resolve too. Returns Nil if no    }
+{ component carries the designator.                                            }
+Function FindPCBComponentByDesignator(Board : IPCB_Board; Desig : String) : IPCB_Component;
+Var
+    Iter : IPCB_BoardIterator;
+    Comp : IPCB_Component;
+    NameStr : String;
+Begin
+    Result := Nil;
+    Iter := Board.BoardIterator_Create;
+    Iter.AddFilter_ObjectSet(MkSet(eComponentObject));
+    Iter.AddFilter_LayerSet(AllLayers);
+    Iter.AddFilter_Method(eProcessAll);
+    Comp := Iter.FirstPCBObject;
+    While Comp <> Nil Do
+    Begin
+        NameStr := '';
+        Try NameStr := Comp.Name.Text; Except End;
+        If NameStr = Desig Then
+        Begin
+            Result := Comp;
+            Break;
+        End;
+        Comp := Iter.NextPCBObject;
+    End;
+    Board.BoardIterator_Destroy(Iter);
+End;
+
+{..............................................................................}
+{ PCB_BindPadNets - Attach component pads to existing board nets. Second leg  }
+{ of the netlist-driven SCH->PCB bridge: run PCB_CreateNetsFromList first,    }
+{ then bind every (designator, pin, net) row of the compiled netlist here.    }
+{ Params: bindings ('~~'-separated ops, each 'designator=U1;pin=3;net=VCC',   }
+{ the NextBatchOp/GetBatchField grammar).                                      }
+{ Collect-then-modify per binding: the pad is located with a group iterator,  }
+{ the iterator destroyed, THEN the net written (modifying while the iterator  }
+{ walks corrupts it). Component and net lookups are cached: one designator    }
+{ scan per component (rows arrive grouped per part) and one FindNetByName     }
+{ per distinct net name.                                                       }
+{ Returns "bound"/"failed" counts plus missing_components / missing_pads /    }
+{ missing_nets name lists, each capped at 50 entries.                         }
+{..............................................................................}
+
+Function PCB_BindPadNets(Params : String; RequestId : String) : String;
+Var
+    Board : IPCB_Board;
+    Comp : IPCB_Component;
+    GrpIter : IPCB_GroupIterator;
+    Pad, PadFound : IPCB_Pad;
+    Net : IPCB_Net;
+    NetNames, MissingComps, MissingPads, MissingNets : TStringList;
+    NetRefs : TInterfaceList;
+    BindingsStr, Remaining, Op : String;
+    Desig, PinStr, NetName, PadName, LastDesig : String;
+    CompsJson, PadsJson, NetsJson : String;
+    LastResolved : Boolean;
+    Bound, Failed, NetIdx, I : Integer;
+Begin
+    Board := GetPCBBoardAnywhere;
+    If Board = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCB', 'No PCB document is active');
+        Exit;
+    End;
+
+    BindingsStr := ExtractJsonValue(Params, 'bindings');
+    If BindingsStr = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAM', 'bindings parameter required');
+        Exit;
+    End;
+
+    NetNames := TStringList.Create;
+    MissingComps := TStringList.Create;
+    MissingPads := TStringList.Create;
+    MissingNets := TStringList.Create;
+    NetRefs := CreateObject(TInterfaceList);
+
+    Comp := Nil;
+    LastDesig := '';
+    LastResolved := False;
+    Bound := 0;
+    Failed := 0;
+
+    PCBServer.PreProcess;
+    Try
+        Remaining := BindingsStr;
+        While Length(Remaining) > 0 Do
+        Begin
+            Op := NextBatchOp(Remaining);
+            If Op = '' Then Continue;
+
+            Desig := GetBatchField(Op, 'designator');
+            PinStr := GetBatchField(Op, 'pin');
+            NetName := GetBatchField(Op, 'net');
+            If (Desig = '') Or (PinStr = '') Or (NetName = '') Then
+            Begin
+                Failed := Failed + 1;
+                Continue;
+            End;
+
+            { Component cache: re-resolve only when the designator changes.   }
+            { A failed resolution is cached too, so a missing part with 40    }
+            { pins costs one scan, not 40.                                    }
+            If Desig <> LastDesig Then
+            Begin
+                Comp := FindPCBComponentByDesignator(Board, Desig);
+                LastDesig := Desig;
+                LastResolved := (Comp <> Nil);
+            End;
+            If Not LastResolved Then
+            Begin
+                Failed := Failed + 1;
+                If MissingComps.IndexOf(Desig) < 0 Then MissingComps.Add(Desig);
+                Continue;
+            End;
+
+            { Net cache: one FindNetByName board scan per distinct name,      }
+            { with a negative cache so absent nets don't rescan either.       }
+            Net := Nil;
+            NetIdx := NetNames.IndexOf(NetName);
+            If NetIdx >= 0 Then
+                Net := NetRefs.Items[NetIdx]
+            Else If MissingNets.IndexOf(NetName) < 0 Then
+            Begin
+                Net := FindNetByName(Board, NetName);
+                If Net <> Nil Then
+                Begin
+                    NetNames.Add(NetName);
+                    NetRefs.Add(Net);
+                End
+                Else
+                    MissingNets.Add(NetName);
+            End;
+            If Net = Nil Then
+            Begin
+                Failed := Failed + 1;
+                Continue;
+            End;
+
+            { Locate the pad, destroy the iterator, then write the net.      }
+            PadFound := Nil;
+            GrpIter := Comp.GroupIterator_Create;
+            GrpIter.AddFilter_ObjectSet(MkSet(ePadObject));
+            Pad := GrpIter.FirstPCBObject;
+            While Pad <> Nil Do
+            Begin
+                PadName := '';
+                Try PadName := Pad.Name; Except End;
+                If PadName = PinStr Then
+                Begin
+                    PadFound := Pad;
+                    Break;
+                End;
+                Pad := GrpIter.NextPCBObject;
+            End;
+            Comp.GroupIterator_Destroy(GrpIter);
+
+            If PadFound = Nil Then
+            Begin
+                Failed := Failed + 1;
+                If MissingPads.IndexOf(Desig + '.' + PinStr) < 0 Then
+                    MissingPads.Add(Desig + '.' + PinStr);
+                Continue;
+            End;
+
+            PCBServer.SendMessageToRobots(PadFound.I_ObjectAddress, c_Broadcast,
+                PCBM_BeginModify, c_NoEventData);
+            PadFound.Net := Net;
+            PCBServer.SendMessageToRobots(PadFound.I_ObjectAddress, c_Broadcast,
+                PCBM_EndModify, c_NoEventData);
+            Bound := Bound + 1;
+        End;
+    Finally
+        PCBServer.PostProcess;
+    End;
+
+    CompsJson := '';
+    For I := 0 To MissingComps.Count - 1 Do
+    Begin
+        If I >= 50 Then Break;
+        If CompsJson <> '' Then CompsJson := CompsJson + ',';
+        CompsJson := CompsJson + '"' + EscapeJsonString(MissingComps[I]) + '"';
+    End;
+    PadsJson := '';
+    For I := 0 To MissingPads.Count - 1 Do
+    Begin
+        If I >= 50 Then Break;
+        If PadsJson <> '' Then PadsJson := PadsJson + ',';
+        PadsJson := PadsJson + '"' + EscapeJsonString(MissingPads[I]) + '"';
+    End;
+    NetsJson := '';
+    For I := 0 To MissingNets.Count - 1 Do
+    Begin
+        If I >= 50 Then Break;
+        If NetsJson <> '' Then NetsJson := NetsJson + ',';
+        NetsJson := NetsJson + '"' + EscapeJsonString(MissingNets[I]) + '"';
+    End;
+
+    NetNames.Free;
+    MissingComps.Free;
+    MissingPads.Free;
+    MissingNets.Free;
+    { No NetRefs.Free -- releasing a TInterfaceList of board interface refs   }
+    { faults in oleaut32; leave it to the script host.                        }
+
+    SaveDocByPath(Board.FileName);
+
+    Result := BuildSuccessResponse(RequestId,
+        '{"bound":' + IntToStr(Bound)
+        + ',"failed":' + IntToStr(Failed)
+        + ',"missing_components":[' + CompsJson + ']'
+        + ',"missing_pads":[' + PadsJson + ']'
+        + ',"missing_nets":[' + NetsJson + ']}');
+End;
+
+{..............................................................................}
 { HandlePCBCommand - Route PCB actions to handlers                            }
 {..............................................................................}
 
@@ -10733,6 +11051,8 @@ Function HandlePCBCommand(Action : String; Params : String; RequestId : String) 
 Begin
     Case Action Of
         'get_nets':                Result := PCB_GetNets(Params, RequestId);
+        'create_nets_from_list':   Result := PCB_CreateNetsFromList(Params, RequestId);
+        'bind_pad_nets':           Result := PCB_BindPadNets(Params, RequestId);
         'delete_nets':             Result := PCB_DeleteNets(Params, RequestId);
         'get_net_classes':         Result := PCB_GetNetClasses(Params, RequestId);
         'create_net_class':        Result := PCB_CreateNetClass(Params, RequestId);

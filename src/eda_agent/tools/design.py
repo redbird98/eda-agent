@@ -41,6 +41,14 @@ from ..design.component_values import (
 )
 from ..design.discipline import get_discipline
 from ..design.executor import execute_plan_from_json
+from ..design.fab_profile import load_fab_profile
+from ..design.hierarchy import apply_hierarchy, plan_hierarchy
+from ..design.requirement import (
+    DesignRequirement,
+    summarize_requirement,
+    validate_requirement,
+)
+from ..design.rule_synthesis import synthesize_rules
 from ..design.inventory import LibraryInventory, snapshot_live
 from ..design.learner import learn_from_layout
 from ..design.orchestrator import (
@@ -1161,3 +1169,247 @@ def register_design_tools(mcp) -> None:
         """
         report = run_validate(project_path)
         return report.to_dict()
+
+    @mcp.tool()
+    async def design_validate_requirement(
+        requirement: dict,
+    ) -> dict[str, Any]:
+        """Validate a structured DesignRequirement before planning starts.
+
+        Stage 1 of the autonomous flow (requirement capture & architecture,
+        reference/autonomy-roadmap.md): capture what the board must do as a
+        ``DesignRequirement`` dict, run this gate, and only move on to part
+        selection / DesignPlan construction when it returns ok. Every fact
+        the requirement does NOT state goes into ``open_questions`` as a
+        question for the user -- it is never guessed -- and validation fails
+        while any question remains unresolved.
+
+        Checks beyond the schema: unresolved open questions, no outputs, no
+        power source, inverted temperature / IO-voltage ranges, comms IO
+        without a protocol, and supply rails or power outputs whose
+        magnitude exceeds every stated power input (a boost / inverting
+        stage the user must confirm). Pure Python, no Altium.
+
+        Args:
+            requirement: DesignRequirement as a JSON object/dict. Units are
+                SI with the unit in the field name (``voltage_v``,
+                ``current_a``, ``temp_min_c``); mechanical dimensions are
+                MILLIMETRES (``board_size_mm``, ``height_max_mm``).
+
+        Returns:
+            ``{"ok": True, "issues": [], "summary": "..."}`` when the
+            requirement is planning-ready (``summary`` is the labelled-line
+            block to embed in ``DesignPlan.summary``), or
+            ``{"ok": False, "issues": [...]}`` / ``{"ok": False,
+            "errors": [...]}`` (schema problems) listing what to resolve.
+        """
+        try:
+            req = DesignRequirement.model_validate(requirement)
+        except ValidationError as exc:
+            return {
+                "ok": False,
+                "errors": [
+                    f"{'.'.join(str(p) for p in err['loc'])}: {err['msg']}"
+                    for err in exc.errors()
+                ],
+            }
+        result = validate_requirement(req)
+        result["summary"] = summarize_requirement(req)
+        return result
+
+    @mcp.tool()
+    async def design_load_fab_profile(profile: dict) -> dict[str, Any]:
+        """Validate a fab capability profile and echo the normalized form.
+
+        Stage 8 of the autonomous flow (rules & stackup,
+        reference/autonomy-roadmap.md): before synthesizing design rules,
+        the fab's published limits are captured as a ``FabProfile`` dict --
+        transcribed from the fab's capability page (cite it in ``source``),
+        NEVER recalled from memory. This tool is the schema gate: it
+        validates the dict (all dimensions MILS, copper weight oz/ft^2,
+        stackups with copper outer layers and no adjacent copper plies) and
+        returns the normalized profile for ``design_synthesize_rules``.
+
+        Args:
+            profile: FabProfile as a JSON object/dict: ``name``, optional
+                ``source`` citation, ``copper_layer_counts``, the seven
+                ``min_*_mils`` floors, and optional ``stackups``.
+
+        Returns:
+            ``{"ok": True, "profile": {...}, "stackups": [names],
+            "summary": "..."}`` or ``{"ok": False, "reason": "..."}``.
+        """
+        loaded = load_fab_profile(profile)
+        if not loaded["ok"]:
+            return loaded
+        prof = loaded["profile"]
+        return {
+            "ok": True,
+            "profile": prof.model_dump(),
+            "stackups": [s.name for s in prof.stackups],
+            "summary": (
+                f"{prof.name}: {len(prof.stackups)} stackup(s), copper "
+                f"layer counts {prof.copper_layer_counts}, min track "
+                f"{prof.min_track_mils:g} / gap {prof.min_gap_mils:g} / "
+                f"drill {prof.min_drill_mils:g} mils."
+            ),
+        }
+
+    @mcp.tool()
+    async def design_synthesize_rules(
+        profile: dict,
+        plan_json: Union[str, dict] = "",
+        net_class_map: Optional[dict] = None,
+        options: Optional[dict] = None,
+    ) -> dict[str, Any]:
+        """Synthesize PCB design rules + stackup ops from a fab profile.
+
+        Stage 8 of the autonomous flow (rules & stackup,
+        reference/autonomy-roadmap.md): turn the validated fab profile, the
+        plan's net classes, and a few board-level targets into the concrete
+        ``pcb_create_design_rule`` and ``pcb_modify_layer`` parameter dicts,
+        dispatched verbatim after ``pcb_create_net_class`` creates classes
+        named after the synthesized groups. Every number traces to a
+        profile field or a verified calculator (IPC-2221 width inverse,
+        IPC-2141 impedance inverse); a rule whose inputs are missing is
+        skipped with a note, never guessed. Pure Python, no Altium.
+
+        Args:
+            profile: FabProfile as a dict (see ``design_load_fab_profile``).
+            plan_json: Optional DesignPlan (JSON string or dict). When given
+                and ``net_class_map`` is not, net classes are derived from
+                the plan (flags + net roles, naming-agnostic).
+            net_class_map: Optional explicit ``{net_name: class}`` map;
+                takes precedence over ``plan_json`` derivation.
+            options: Optional synthesis targets: ``stackup`` (name, default
+                first), ``class_current_a`` ({class: amps} -> per-class
+                width rules), ``delta_t_c``, ``track_margin``, ``layer``,
+                ``copper_oz``, ``geometry``, ``diff_pair_target_ohms``
+                (required for differential rules),
+                ``diff_pair_spacing_mils``.
+
+        Returns:
+            ``{"ok": True, "rules": [...], "stackup_ops": [...],
+            "notes": [...], "stackup": name|None, "net_classes": {...}}``
+            -- rule values are INTEGER MILS -- or
+            ``{"ok": False, "reason": "..."}``.
+        """
+        ncm: dict = {}
+        if net_class_map is not None:
+            ncm = net_class_map
+        elif plan_json:
+            payload = plan_json if isinstance(plan_json, dict) else None
+            if payload is None:
+                try:
+                    payload = json.loads(plan_json)
+                except json.JSONDecodeError as exc:
+                    return {"ok": False, "reason": f"invalid plan JSON: {exc}"}
+            try:
+                plan = DesignPlan.model_validate(payload)
+            except ValidationError as exc:
+                return {"ok": False, "reason": f"invalid plan: {exc}"}
+            ncm = classify_nets(plan).by_net
+
+        result = synthesize_rules(profile, ncm, options)
+        if not result["ok"]:
+            return result
+        result["net_classes"] = ncm
+        return result
+
+    @mcp.tool()
+    async def design_plan_hierarchy(
+        plan_json: Union[str, dict],
+        max_parts_per_sheet: int = 20,
+    ) -> dict[str, Any]:
+        """Propose a multi-sheet hierarchy for a dense DesignPlan.
+
+        Stage 6 of the autonomous flow (schematic emit,
+        reference/autonomy-roadmap.md): a plan past ~20 parts stops fitting
+        one readable sheet and dense single sheets are the known short-risk
+        regime. This tool partitions the parts by signal connectivity
+        (min-cut, zones kept atomic), names each child sheet from its
+        dominant zone role, derives the inter-sheet ports from the signal
+        nets the cut severs (power/ground rails are continuous through
+        power ports and never become sheet entries), and emits the
+        top-sheet op list in the exact parameter shapes of
+        ``sch_place_sheet_symbol`` / ``sch_place_sheet_entry`` /
+        ``sch_generate_toc``. Apply the result to the plan with
+        ``design_apply_hierarchy`` before ``design_execute_plan``.
+        Deterministic; pure Python, no Altium.
+
+        Args:
+            plan_json: DesignPlan as a JSON string or dict.
+            max_parts_per_sheet: Split threshold (default 20). At or below
+                it the plan stays single-sheet (``split=False``).
+
+        Returns:
+            ``{"ok": True, "split": bool, "top_sheet": str, "sheets":
+            [{name, refdes, zones, part_count}], "ports": [{net,
+            from_sheet, to_sheet, io_type}], "top_sheet_ops": [{tool,
+            params}], "cut_nets": int}`` (op coordinates are MILS) or
+            ``{"ok": False, "reason": "..."}``.
+        """
+        payload = plan_json if isinstance(plan_json, dict) else None
+        if payload is None:
+            try:
+                payload = json.loads(plan_json)
+            except json.JSONDecodeError as exc:
+                return {"ok": False, "reason": f"invalid plan JSON: {exc}"}
+        return plan_hierarchy(payload, max_parts_per_sheet=max_parts_per_sheet)
+
+    @mcp.tool()
+    async def design_apply_hierarchy(
+        plan_json: Union[str, dict],
+        hierarchy: dict,
+    ) -> dict[str, Any]:
+        """Rewrite a DesignPlan onto the sheets a hierarchy proposes.
+
+        Stage 6 of the autonomous flow (schematic emit,
+        reference/autonomy-roadmap.md), the second half of the hierarchy
+        step: take the result of ``design_plan_hierarchy`` and produce a
+        NEW plan with ``sheets`` = [top sheet, *child sheets], every
+        part's ``sheet`` re-homed per the hierarchy, and every zone moved
+        with its parts (part-less zones park on the top sheet). The input
+        plan is never mutated; a non-split hierarchy returns the plan
+        unchanged. Feed the returned plan to ``design_validate_plan`` and
+        then ``design_execute_plan``; emit the hierarchy's
+        ``top_sheet_ops`` separately to draw the top sheet. Pure Python.
+
+        Args:
+            plan_json: DesignPlan as a JSON string or dict.
+            hierarchy: The dict returned by ``design_plan_hierarchy``.
+
+        Returns:
+            ``{"ok": True, "plan": {...rewritten DesignPlan...},
+            "sheets": [names], "summary": "..."}`` or
+            ``{"ok": False, "reason": "..."}`` on a malformed plan or
+            hierarchy.
+        """
+        payload = plan_json if isinstance(plan_json, dict) else None
+        if payload is None:
+            try:
+                payload = json.loads(plan_json)
+            except json.JSONDecodeError as exc:
+                return {"ok": False, "reason": f"invalid plan JSON: {exc}"}
+        try:
+            new_plan = apply_hierarchy(payload, hierarchy)
+        except ValidationError as exc:
+            return {"ok": False, "reason": f"invalid plan: {exc}"}
+        except ValueError as exc:
+            return {"ok": False, "reason": str(exc)}
+        sheet_names = [s.name for s in new_plan.sheets]
+        per_sheet = {
+            name: sum(1 for p in new_plan.parts if p.sheet == name)
+            for name in sheet_names
+        }
+        return {
+            "ok": True,
+            "plan": new_plan.model_dump(mode="json"),
+            "sheets": sheet_names,
+            "summary": (
+                f"{len(new_plan.parts)} part(s) across "
+                f"{len(sheet_names)} sheet(s): "
+                + ", ".join(f"{n}={per_sheet[n]}" for n in sheet_names)
+                + "."
+            ),
+        }

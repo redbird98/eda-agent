@@ -663,6 +663,33 @@ def build_best_canvas_from_plan(
                 "force-directed layout alternative failed and was skipped: "
                 f"{type(fd_exc).__name__}: {fd_exc}"),
         ))
+        ic_off = {}
+
+    # Pin-side-aware Sugiyama candidate. The base Sugiyama layers by hop
+    # distance only, so a timing network can land in the column RIGHT of
+    # its IC while wiring to LEFT-side pins (every wire loops around the
+    # body). With the symbol pin offsets, small parts move to the side of
+    # the IC their pins sit on; scored like every other variant, so it
+    # only wins when the geometry actually improves.
+    try:
+        if ic_off:
+            from eda_agent.design.layout import compute_layout as _cl2
+            ps_placed = _cl2(plan, engine="sugiyama", ic_pin_offsets=ic_off)
+            ps_cand = build_canvas_from_plan(
+                plan, extractor,
+                layout_overrides={p.refdes: p for p in ps_placed},
+                placement_hints=placement_hints, port_hints=port_hints,
+                strict_shorts=strict_shorts,
+            )
+            if _cand_key(ps_cand) < _cand_key(base):
+                base, base_label = ps_cand, "pin_side_sugiyama"
+    except Exception as ps_exc:
+        base.notes.append(PipelineNote(
+            severity="warning",
+            text=(
+                "pin-side sugiyama alternative failed and was skipped: "
+                f"{type(ps_exc).__name__}: {ps_exc}"),
+        ))
 
     if not base.ok or not base.canvas.instances:
         return base

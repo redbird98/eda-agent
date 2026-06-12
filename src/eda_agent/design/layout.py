@@ -405,7 +405,10 @@ def _apply_rotations(
     return out
 
 
-def _sugiyama_to_placed(plan: DesignPlan) -> list[PlacedPart]:
+def _sugiyama_to_placed(
+    plan: DesignPlan,
+    ic_pin_offsets: dict[str, dict[str, tuple[int, int]]] | None = None,
+) -> list[PlacedPart]:
     """Sugiyama placement adapted to the ``PlacedPart`` type.
 
     The Sugiyama module returns its own ``SugiyamaPlacement`` records
@@ -421,7 +424,7 @@ def _sugiyama_to_placed(plan: DesignPlan) -> list[PlacedPart]:
             y_mils=s.y_mils,
             rotation=s.rotation,
         )
-        for s in sugiyama_layout(plan)
+        for s in sugiyama_layout(plan, ic_pin_offsets)
     ]
 
 
@@ -471,9 +474,9 @@ def compute_layout(
     if engine == "force_directed":
         placed = _force_directed_layout(plan, ic_pin_offsets, **_fd_kw)
     elif engine == "sugiyama":
-        placed = _sugiyama_to_placed(plan)
+        placed = _sugiyama_to_placed(plan, ic_pin_offsets)
     elif has_anchors(plan):
-        placed = _sugiyama_to_placed(plan)
+        placed = _sugiyama_to_placed(plan, ic_pin_offsets)
     else:
         placed = _force_directed_layout(plan, ic_pin_offsets, **_fd_kw)
 

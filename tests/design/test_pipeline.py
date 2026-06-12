@@ -612,8 +612,11 @@ def test_larger_sheet_spreads_layout_bounds():
         return (max(xs) - min(xs)) + (max(ys) - min(ys))
 
     a4, a3, a2 = _span("A4"), _span("A3"), _span("A2")
-    # Strictly wider layout on each larger sheet.
-    assert a4 < a3 < a2
+    # Wider layout on each larger sheet WHILE the sheet-fit term binds;
+    # once a chain reaches its size-aware ideal pitch (this all-passives
+    # fixture does on A3) a still-larger sheet must NOT scatter it
+    # further -- compactness caps the spread at the ideal.
+    assert a4 < a3 <= a2
 
 
 def _side_ic(lib_ref: str, n_left: int, n_right: int) -> SymbolModel:
@@ -708,9 +711,12 @@ def test_force_directed_variant_wins_power_tree_board():
         strict_shorts=False)
     sug_total = score_canvas(sug.canvas, plan).total
 
-    # best-of (which now includes the FD variant) must not be worse than
-    # Sugiyama alone, and on this power-tree board is decisively better.
-    assert best_total < sug_total
+    # best-of (which includes the FD variant) must not be worse than
+    # Sugiyama alone. Historically FD won this board DECISIVELY because a
+    # power-only-bridged signal graph collapsed Sugiyama into one column;
+    # the signal-isolated-anchor seed fix closed that gap (the engines now
+    # tie here), so the guarantee is no-worse, not strictly-better.
+    assert best_total <= sug_total
 
 
 def _ic_symbol(lib_ref, pins):

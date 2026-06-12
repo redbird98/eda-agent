@@ -64,6 +64,7 @@ from typing import Optional
 import networkx as nx
 
 from eda_agent.design.canvas import sheet_dimensions
+from eda_agent.design.force_directed import _bbox_half, _pin_count_per_part
 from eda_agent.design.plan import DesignPlan
 
 
@@ -75,11 +76,25 @@ SHEET_MAX_X_MILS = 10500
 SHEET_MAX_Y_MILS = 7500
 SNAP_GRID_MILS = 100
 
-# Layer/row spacing within the sheet. The actual spacing is whichever
-# is smaller of these constants and "available sheet / count" so a
-# 4-layer plan with 5 rows-per-layer still fits.
-LAYER_SPACING_MILS = 2000   # x-step between layers
-ROW_SPACING_MILS = 1400     # y-step between rows within one layer
+# Layer/row spacing within the sheet. These are CEILINGS: the actual
+# spacing is size-aware (derived from the bbox of the parts actually in
+# each column, plus a wiring channel) and never exceeds these values,
+# so a column of 0402 passives packs ~1300 mils from its neighbour
+# while a column holding a 100-pin MCU keeps the full berth. Fixed
+# pitches here were the root cause of the "8 parts scattered over
+# 3000x7000 mils" spread. Both axes still shrink further to fit the
+# sheet ("available / count") when a design is large.
+LAYER_SPACING_MILS = 2000   # max x-step between layers
+ROW_SPACING_MILS = 1400     # max y-step between rows within one layer
+COLUMN_CHANNEL_MILS = 400   # wiring channel kept clear between columns
+ROW_SLACK_MILS = 100        # extra grid step between stacked bboxes
+
+# Column folding: a layer with more than this many rows of SMALL parts
+# (passives / 3-pin, never ICs) folds into two sub-columns, halving the
+# tower height. A 5-part timing chain as one 5000-mil column was the
+# single worst shape in the benchmark renders -- professional sheets
+# fold such chains into a 2-D block.
+FOLD_MAX_ROWS = 4
 
 
 _INPUT_ROLES = frozenset({"input_conn", "vin_conn", "power_in", "input"})
@@ -211,8 +226,21 @@ def _assign_layers(
         elif role == "output":
             outputs.append(p.refdes)
 
-    # No role anchor: seed the BFS from a structural flow endpoint so a
-    # chain/tree still lays out left-to-right instead of degenerating.
+    # A power-only anchor (a 2-pin VIN connector whose nets are all
+    # power/ground, say) has no signal edges: BFS from it discovers
+    # nothing, the disconnected-middle rule then computes middle=0, and
+    # EVERY part collapses into a single layer-0 column. Only anchors
+    # that actually touch the signal graph may seed the BFS; isolated
+    # anchors keep their column by decree afterwards (inputs leftmost,
+    # outputs rightmost).
+    iso_inputs = [r for r in inputs if r not in G or G.degree(r) == 0]
+    iso_outputs = [r for r in outputs if r not in G or G.degree(r) == 0]
+    inputs = [r for r in inputs if r in G and G.degree(r) > 0]
+    outputs = [r for r in outputs if r in G and G.degree(r) > 0]
+
+    # No connected role anchor: seed the BFS from a structural flow
+    # endpoint so a chain/tree still lays out left-to-right instead of
+    # degenerating.
     if not inputs and not outputs:
         anchor = _structural_anchor(plan, edges)
         if anchor is not None:
@@ -281,6 +309,15 @@ def _assign_layers(
         target_layer = max(other_max, output_bfs_max)
         for r in outputs:
             layer[r] = target_layer
+
+    # Signal-isolated role anchors (filtered from the BFS seeds above)
+    # land on their decreed edge: inputs leftmost, outputs rightmost.
+    for r in iso_inputs:
+        layer[r] = 0
+    if iso_outputs:
+        rightmost = max(layer.values(), default=0)
+        for r in iso_outputs:
+            layer[r] = rightmost
 
     return layer
 
@@ -443,14 +480,47 @@ def _assign_coordinates(
     sheet_width = max_x - SHEET_ORIGIN_X_MILS
     sheet_height = max_y - SHEET_ORIGIN_Y_MILS
     n_layers = len(layer_indices)
-    layer_x_step = (
-        min(LAYER_SPACING_MILS, sheet_width // max(1, n_layers - 1))
-        if n_layers > 1 else 0
-    )
+
+    # Size-aware column pitch: each gap is the two adjacent columns'
+    # widest half-bboxes plus a wiring channel, capped at the legacy
+    # LAYER_SPACING_MILS (never wider than before, tighter when the
+    # columns hold small parts). Uniform per column pair -- per-PART
+    # spacing was trialled and rejected (shove wall-clamp interaction,
+    # see docstring). If the cumulative width overflows the sheet, all
+    # gaps scale down proportionally (the legacy fit behaviour).
+    pin_count = _pin_count_per_part(plan)
+    half_w: dict[int, int] = {}
+    for l in layer_indices:
+        half_w[l] = max(
+            (_bbox_half(pin_count.get(r, 2)) for r in by_layer[l]),
+            default=_bbox_half(2),
+        )
+
+    # Fold decision per layer: many rows, all small parts. fold_dx is the
+    # second sub-column's x offset; the layer's effective width for the
+    # column-gap computation grows by it.
+    folded: dict[int, bool] = {}
+    fold_dx: dict[int, int] = {}
+    for l in layer_indices:
+        small = half_w[l] <= _bbox_half(3)
+        folded[l] = small and len(by_layer[l]) > FOLD_MAX_ROWS
+        fold_dx[l] = (2 * half_w[l] + COLUMN_CHANNEL_MILS // 2) if folded[l] else 0
+
+    gaps: list[int] = []
+    for prev, cur in zip(layer_indices, layer_indices[1:]):
+        ideal = (half_w[prev] + fold_dx[prev]
+                 + half_w[cur] + COLUMN_CHANNEL_MILS)
+        gaps.append(min(LAYER_SPACING_MILS + fold_dx[prev], ideal))
+    total_width = sum(gaps)
+    if total_width > sheet_width and total_width > 0:
+        scale = sheet_width / total_width
+        gaps = [max(SNAP_GRID_MILS, int(g * scale)) for g in gaps]
 
     layer_x: dict[int, int] = {}
+    x = SHEET_ORIGIN_X_MILS
     for i, l in enumerate(layer_indices):
-        x = SHEET_ORIGIN_X_MILS + i * layer_x_step
+        if i > 0:
+            x += gaps[i - 1]
         layer_x[l] = (x // SNAP_GRID_MILS) * SNAP_GRID_MILS
 
     refdes_to_sheet = {p.refdes: p.sheet for p in plan.parts}
@@ -461,17 +531,30 @@ def _assign_coordinates(
         n = len(nodes)
         if n == 0:
             continue
-        y_step = min(ROW_SPACING_MILS, sheet_height // max(1, n))
-        total_height = (n - 1) * y_step
+        # Size-aware row pitch: enough for the column's tallest bbox
+        # plus one grid of slack, capped at the legacy ROW_SPACING_MILS
+        # and still shrinking to fit the sheet when the column is long.
+        # A folded column advances y every TWO entries (consecutive
+        # barycenter rows sit side by side), halving the tower height.
+        ideal_step = 2 * half_w[l] + ROW_SLACK_MILS
+        n_rows = (n + 1) // 2 if folded[l] else n
+        y_step = min(ROW_SPACING_MILS, ideal_step,
+                     max(SNAP_GRID_MILS, sheet_height // max(1, n_rows)))
+        total_height = (n_rows - 1) * y_step
         y_start = SHEET_ORIGIN_Y_MILS + (sheet_height - total_height) // 2
         for row, refdes in enumerate(nodes):
-            y = y_start + row * y_step
+            if folded[l]:
+                y = y_start + (row // 2) * y_step
+                x_part = layer_x[l] + (row % 2) * fold_dx[l]
+            else:
+                y = y_start + row * y_step
+                x_part = layer_x[l]
             y_snapped = (y // SNAP_GRID_MILS) * SNAP_GRID_MILS
             placements.append(
                 SugiyamaPlacement(
                     refdes=refdes,
                     sheet=refdes_to_sheet.get(refdes, "main"),
-                    x_mils=layer_x[l],
+                    x_mils=(x_part // SNAP_GRID_MILS) * SNAP_GRID_MILS,
                     y_mils=y_snapped,
                     layer=l,
                     row=row,
@@ -481,16 +564,83 @@ def _assign_coordinates(
     return placements
 
 
-def sugiyama_layout(plan: DesignPlan) -> list[SugiyamaPlacement]:
+def _pin_side_adjust(
+    plan: DesignPlan,
+    layer: dict[str, int],
+    ic_pin_offsets: dict[str, dict[str, tuple[int, int]]],
+) -> dict[str, int]:
+    """Move small parts to the side of the IC their pins actually sit on.
+
+    BFS layering knows hop distance but not symbol geometry, so the 555's
+    timing network can land in the column RIGHT of the IC while wiring to
+    its LEFT-side pins -- every wire then loops around the IC body. For
+    each 2-3 pin part whose signal nets connect to exactly ONE IC with
+    known pin offsets, compute the mean x-offset of the IC pins it wires
+    to: negative -> the part belongs one column left of the IC, positive
+    -> one column right. Layers can go negative here; the caller
+    re-normalises to 0-based.
+    """
+    pin_count: dict[str, int] = {}
+    for net in plan.nets:
+        for pr in net.pins:
+            pin_count[pr.refdes] = pin_count.get(pr.refdes, 0) + 1
+
+    # part -> {ic -> [dx of the IC pins it shares a signal net with]}
+    touch: dict[str, dict[str, list[int]]] = {}
+    for net in plan.nets:
+        if net.is_power or net.is_ground:
+            continue
+        ic_pins = [(pr.refdes, str(pr.pin)) for pr in net.pins
+                   if pr.refdes in ic_pin_offsets]
+        others = {pr.refdes for pr in net.pins
+                  if pr.refdes not in ic_pin_offsets}
+        for ic, pin in ic_pins:
+            dx = ic_pin_offsets[ic].get(pin, (0, 0))[0]
+            for r in others:
+                touch.setdefault(r, {}).setdefault(ic, []).append(dx)
+
+    adjusted = dict(layer)
+    for r, ics in touch.items():
+        if pin_count.get(r, 0) > 3 or len(ics) != 1:
+            continue
+        ic, dxs = next(iter(ics.items()))
+        if ic not in adjusted or not dxs:
+            continue
+        mean_dx = sum(dxs) / len(dxs)
+        if mean_dx < 0:
+            adjusted[r] = adjusted[ic] - 1
+        elif mean_dx > 0:
+            adjusted[r] = adjusted[ic] + 1
+
+    # Re-normalise to 0-based contiguous-ish layers (negatives allowed
+    # above; gaps are harmless, _assign_coordinates iterates sorted keys).
+    lo = min(adjusted.values(), default=0)
+    if lo < 0:
+        adjusted = {r: l - lo for r, l in adjusted.items()}
+    return adjusted
+
+
+def sugiyama_layout(
+    plan: DesignPlan,
+    ic_pin_offsets: dict[str, dict[str, tuple[int, int]]] | None = None,
+) -> list[SugiyamaPlacement]:
     """Compute Sugiyama-style placement for every part in ``plan``.
 
     Returns one ``SugiyamaPlacement`` per ``plan.parts`` entry.
     Coordinates are snapped to a 100-mil grid and clamped to the A4
     sheet area. ``rotation`` is left at 0 (port-side selection is a
     future stage).
+
+    ``ic_pin_offsets`` (the pipeline's ``_ic_pin_offsets`` shape) enables
+    the pin-side adjustment: small parts move to the side of their IC
+    that their pins actually sit on. Optional because symbol geometry
+    only exists after extraction; the pipeline offers the adjusted layout
+    as a scored best-of variant.
     """
     edges = _signal_edges(plan)
     layer = _assign_layers(plan, edges)
+    if ic_pin_offsets:
+        layer = _pin_side_adjust(plan, layer, ic_pin_offsets)
 
     by_layer: dict[int, list[str]] = defaultdict(list)
     for refdes, l in layer.items():

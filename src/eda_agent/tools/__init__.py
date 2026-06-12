@@ -26,6 +26,7 @@ from .sim import register_sim_tools
 from .design import register_design_tools
 from .render import register_render_tools
 from .audit import register_audit_tools
+from .route import register_route_tools
 
 
 def register_all_tools(mcp):
@@ -40,6 +41,7 @@ def register_all_tools(mcp):
     register_design_tools(mcp)
     register_render_tools(mcp)
     register_audit_tools(mcp)
+    register_route_tools(mcp)
 
 
 __all__ = [
@@ -54,4 +56,5 @@ __all__ = [
     "register_design_tools",
     "register_render_tools",
     "register_audit_tools",
+    "register_route_tools",
 ]

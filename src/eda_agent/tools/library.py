@@ -2,9 +2,11 @@
 # Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """Library management tools for Altium Designer MCP Server."""
 
+from pathlib import Path
 from typing import Any, Optional
 from ..bridge import get_bridge
 from ..bridge.exceptions import InvalidParameterError
+from ..libimport import extract_cse_zip, inspect_cse_zip
 from .bulk_hints import BulkHintTracker
 from .datasheet_hints import tag_response
 from ..config import get_config
@@ -1703,3 +1705,63 @@ def register_library_tools(mcp):
         return await bridge.send_command_async(
             "library.uninstall_library", {"library_path": library_path}
         )
+
+    @mcp.tool()
+    async def lib_inspect_cse_zip(zip_path: str) -> dict[str, Any]:
+        """Identify the library members of a Component Search Engine zip.
+
+        Stage 5 of the autonomous flow (library readiness,
+        reference/autonomy-roadmap.md): a SamacSys / Component Search
+        Engine download carries the symbol, footprint and 3D model for an
+        MPN in one zip. This tool reads the archive WITHOUT extracting
+        anything: which member is the .SchLib, which the .PcbLib, which
+        the STEP model, the best-effort MPN, and any members attempting
+        path traversal (``suspicious``). Inspect first, then stage the
+        files with ``lib_extract_cse_zip``. Pure Python, no Altium.
+
+        Args:
+            zip_path: Absolute path to the downloaded zip.
+
+        Returns:
+            ``{"ok": True, "mpn", "schlib", "pcblib", "step", "extras",
+            "suspicious"}`` (member names; None when absent) or
+            ``{"ok": False, "reason": "..."}`` when the file is missing,
+            not a zip, or contains no .SchLib/.PcbLib.
+        """
+        return inspect_cse_zip(zip_path)
+
+    @mcp.tool()
+    async def lib_extract_cse_zip(
+        zip_path: str,
+        dest_dir: str = "",
+    ) -> dict[str, Any]:
+        """Extract a Component Search Engine zip and build its install plan.
+
+        Stage 5 of the autonomous flow (library readiness,
+        reference/autonomy-roadmap.md): stages the recognized members
+        (.SchLib / .PcbLib / STEP) flattened into ``dest_dir`` and returns
+        an ordered ``install_plan`` whose steps are exact
+        ``lib_install_library`` / ``lib_link_footprint`` /
+        ``lib_link_3d_model`` parameter dicts -- dispatch them in order to
+        make the part placeable. Any archive member with an absolute path,
+        drive letter, or ``..`` segment rejects the WHOLE archive before
+        anything is written. Extraction is pure Python; only the install
+        plan touches Altium when dispatched.
+
+        Args:
+            zip_path: Absolute path to the downloaded zip.
+            dest_dir: Where to stage the files. Default:
+                ``<workspace>/cse_imports/<zip stem>``.
+
+        Returns:
+            ``{"ok": True, "mpn", "files": [abs paths], "extracted":
+            {"schlib"/"pcblib"/"step": abs path or None}, "install_plan":
+            [{"tool", "params"}]}`` or ``{"ok": False, "reason": "..."}``.
+        """
+        dest = (
+            Path(dest_dir)
+            if dest_dir
+            else get_config().workspace_dir / "cse_imports"
+            / Path(zip_path).stem
+        )
+        return extract_cse_zip(zip_path, dest)

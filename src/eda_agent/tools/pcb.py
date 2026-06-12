@@ -184,6 +184,105 @@ def _build_placement_summary(
     return "; ".join(parts) + "."
 
 
+NETLIST_CSV_HEADER = ("component", "pin", "pin_name", "net")
+
+
+def parse_tabular_netlist(text: str) -> dict[str, Any]:
+    """Parse the tabular netlist CSV that ``proj_export_netlist`` writes.
+
+    One ``component,pin,pin_name,net`` row per pin-net node, header row
+    first. Pure Python (no Altium round-trip), so the SCH->PCB bridge
+    derivation is unit-testable offline.
+
+    Returns ``{"ok": True, "nodes": [(component, pin, pin_name, net), ...],
+    "skipped_rows": N}`` -- nodes in file order, rows with a missing
+    component/pin/net or a wrong field count counted in ``skipped_rows`` --
+    or ``{"ok": False, "reason": ...}`` when the text is empty or the
+    header is not the tabular-netlist header.
+    """
+    import csv
+    import io
+
+    rows = [r for r in csv.reader(io.StringIO(text)) if r]
+    if not rows:
+        return {"ok": False, "reason": "empty netlist text"}
+    header = tuple(c.strip().lower() for c in rows[0])
+    if header != NETLIST_CSV_HEADER:
+        return {
+            "ok": False,
+            "reason": (
+                "not a tabular netlist (expected header "
+                f"'{','.join(NETLIST_CSV_HEADER)}', got "
+                f"'{','.join(rows[0])}'); export with "
+                "proj_export_netlist(net_format='tabular')"
+            ),
+        }
+    nodes: list[tuple[str, str, str, str]] = []
+    skipped = 0
+    for row in rows[1:]:
+        if len(row) != 4:
+            skipped += 1
+            continue
+        comp, pin, pin_name, net = (c.strip() for c in row)
+        if not comp or not pin or not net:
+            skipped += 1
+            continue
+        nodes.append((comp, pin, pin_name, net))
+    return {"ok": True, "nodes": nodes, "skipped_rows": skipped}
+
+
+def derive_netlist_build(
+    nodes: list[tuple[str, str, str, str]],
+) -> dict[str, Any]:
+    """Derive the net-creation and pad-binding work lists from netlist nodes.
+
+    Input: ``(component, pin, pin_name, net)`` tuples (the shape
+    ``parse_tabular_netlist`` returns). Output dict:
+
+    - ``nets``: distinct net names, sorted (deterministic input for
+      ``pcb_create_nets_from_list``).
+    - ``bindings``: one ``{"designator", "pin", "net"}`` dict per node,
+      grouped by designator (the Pascal handler caches the component
+      lookup per consecutive designator run). Duplicate
+      (designator, pin) rows collapse to the first occurrence.
+    - ``components``: distinct designators, sorted.
+    """
+    nets: set[str] = set()
+    components: set[str] = set()
+    seen_pads: set[tuple[str, str]] = set()
+    by_comp: dict[str, list[dict[str, str]]] = {}
+    for comp, pin, _pin_name, net in nodes:
+        nets.add(net)
+        components.add(comp)
+        if (comp, pin) in seen_pads:
+            continue
+        seen_pads.add((comp, pin))
+        by_comp.setdefault(comp, []).append(
+            {"designator": comp, "pin": pin, "net": net}
+        )
+    bindings = [b for comp in sorted(by_comp) for b in by_comp[comp]]
+    return {
+        "nets": sorted(nets),
+        "bindings": bindings,
+        "components": sorted(components),
+    }
+
+
+def _encode_bindings_param(bindings: list[dict[str, Any]]) -> str:
+    """Encode binding dicts into the ``~~``-op / ``;``-field wire grammar
+    the Pascal ``NextBatchOp``/``GetBatchField`` helpers parse. Entries
+    missing designator/pin/net are dropped (the caller reports counts)."""
+    ops: list[str] = []
+    for b in bindings:
+        desig = str(b.get("designator", "")).strip()
+        pin = str(b.get("pin", "")).strip()
+        net = str(b.get("net", "")).strip()
+        if not desig or not pin or not net:
+            continue
+        ops.append(f"designator={desig};pin={pin};net={net}")
+    return "~~".join(ops)
+
+
 def register_pcb_tools(mcp):
     """Register PCB tools with the MCP server."""
 
@@ -295,6 +394,150 @@ def register_pcb_tools(mcp):
             {"name": name, "nets": nets},
         )
         return result
+
+    @mcp.tool()
+    async def pcb_create_nets_from_list(nets: list[str]) -> dict[str, Any]:
+        """Create net objects on the active PCB for names not already there.
+
+        First leg of the netlist-driven SCH->PCB bridge (Altium's ECO is
+        not scriptable): place footprints with `pcb_place_components`,
+        create the nets here, bind pads with `pcb_bind_pad_nets`, then
+        verify with `proj_compare_sch_pcb`. The whole list is one IPC
+        round-trip; names already on the board are counted, not duplicated.
+
+        Args:
+            nets: Net names to ensure exist (e.g. from the compiled
+                netlist). Duplicates and empty strings are ignored.
+
+        Returns:
+            Dict with ``created`` and ``existing`` counts.
+        """
+        names: list[str] = []
+        seen: set[str] = set()
+        for n in nets:
+            s = str(n).strip()
+            if s and s not in seen:
+                seen.add(s)
+                names.append(s)
+        if not names:
+            return {"error": "No valid net names", "created": 0}
+        bridge = get_bridge()
+        return await bridge.send_command_async(
+            "pcb.create_nets_from_list", {"nets": "|".join(names)}
+        )
+
+    @mcp.tool()
+    async def pcb_bind_pad_nets(bindings: list[dict[str, Any]]) -> dict[str, Any]:
+        """Assign component pads to existing board nets, batch in ONE call.
+
+        Second leg of the netlist-driven SCH->PCB bridge: after
+        `pcb_create_nets_from_list`, feed every (designator, pin, net)
+        row of the compiled netlist here. Each binding finds the placed
+        component, matches the pad by name, and sets its net. Nets must
+        already exist on the board -- a binding to a missing net fails
+        (it does not create the net).
+
+        Bindings are processed in order; keep rows for the same
+        designator adjacent (the handler caches the component lookup per
+        consecutive run -- `pcb_build_from_project` orders them this way
+        automatically).
+
+        Args:
+            bindings: List of dicts, each with ``designator`` (e.g. "U1"),
+                ``pin`` (pad name, e.g. "3" or "A1"), ``net``.
+
+        Returns:
+            Dict with ``bound`` / ``failed`` counts plus
+            ``missing_components`` / ``missing_pads`` / ``missing_nets``
+            name lists (each capped at 50 entries).
+        """
+        encoded = _encode_bindings_param(bindings)
+        if not encoded:
+            return {"error": "No valid bindings (need designator + pin "
+                    "+ net)", "bound": 0}
+        bridge = get_bridge()
+        return await bridge.send_command_async(
+            "pcb.bind_pad_nets", {"bindings": encoded}
+        )
+
+    @mcp.tool()
+    async def pcb_build_from_project(
+        netlist_csv_path: str = "",
+    ) -> dict[str, Any]:
+        """Build the PCB's net set and pad connectivity from the netlist.
+
+        The SCH->PCB bridge orchestrator (replaces the unscriptable ECO
+        netlist transfer): derives the distinct net list and every
+        (designator, pin, net) binding from the compiled netlist, creates
+        the missing nets (`pcb_create_nets_from_list`) and binds every
+        pad (`pcb_bind_pad_nets`) in two IPC round-trips.
+
+        It does NOT place footprints -- `pcb_place_components` exists for
+        that. Intended sequence: place components, then run this to build
+        nets and bind pads, then verify with `proj_compare_sch_pcb`.
+
+        Args:
+            netlist_csv_path: Optional path to a tabular netlist CSV
+                written by ``proj_export_netlist(net_format="tabular")``
+                (``component,pin,pin_name,net`` rows). Empty (default) =
+                pull the compiled netlist from the open project directly.
+
+        Returns:
+            Dict with ``components`` (distinct designators in the
+            netlist), ``nets_created``, ``nets_existing``, ``pads_bound``,
+            ``failed``, plus the ``missing_components`` /
+            ``missing_pads`` / ``missing_nets`` lists from the bind step.
+        """
+        from pathlib import Path
+
+        if netlist_csv_path:
+            p = Path(netlist_csv_path)
+            if not p.is_file():
+                return {"error": f"netlist CSV not found: {netlist_csv_path}",
+                        "pads_bound": 0}
+            parsed = parse_tabular_netlist(p.read_text(encoding="utf-8-sig"))
+            if not parsed["ok"]:
+                return {"error": parsed["reason"], "pads_bound": 0}
+            nodes = parsed["nodes"]
+        else:
+            bridge = get_bridge()
+            data = await bridge.send_command_async(
+                "project.get_nets", {"limit": "100000"}
+            )
+            pins = data.get("pins", []) if isinstance(data, dict) else []
+            nodes = []
+            for pin_rec in pins:
+                comp = str(pin_rec.get("component", "")).strip()
+                pin = str(pin_rec.get("pin", "")).strip()
+                pin_name = str(pin_rec.get("pin_name", "")).strip()
+                net = str(pin_rec.get("net", "")).strip()
+                if comp and pin and net:
+                    nodes.append((comp, pin, pin_name, net))
+
+        if not nodes:
+            return {"error": "netlist has no pin-net nodes (is the "
+                    "project compiled / the CSV non-empty?)",
+                    "pads_bound": 0}
+
+        work = derive_netlist_build(nodes)
+        bridge = get_bridge()
+        net_result = await bridge.send_command_async(
+            "pcb.create_nets_from_list", {"nets": "|".join(work["nets"])}
+        )
+        bind_result = await bridge.send_command_async(
+            "pcb.bind_pad_nets",
+            {"bindings": _encode_bindings_param(work["bindings"])},
+        )
+        return {
+            "components": len(work["components"]),
+            "nets_created": net_result.get("created", 0),
+            "nets_existing": net_result.get("existing", 0),
+            "pads_bound": bind_result.get("bound", 0),
+            "failed": bind_result.get("failed", 0),
+            "missing_components": bind_result.get("missing_components", []),
+            "missing_pads": bind_result.get("missing_pads", []),
+            "missing_nets": bind_result.get("missing_nets", []),
+        }
 
     @mcp.tool()
     async def pcb_get_design_rules() -> dict[str, Any]:
