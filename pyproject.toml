@@ -36,9 +36,19 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Render-and-look previews (design/illustrate.py). matplotlib is imported
+# lazily inside the render functions so the core install stays lean; the
+# design tools' optional render_png path degrades to a preview_error note
+# when it is absent. Install this extra to get the PNG previews.
+render = [
+    "matplotlib>=3.5,<4",
+]
 dev = [
     "pytest>=7.0",
     "pytest-asyncio>=0.21",
+    # The illustrate render tests exercise the matplotlib path, so dev
+    # pulls the render extra (CI installs .[dev] only).
+    "matplotlib>=3.5,<4",
 ]
 # Local HTTP vote UI for pairwise layout preference capture. Flask is
 # the only runtime dep; the rest is stdlib. ~70 KB on disk.
