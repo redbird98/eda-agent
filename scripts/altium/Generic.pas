@@ -1764,6 +1764,8 @@ Var
     Workspace : IWorkspace;
     Project : IProject;
     NewDocPath : String;
+    ServerDoc : IServerDocument;
+    Saved, Added : Boolean;
 Begin
     SheetName := ExtractJsonValue(Params, 'name');
     If SheetName = '' Then SheetName := 'NewSheet';
@@ -1789,25 +1791,55 @@ Begin
         NewDocPath := Copy(NewDocPath, 1, Length(NewDocPath) - 1);
     NewDocPath := NewDocPath + SheetName + '.SchDoc';
 
-    // Create blank schematic (no FileName param, causes null key error)
-    ResetParameters;
-    AddStringParameter('ObjectKind', 'SchDoc');
-    RunProcess('WorkspaceManager:CreateNewDocument');
+    { Create the blank schematic via Client.OpenNewDocument, mirroring the
+      working App_CreateDocument path. The previous
+      RunProcess('WorkspaceManager:CreateNewDocument') WITHOUT a FileName
+      raises a modal "Value cannot be null. (Parameter 'key')" and WEDGES
+      the polling loop. OpenNewDocument names the doc up front, so the
+      null-key never happens. }
+    ServerDoc := Client.OpenNewDocument('SCH', NewDocPath, SheetName, False);
+    If ServerDoc = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'CREATE_FAILED',
+            'Client.OpenNewDocument returned Nil for kind=SCH');
+        Exit;
+    End;
 
-    // Save the newly created blank doc to the desired path
-    ResetParameters;
-    AddStringParameter('ObjectKind', 'SchDoc');
-    AddStringParameter('FileName', NewDocPath);
-    RunProcess('WorkspaceManager:SaveObject');
+    { Persist to disk: force the path then DoFileSave, falling back to a
+      Save-As via WorkspaceManager:SaveObject (same fallback as
+      App_CreateDocument). }
+    Saved := False;
+    Try ServerDoc.SetFileName(NewDocPath); Except End;
+    Try
+        ServerDoc.SetModified(True);
+        ServerDoc.DoFileSave('');
+        Saved := FileExists(NewDocPath);
+    Except Saved := False; End;
+    If Not Saved Then
+    Begin
+        Try
+            ServerDoc.Focus;
+            ResetParameters;
+            AddStringParameter('ObjectKind', 'Document');
+            AddStringParameter('FileName', NewDocPath);
+            RunProcess('WorkspaceManager:SaveObject');
+            Saved := FileExists(NewDocPath);
+        Except Saved := False; End;
+    End;
 
-    // Add to the project
-    ResetParameters;
-    AddStringParameter('ObjectKind', 'Document');
-    AddStringParameter('FileName', NewDocPath);
-    RunProcess('WorkspaceManager:AddObjectToProject');
+    { Add to the focused project via the documented project-side API
+      (DM_AddSourceDocument), which works across workspace states where
+      WorkspaceManager:AddObjectToProject silently no-ops. }
+    Added := False;
+    Try
+        Project.DM_AddSourceDocument(NewDocPath);
+        Added := True;
+    Except Added := False; End;
 
     Result := BuildSuccessResponse(RequestId,
-        '{"success":true,"path":"' + EscapeJsonString(NewDocPath) + '"}');
+        '{"success":true,"path":"' + EscapeJsonString(NewDocPath) + '"' +
+        ',"saved":' + BoolToJsonStr(Saved) +
+        ',"added_to_project":' + BoolToJsonStr(Added) + '}');
 End;
 
 {..............................................................................}

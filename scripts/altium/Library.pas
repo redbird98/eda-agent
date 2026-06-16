@@ -1051,13 +1051,13 @@ End;
 
 Function Lib_LinkFootprint(Params : String; RequestId : String) : String;
 Var
-    FootprintName, LibraryName : String;
+    FootprintName, ComponentName : String;
     SchLib : ISch_Lib;
     Component : ISch_Component;
     Impl : ISch_Implementation;
 Begin
     FootprintName := ExtractJsonValue(Params, 'footprint_name');
-    LibraryName := ExtractJsonValue(Params, 'library_name');
+    ComponentName := ExtractJsonValue(Params, 'component_name');
 
     SchLib := SchServer.GetCurrentSchDocument;
     If (SchLib = Nil) Or (SchLib.ObjectId <> eSchLib) Then
@@ -1066,27 +1066,36 @@ Begin
         Exit;
     End;
 
-    Component := GetTargetLibComponent(SchLib);
+    { Resolve the target by component_name so the link lands on the intended
+      symbol -- the handler previously ignored it and always used the
+      last-created component. Fall back to last-created/selected when empty. }
+    If ComponentName <> '' Then
+        Component := SelectLibComponent(ComponentName)
+    Else
+        Component := GetTargetLibComponent(SchLib);
     If Component = Nil Then
     Begin
-        Result := BuildErrorResponse(RequestId, 'NO_COMPONENT', 'No component is selected');
+        Result := BuildErrorResponse(RequestId, 'NO_COMPONENT', 'Target component not found (component_name) or nothing selected');
         Exit;
     End;
 
-    Impl := SchServer.SchObjectFactory(eImplementation, eCreate_Default);
+    { Attach the footprint model via Component.AddSchImplementation -- the
+      dedicated factory that creates, owns AND registers the implementation in
+      one call. The old SchObjectFactory(eImplementation) + Component.AddSchObject
+      path is WRONG for models: ISch_Implementation is not an ISch_GraphicalObject,
+      so on AD26 both SetOwnerPart (writing OwnerPartId) and AddSchObject raise a
+      modal "Undeclared identifier" that Try/Except cannot catch and WEDGE the
+      bridge. }
+    Impl := Component.AddSchImplementation;
     If Impl <> Nil Then
     Begin
+        Try Impl.ClearAllDatafileLinks; Except End;
         Impl.ModelName := FootprintName;
         Impl.ModelType := cDocKind_PcbLib;
-        { ISch_Implementation has no LibraryIdentifier / UseComponentLibrary
-          property; the footprint binds by ModelName (resolved from available
-          libraries), and an explicit source library is recorded as a PCBLIB
-          datafile link (read back via DatafileLinkCount -- see libUtils.pas). }
-        If LibraryName <> '' Then
-            Try Impl.AddDataFileLink(FootprintName, LibraryName, 'PCBLIB'); Except End;
-        SetOwnerPart(Impl, Component);
-        Component.AddSchObject(Impl);
-        SchRegisterObject(Component, Impl);
+        Try Impl.IsCurrent := True; Except End;
+        { The footprint binds by ModelName, resolved from the libraries
+          available to the project. Do NOT AddDataFileLink a full .PcbLib path
+          here -- it blocks indefinitely on AD26 and wedges the bridge. }
 
         Result := BuildSuccessResponse(RequestId, '{"success":true,"footprint":"' + EscapeJsonString(FootprintName) + '"}');
     End
@@ -1120,17 +1129,21 @@ Begin
         Exit;
     End;
 
-    Impl := SchServer.SchObjectFactory(eImplementation, eCreate_Default);
+    { Attach the model via Component.AddSchImplementation -- the dedicated
+      factory that creates, owns and registers the implementation. The old
+      SchObjectFactory(eImplementation) + Component.AddSchObject path raises
+      "Undeclared identifier" on AD26 (ISch_Implementation is not an
+      ISch_GraphicalObject) and wedges the bridge (same cause as
+      Lib_LinkFootprint). }
+    Impl := Component.AddSchImplementation;
     If Impl <> Nil Then
     Begin
+        Try Impl.ClearAllDatafileLinks; Except End;
         Impl.ModelName := ModelName;
         Impl.ModelType := 'PCB3DModel';
-        SetOwnerPart(Impl, Component);
-        Component.AddSchObject(Impl);
-        SchRegisterObject(Component, Impl);
-        { Bind the actual model file -- without this datafile link the
-          implementation names a model but points at nothing. 'PCB3DLIB' is
-          the 3D-model datafile kind (Altium SDK IntLibSearchDemo.pas). }
+        { Bind the actual model file. AddDataFileLink runs on a properly
+          attached implementation (AddSchImplementation owns it first), the
+          documented pattern. 'PCB3DLIB' is the 3D-model datafile kind. }
         If ModelPath <> '' Then
             Try Impl.AddDataFileLink(ModelName, ModelPath, 'PCB3DLIB'); Except End;
 
