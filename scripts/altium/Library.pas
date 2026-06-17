@@ -1103,54 +1103,110 @@ Begin
         Result := BuildErrorResponse(RequestId, 'LINK_FAILED', 'Failed to link footprint');
 End;
 
+{ Lib_Link3DModel - attach a 3D STEP model to a PcbLib FOOTPRINT.              }
+{                                                                              }
+{ A 3D model in Altium is geometry that lives on the footprint as an          }
+{ IPCB_ComponentBody, NOT a name-reference on the schematic symbol. The STEP  }
+{ is loaded with ModelFactory_FromFilename and the body added to the          }
+{ footprint (canonical AutoSTEPplacer pattern; same PCB object-factory family }
+{ as Lib_AddFootprintPad). The previous schematic-side version attached a     }
+{ 'PCB3DModel' implementation -- a wrong ModelType (the constant is           }
+{ 'PCB3DLib') -- and passed the path to AddDataFileLink, which blocks on AD26.}
+{                                                                              }
+{ Params: component_name (footprint name; empty = current footprint),         }
+{         model_path (.step/.stp file). offset_*/rotation_* are accepted but  }
+{         not applied (Altium ignores them on import; set in the editor).     }
 Function Lib_Link3DModel(Params : String; RequestId : String) : String;
 Var
-    ModelPath, ModelName : String;
-    SchLib : ISch_Lib;
-    Component : ISch_Component;
-    Impl : ISch_Implementation;
+    ModelPath, ComponentName, FpName : String;
+    PcbLib : IPCB_Library;
+    Footprint : IPCB_LibComponent;
+    Iter : IPCB_LibraryIterator;
+    Body : IPCB_ComponentBody;
+    Model : IPCB_Model;
 Begin
     ModelPath := ExtractJsonValue(Params, 'model_path');
     ModelPath := StringReplace(ModelPath, '\\', '\', -1);
-    ModelName := ExtractJsonValue(Params, 'model_name');
-    If ModelName = '' Then ModelName := ExtractFileName(ModelPath);
+    ComponentName := ExtractJsonValue(Params, 'component_name');
 
-    SchLib := SchServer.GetCurrentSchDocument;
-    If (SchLib = Nil) Or (SchLib.ObjectId <> eSchLib) Then
+    If (ModelPath = '') Or (Not FileExists(ModelPath)) Then
     Begin
-        Result := BuildErrorResponse(RequestId, 'NO_SCHLIB', 'No schematic library is active');
+        Result := BuildErrorResponse(RequestId, 'NO_MODEL_FILE',
+            'model_path is empty or the file does not exist: ' + ModelPath);
         Exit;
     End;
 
-    Component := GetTargetLibComponent(SchLib);
-    If Component = Nil Then
+    PcbLib := PCBServer.GetCurrentPCBLibrary;
+    If PcbLib = Nil Then
     Begin
-        Result := BuildErrorResponse(RequestId, 'NO_COMPONENT', 'No component is selected');
+        Result := BuildErrorResponse(RequestId, 'NO_PCBLIB',
+            'No PCB library is active (a 3D body attaches to a PcbLib footprint)');
         Exit;
     End;
 
-    { Attach the model via Component.AddSchImplementation -- the dedicated
-      factory that creates, owns and registers the implementation. The old
-      SchObjectFactory(eImplementation) + Component.AddSchObject path raises
-      "Undeclared identifier" on AD26 (ISch_Implementation is not an
-      ISch_GraphicalObject) and wedges the bridge (same cause as
-      Lib_LinkFootprint). }
-    Impl := Component.AddSchImplementation;
-    If Impl <> Nil Then
+    { Select the footprint by name, otherwise use the current one. }
+    If ComponentName <> '' Then
     Begin
-        Try Impl.ClearAllDatafileLinks; Except End;
-        Impl.ModelName := ModelName;
-        Impl.ModelType := 'PCB3DModel';
-        { Bind the actual model file. AddDataFileLink runs on a properly
-          attached implementation (AddSchImplementation owns it first), the
-          documented pattern. 'PCB3DLIB' is the 3D-model datafile kind. }
-        If ModelPath <> '' Then
-            Try Impl.AddDataFileLink(ModelName, ModelPath, 'PCB3DLIB'); Except End;
-
-        Result := BuildSuccessResponse(RequestId, '{"success":true,"model":"' + EscapeJsonString(ModelName) + '","model_path":"' + EscapeJsonString(ModelPath) + '"}');
+        Footprint := Nil;
+        Iter := PcbLib.LibraryIterator_Create;
+        Try
+            Footprint := Iter.FirstPCBObject;
+            While Footprint <> Nil Do
+            Begin
+                If Footprint.Name = ComponentName Then Break;
+                Footprint := Iter.NextPCBObject;
+            End;
+        Finally
+            PcbLib.LibraryIterator_Destroy(Iter);
+        End;
+        If Footprint = Nil Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'NO_FOOTPRINT',
+                'Footprint not found in library: ' + ComponentName);
+            Exit;
+        End;
+        Try PcbLib.SetState_CurrentComponent(Footprint); Except End;
     End
     Else
-        Result := BuildErrorResponse(RequestId, 'LINK_FAILED', 'Failed to link 3D model');
+        Footprint := PcbLib.CurrentComponent;
+
+    If Footprint = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_FOOTPRINT',
+            'No footprint selected (pass component_name to choose one)');
+        Exit;
+    End;
+    FpName := '';
+    Try FpName := Footprint.Name; Except End;
+
+    PCBServer.PreProcess;
+    Try
+        Body := PCBServer.PCBObjectFactory(eComponentBodyObject, eNoDimension, eCreate_Default);
+        If Body = Nil Then
+            Result := BuildErrorResponse(RequestId, 'CREATE_FAILED',
+                'PCBObjectFactory returned Nil for eComponentBodyObject')
+        Else
+        Begin
+            { Load the STEP geometry, then bind + add (AutoSTEPplacer order). }
+            Model := Body.ModelFactory_FromFilename(ModelPath, False);
+            If Model = Nil Then
+                Result := BuildErrorResponse(RequestId, 'MODEL_LOAD_FAILED',
+                    'Could not load 3D model from ' + ModelPath)
+            Else
+            Begin
+                Body.SetState_FromModel;
+                Body.Model := Model;
+                Footprint.AddPCBObject(Body);
+                Result := BuildSuccessResponse(RequestId,
+                    '{"success":true,"footprint":"' + EscapeJsonString(FpName) +
+                    '","model":"' + EscapeJsonString(ExtractFileName(ModelPath)) + '"}');
+            End;
+        End;
+    Finally
+        PCBServer.PostProcess;
+    End;
+
+    SaveDocByPath(PcbLib.Board.FileName);
 End;
 
 Function Lib_GetComponents(Params : String; RequestId : String) : String;
