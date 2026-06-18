@@ -630,14 +630,20 @@ def register_library_tools(mcp):
         rotation_y: float = 0,
         rotation_z: float = 0,
     ) -> dict[str, Any]:
-        """Link a 3D model to a footprint.
+        """Link a 3D STEP model to a PcbLib footprint.
 
-        NOTE: offset and rotation parameters are currently ignored by Altium;
-        set them manually in the library after linking.
+        Loads the STEP geometry into the footprint as an IPCB_ComponentBody
+        (the real 3D body that drives the 3D view and the height/placement
+        DRC), so the **active document must be the .PcbLib** that contains the
+        footprint. ``component_name`` selects the footprint by name (empty uses
+        the library's current footprint).
+
+        NOTE: offset and rotation parameters are accepted but not applied on
+        import (Altium ignores them); set them in the library after linking.
 
         Args:
-            component_name: Name of the footprint
-            model_path: Path to the 3D model file (.step, .stp)
+            component_name: Name of the footprint in the active PcbLib
+            model_path: Path to the 3D model file (.step, .stp); must exist
             offset_x: X offset in mils (ignored, see note)
             offset_y: Y offset in mils (ignored, see note)
             offset_z: Z offset in mils (ignored, see note)
