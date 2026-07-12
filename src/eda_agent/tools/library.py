@@ -20,6 +20,171 @@ from ..config import get_config
 # This is a hard invariant, not a hint -- every coord goes through here.
 _SCHEMATIC_GRID_MILS = 100
 
+# Footprint-policy sweep: footprints per bulk-geometry page, and the per-page
+# timeout. The first page also opens the PcbLib, which on a large library is
+# seconds; the default command timeout is far too short for it.
+_GEOMETRY_PAGE = 250
+_GEOMETRY_TIMEOUT = 120.0
+
+# A repaired designator further than this from its pads did not land on the
+# part. The biggest footprints here span a couple of thousand mils; a designator
+# dropped at the board origin is ~50000 away.
+_STRAY_MILS = 5000
+
+# Apply/reload passes before giving up. Each pass fixes what the previous one's
+# geometry change revealed (a resized text has a new bounding box). Convergence
+# is fast -- ~90% in the first pass -- so this is a runaway guard, not a budget.
+_MAX_PASSES = 6
+
+
+def _edit_line(act: dict) -> str:
+    """One tab-separated edit row: name, layer_id, x, y, height, create.
+
+    An empty field tells the script to leave that property alone.
+    """
+    def _f(key):
+        v = act.get(key)
+        return "" if v is None else str(v)
+
+    return "\t".join((
+        str(act["footprint"]), _f("layer_id"), _f("x"), _f("y"), _f("height"),
+        "1" if act.get("create") else "0",
+    ))
+
+
+def write_designator_edits(workspace_dir, actions) -> tuple:
+    """Write the edit file the bulk script reads. Returns (path, written,
+    rejected).
+
+    A footprint whose name contains a tab or newline cannot be expressed in
+    this format; it is rejected rather than silently corrupting the row that
+    follows it. Written atomically (temp + replace) so the script can never
+    observe a half-written file.
+    """
+    import os
+    import tempfile
+    from pathlib import Path
+
+    written, rejected = [], []
+    for act in actions:
+        name = str(act.get("footprint", ""))
+        if not name or "\t" in name or "\n" in name or "\r" in name:
+            rejected.append({"footprint": name,
+                             "reason": "name contains a tab or newline"})
+            continue
+        written.append(act)
+
+    path = Path(workspace_dir) / "designator_edits.tsv"
+    body = "".join(_edit_line(a) + "\n" for a in written)
+    fd, tmp = tempfile.mkstemp(dir=str(workspace_dir), suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
+            f.write(body)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    return path, written, rejected
+
+
+def _same_plan(a, b) -> bool:
+    """Two plans that ask for exactly the same edits. If a pass applied and the
+    next plan is identical, nothing landed and repeating will not help."""
+    def key(acts):
+        return sorted((x["footprint"], x.get("x"), x.get("y"),
+                       x.get("layer_id"), x.get("height"), x.get("create"))
+                      for x in acts)
+    return bool(a) and key(a) == key(b)
+
+
+async def _reload_library(bridge, library_path) -> bool:
+    """Close and reopen the PcbLib so Altium rebuilds its caches from disk.
+
+    ``IPCB_Text.BoundingRectangle`` is populated at load and is NOT refreshed by
+    assigning XLocation or Size. Without a reload, everything read after a write
+    reports the text's OLD extent, and a centring pass computed from that moves
+    the text by a wrong delta. Save before calling this.
+    """
+    if not library_path:
+        return False
+    try:
+        res = await bridge.send_command_async(
+            "library.reload_library", {"library_path": library_path},
+            timeout=_GEOMETRY_TIMEOUT)
+        return bool(isinstance(res, dict) and res.get("reloaded"))
+    except Exception:
+        return False
+
+
+async def _apply_edits(bridge, actions, resolved_path, failed):
+    """Write one batch of designator edits. Returns (applied, created)."""
+    edits_path, written, rejected = write_designator_edits(
+        bridge.config.workspace_dir, actions)
+    failed.extend(rejected)
+    if not written:
+        return 0, 0
+
+    params = {"edits_path": str(edits_path)}
+    if resolved_path:
+        params["library_path"] = resolved_path
+    try:
+        res = await bridge.send_command_async(
+            "library.set_designators", params, timeout=_GEOMETRY_TIMEOUT)
+        res = res if isinstance(res, dict) else {}
+    except Exception as e:
+        failed.append({"footprint": "*", "error": str(e)})
+        return 0, 0
+
+    if res.get("failed"):
+        failed.append({"footprint": "*",
+                       "error": f"{res['failed']} edits failed"})
+    if res.get("refused"):
+        # The script refused to create a designator on a footprint that already
+        # had one. Never silent: that guard firing means reader and writer
+        # disagree about what exists.
+        failed.append({"footprint": "*",
+                       "error": f"{res['refused']} creates refused "
+                                f"(footprint already had a .Designator)"})
+    for name in res.get("missing", []):
+        failed.append({"footprint": name, "error": "not found in library"})
+    for name in res.get("immovable", []):
+        # The script assigned XLocation, read it back, and it had not changed.
+        # Silently counting these as applied hid failed repairs behind a
+        # success total for an entire session.
+        failed.append({"footprint": name,
+                       "error": "designator did not move (XLocation refused "
+                                "the assignment)"})
+    return res.get("applied", 0), res.get("created", 0)
+
+
+async def _read_library_geometry(bridge, library_path):
+    """Page the whole library's policy geometry. Returns (footprints, path)."""
+    base: dict[str, Any] = {}
+    if library_path:
+        base["library_path"] = library_path
+    footprints: list[dict[str, Any]] = []
+    resolved: Optional[str] = None
+    offset, total = 0, None
+    while total is None or offset < total:
+        page = await bridge.send_command_async(
+            "library.get_library_geometry",
+            dict(base, offset=offset, limit=_GEOMETRY_PAGE),
+            timeout=_GEOMETRY_TIMEOUT,
+        )
+        if not isinstance(page, dict):
+            break
+        resolved = resolved or page.get("library_path")
+        total = page.get("total") or 0
+        batch = page.get("footprints") or []
+        footprints.extend(batch)
+        if not batch:  # never spin if the script reports a short page
+            break
+        offset += len(batch)
+    return footprints, (resolved or library_path)
+
 
 def _snap(value: int) -> int:
     """Round a mil coordinate to the schematic 100-mil grid.
@@ -35,6 +200,22 @@ def _snap(value: int) -> int:
                 // _SCHEMATIC_GRID_MILS) * _SCHEMATIC_GRID_MILS
     return -(((-value + _SCHEMATIC_GRID_MILS // 2)
               // _SCHEMATIC_GRID_MILS) * _SCHEMATIC_GRID_MILS)
+
+
+def _snap_grid(value: int, grid: int) -> int:
+    """Round a mil coordinate to an arbitrary grid (<=1 disables snapping).
+
+    For glyph primitives (lines / arcs / polygons), which -- unlike pins
+    and rectangle corners (discipline rule 15) -- do NOT need the 100-mil
+    grid, so finer detail (cap plates, diode triangles, resistor zigzags)
+    can be drawn.
+    """
+    value = int(value)
+    if grid <= 1:
+        return value
+    if value >= 0:
+        return ((value + grid // 2) // grid) * grid
+    return -(((-value + grid // 2) // grid) * grid)
 
 
 def register_library_tools(mcp):
@@ -80,6 +261,178 @@ def register_library_tools(mcp):
         return result
 
     @mcp.tool()
+    async def lib_create_ic_symbol(
+        name: str,
+        left_pins: list[dict[str, Any]],
+        right_pins: list[dict[str, Any]],
+        designator_prefix: str = "U",
+        description: str = "",
+    ) -> dict[str, Any]:
+        """Create a COMPLETE, discipline-compliant IC symbol in ONE call.
+
+        You decide the functional grouping (inputs/power/control on the
+        LEFT, outputs/status on the RIGHT -- discipline rule 18); this
+        lays them out cleanly and emits the whole symbol: the body
+        rectangle (Altium-yellow fill) plus every pin, grid-aligned with
+        the top-left pin's wire-end at the origin (rule 14), in one
+        create + one bulk add_pins + one rectangle.
+
+        Args:
+            name: Component name.
+            left_pins: Pins on the LEFT side, top-to-bottom. Each a dict
+                with `designator`, `name`, and optional `electrical_type`
+                (input/output/power/passive/...).
+            right_pins: Pins on the RIGHT side, top-to-bottom, same shape.
+            designator_prefix: e.g. "U".
+            description: Component description.
+
+        Returns:
+            Dict with the symbol name, pin count, body extent, and the
+            per-step bridge results.
+        """
+        from eda_agent.design.symbol_gen import generate_ic_symbol
+
+        geom = generate_ic_symbol(left_pins, right_pins)
+
+        bridge = get_bridge()
+        created = await bridge.send_command_async(
+            "library.create_symbol",
+            {
+                "name": name,
+                "designator_prefix": designator_prefix,
+                "description": description,
+                "part_count": "1",
+            },
+        )
+
+        pin_ops = [
+            ";".join([
+                f"designator={p['designator']}",
+                f"name={p['name']}",
+                f"x={p['x']}", f"y={p['y']}",
+                f"length={p['length']}",
+                f"rotation={p['rotation']}",
+                f"electrical_type={p.get('electrical_type', 'passive')}",
+                "hidden=false",
+            ])
+            for p in geom.pins
+        ]
+        pins_res = await bridge.send_command_async(
+            "library.add_pins", {"pins": "~~".join(pin_ops)})
+
+        # Body: Altium standard light-yellow fill (discipline rule 17).
+        body = geom.body
+        rect_res = await bridge.send_command_async(
+            "library.add_symbol_rectangle",
+            {
+                "x1": body["x1"], "y1": body["y1"],
+                "x2": body["x2"], "y2": body["y2"],
+                "fill_color": 8454143,
+                "border_color": 0,
+            },
+        )
+
+        return {
+            "symbol": name,
+            "pins": len(geom.pins),
+            "left": len(left_pins),
+            "right": len(right_pins),
+            "width_mils": geom.width_mils,
+            "height_mils": geom.height_mils,
+            "create": created,
+            "pins_result": pins_res,
+            "rectangle_result": rect_res,
+        }
+
+    @mcp.tool()
+    async def lib_create_passive_symbol(
+        name: str,
+        kind: str,
+        designator_prefix: str = "",
+        description: str = "",
+    ) -> dict[str, Any]:
+        """Create a standard 2-pin PASSIVE symbol in ONE call.
+
+        Draws the recognizable glyph for a resistor / capacitor /
+        polarized_capacitor / inductor / diode / led / crystal / fuse,
+        with pin 1 on the left and pin 2 on the right. Composes
+        `lib_create_symbol` + `lib_add_pins` + the
+        glyph primitives (emitted as raw mils, so the LED's emission
+        arrows and the crystal's resonator keep their sub-100-mil detail).
+
+        Args:
+            name: Component name (e.g. "R_0402").
+            kind: "resistor" | "capacitor" | "polarized_capacitor" |
+                "inductor" | "diode" | "led" | "crystal" | "fuse"
+                (aliases r/c/cap_pol/electrolytic/cp/l/d/xtal/f accepted).
+            designator_prefix: default by kind (R/C/L/D/Y/F) if omitted.
+            description: Component description.
+
+        Returns:
+            Dict with the symbol name and per-step bridge results.
+        """
+        from eda_agent.design.symbol_gen import generate_passive_symbol
+
+        geom = generate_passive_symbol(kind)
+        prefix = designator_prefix or {
+            "resistor": "R", "r": "R", "res": "R",
+            "capacitor": "C", "c": "C", "cap": "C",
+            "polarized_capacitor": "C", "cap_pol": "C",
+            "electrolytic": "C", "cp": "C",
+            "inductor": "L", "l": "L", "ind": "L",
+            "diode": "D", "d": "D",
+            "led": "D", "diode_led": "D",
+            "crystal": "Y", "xtal": "Y", "y": "Y",
+            "fuse": "F", "f": "F",
+        }.get(kind.strip().lower(), "U")
+
+        bridge = get_bridge()
+        created = await bridge.send_command_async(
+            "library.create_symbol",
+            {"name": name, "designator_prefix": prefix,
+             "description": description, "part_count": "1"},
+        )
+
+        pin_ops = [
+            ";".join([
+                f"designator={p['designator']}", f"name={p['name']}",
+                f"x={p['x']}", f"y={p['y']}", f"length={p['length']}",
+                f"rotation={p['rotation']}",
+                f"electrical_type={p.get('electrical_type', 'passive')}",
+                "hidden=false",
+            ])
+            for p in geom.pins
+        ]
+        pins_res = await bridge.send_command_async(
+            "library.add_pins", {"pins": "~~".join(pin_ops)})
+
+        steps: dict[str, Any] = {}
+        for i, r in enumerate(geom.rectangles):
+            steps[f"rect{i}"] = await bridge.send_command_async(
+                "library.add_symbol_rectangle",
+                {"x1": r["x1"], "y1": r["y1"], "x2": r["x2"], "y2": r["y2"],
+                 "fill_color": -1, "border_color": 0})
+        if geom.lines:
+            line_ops = [
+                ";".join([f"x1={l['x1']}", f"y1={l['y1']}",
+                          f"x2={l['x2']}", f"y2={l['y2']}", "width=10"])
+                for l in geom.lines
+            ]
+            steps["lines"] = await bridge.send_command_async(
+                "library.add_symbol_lines", {"lines": "~~".join(line_ops)})
+        for i, poly in enumerate(geom.polygons):
+            verts = ",".join(
+                str(v) for pt in poly["points"] for v in pt)
+            steps[f"poly{i}"] = await bridge.send_command_async(
+                "library.add_symbol_polygon", {"vertices": verts})
+
+        return {
+            "symbol": name, "kind": kind, "designator_prefix": prefix,
+            "pins": len(geom.pins), "create": created,
+            "pins_result": pins_res, "glyph": steps,
+        }
+
+    @mcp.tool()
     async def lib_set_current_component(
         component_name: str,
     ) -> dict[str, Any]:
@@ -122,9 +475,10 @@ def register_library_tools(mcp):
     ) -> dict[str, Any]:
         """Add MANY pins to the current symbol in ONE call.
 
-        PREFER THIS over looping `lib_add_pin`. A 48-pin IC symbol
-        built one pin at a time is 48 LLM turns; with this tool it's
-        one turn + one PreProcess/PostProcess + one save.
+        PREFER THIS over adding pins one at a time (there is no singular
+        variant). A 48-pin IC symbol built one pin at a time would be 48
+        LLM turns; with this tool it's one turn + one
+        PreProcess/PostProcess + one save.
 
         Args:
             pins: List of pin dicts, each with:
@@ -241,19 +595,25 @@ def register_library_tools(mcp):
     @mcp.tool()
     async def lib_add_symbol_lines(
         lines: list[dict[str, Any]],
+        grid: int = 25,
     ) -> dict[str, Any]:
         """Add MANY lines to the current symbol body in ONE call.
 
-        PREFER THIS over looping ``lib_add_symbol_line``. A 12-line LED
-        diode glyph drawn line-by-line is 12 LLM turns + 12 IPC
-        round-trips + 12 redraw passes; this tool does it in one turn
+        PREFER THIS over adding lines one at a time (there is no singular
+        variant). A 12-line LED diode glyph drawn line-by-line would be 12
+        LLM turns + 12 IPC round-trips + 12 redraw passes; this tool does
+        it in one turn
         with a single PreProcess/PostProcess pair and one editor
         redraw at the end.
 
         Args:
             lines: list of dicts, each with keys ``x1``, ``y1``,
                 ``x2``, ``y2`` (mils, int), ``width`` (int 0-3,
-                default 1). Coords are snapped to the 100-mil grid.
+                default 1).
+            grid: snap grid (mils) for the line endpoints. Glyph lines do
+                NOT need the 100-mil pin grid (rule 15), so the default is
+                a finer 25 mils for clean glyph detail; pass 100 for the
+                coarse grid or 0/1 to disable snapping.
 
         Returns:
             Dict with ``added``, ``failed``, ``total`` counts.
@@ -261,10 +621,10 @@ def register_library_tools(mcp):
         op_strs: list[str] = []
         for line in lines:
             fields = [
-                f"x1={_snap(int(line.get('x1', 0)))}",
-                f"y1={_snap(int(line.get('y1', 0)))}",
-                f"x2={_snap(int(line.get('x2', 0)))}",
-                f"y2={_snap(int(line.get('y2', 0)))}",
+                f"x1={_snap_grid(line.get('x1', 0), grid)}",
+                f"y1={_snap_grid(line.get('y1', 0), grid)}",
+                f"x2={_snap_grid(line.get('x2', 0), grid)}",
+                f"y2={_snap_grid(line.get('y2', 0), grid)}",
                 f"width={int(line.get('width', 1))}",
             ]
             op_strs.append(";".join(fields))
@@ -302,6 +662,132 @@ def register_library_tools(mcp):
         return result
 
     @mcp.tool()
+    async def lib_create_standard_footprint(
+        name: str,
+        family: str,
+        pin_count: int,
+        pitch: float = 50.0,
+        pad_w: float = 24.0,
+        pad_h: float = 30.0,
+        row_span: float = 0.0,
+        shape: str = "roundrect",
+        corner_radius: int = 25,
+        silk: bool = True,
+        courtyard: float = 10.0,
+        body_w: float = 0.0,
+        body_h: float = 0.0,
+        hole: float = 0.0,
+        rows: int = 0,
+        cols: int = 0,
+        exposed_pad: float = 0.0,
+        skip: list[str] = None,
+        tab_w: float = 0.0,
+        tab_h: float = 0.0,
+        description: str = "",
+    ) -> dict[str, Any]:
+        """Create a COMPLETE standard footprint in ONE call.
+
+        Composes parametric geometry with the bulk authoring tools: makes
+        the footprint, then emits every pad + the silkscreen outline +
+        the courtyard rectangle in two batched round-trips. Supply the
+        package's recommended land-pattern dimensions from the datasheet
+        (this carries no part library -- the numbers you pass ARE the
+        footprint).
+
+        Args:
+            name: Footprint name (e.g. "SOIC-8_3.9x4.9").
+            family: "chip" (2-pin passive) | "sip" (single-row header) |
+                "dual" (SOIC/SOP/SON/SOT/DIP) | "header" (2-row pin/box
+                header, IDC, SWD/JTAG -- column-major odd/even numbering) |
+                "tab" (power/tab package: SOT-223, DPAK/D2PAK, TO-220 --
+                signal pins one side + a large tab pad opposite, pass
+                tab_w & tab_h) | "quad" (QFP/QFN) | "bga" (ball grid --
+                pass rows & cols). SOT-23 is "dual" with pin_count=3.
+                Through-hole (DIP/header/TO-220) = any family with hole > 0.
+            pin_count: total pads (2 for chip; even for header; n signal
+                pins for tab; divisible by 4 for quad; ignored for bga).
+            rows, cols: BGA ball grid dimensions (bga family only).
+            exposed_pad: centre thermal/exposed pad size (mils) for QFN/QFP
+                (quad family); 0 = none. Gets designator pin_count+1.
+            tab_w, tab_h: tab pad size (mils) for the "tab" family; the tab
+                gets designator pin_count+1 (tie it to a signal pin in the
+                schematic).
+            skip: BGA ball designators to omit (depopulation), e.g.
+                ["A1","E5"] (bga family only).
+            pitch: pad centre-to-centre within a row (mils).
+            pad_w, pad_h: pad size (mils).
+            row_span: centre-to-centre between the two rows / opposite
+                sides (mils). Required for dual and quad.
+            shape: pad shape (default "roundrect"); corner_radius is its %.
+            silk: draw a silkscreen body outline (TopOverlay).
+            courtyard: clearance (mils) past the extent for the courtyard
+                rectangle (Mechanical1); 0 disables it.
+            body_w, body_h: package body for the silk outline; default to
+                the pad extent.
+            hole: drill size (mils). >0 makes through-hole pads (DIP /
+                header / axial): pin 1 rectangular, the rest round.
+
+        Returns:
+            Dict with the footprint name, pad/track counts, extent, and the
+            per-step bridge results.
+        """
+        from eda_agent.design.footprint_gen import generate_footprint
+
+        geom = generate_footprint(
+            family, pin_count, pitch=pitch, pad_w=pad_w, pad_h=pad_h,
+            row_span=row_span, shape=shape, silk=silk, courtyard=courtyard,
+            body_w=body_w, body_h=body_h, hole=hole, rows=rows, cols=cols,
+            exposed_pad=exposed_pad, skip=skip, tab_w=tab_w, tab_h=tab_h)
+
+        bridge = get_bridge()
+        created = await bridge.send_command_async(
+            "library.create_footprint",
+            {"name": name, "description": description},
+        )
+
+        pad_ops = [
+            ";".join([
+                f"designator={p['designator']}",
+                f"x={round(p['x'])}", f"y={round(p['y'])}",
+                f"x_size={round(p['x_size'])}", f"y_size={round(p['y_size'])}",
+                f"hole_size={round(p.get('hole_size', 0))}",
+                f"shape={p.get('shape', shape)}",
+                f"corner_radius={corner_radius}",
+                "rotation=0", "layer=TopLayer",
+            ])
+            for p in geom.pads
+        ]
+        pads_res = await bridge.send_command_async(
+            "library.add_footprint_pads", {"pads": "~~".join(pad_ops)})
+
+        tracks = geom.all_tracks()
+        tracks_res: dict[str, Any] = {}
+        if tracks:
+            track_ops = [
+                ";".join([
+                    f"x1={round(t['x1'])}", f"y1={round(t['y1'])}",
+                    f"x2={round(t['x2'])}", f"y2={round(t['y2'])}",
+                    f"width={round(t['width'])}", f"layer={t['layer']}",
+                ])
+                for t in tracks
+            ]
+            tracks_res = await bridge.send_command_async(
+                "library.add_footprint_tracks", {"tracks": "~~".join(track_ops)})
+
+        return {
+            "footprint": name,
+            "family": family,
+            "pin_count": pin_count,
+            "pads": len(geom.pads),
+            "tracks": len(tracks),
+            "width_mils": geom.width_mils,
+            "height_mils": geom.height_mils,
+            "create": created,
+            "pads_result": pads_res,
+            "tracks_result": tracks_res,
+        }
+
+    @mcp.tool()
     async def lib_add_footprint_pad(
         designator: str,
         x: int,
@@ -312,6 +798,7 @@ def register_library_tools(mcp):
         shape: str = "rectangular",
         layer: str = "TopLayer",
         rotation: int = 0,
+        corner_radius: int = 25,
     ) -> dict[str, Any]:
         """Add a pad to the current footprint.
 
@@ -321,10 +808,17 @@ def register_library_tools(mcp):
             y: Y coordinate in mils
             x_size: Pad X size in mils
             y_size: Pad Y size in mils
-            hole_size: Drill hole size in mils (0 for SMD)
-            shape: Pad shape ("round", "rectangular", "octagonal")
-            layer: Layer ("TopLayer", "BottomLayer", "MultiLayer")
+            hole_size: Drill hole size in mils (0 for SMD). A drilled pad
+                is forced through-hole (MultiLayer); a hole-less pad is
+                SMD on `layer`.
+            shape: Pad shape -- "round", "rectangular", "octagonal", or
+                "roundrect" (rounded-rectangle, the modern IPC SMD
+                default). An oval/obround is "round" with x_size != y_size.
+            layer: Layer for an SMD pad ("TopLayer"/"BottomLayer"); ignored
+                for through-hole pads (always MultiLayer).
             rotation: Pad rotation in degrees
+            corner_radius: Corner radius percentage for shape="roundrect"
+                (Altium stores RR radius as a %; 25 is typical).
 
         Returns:
             Dictionary confirming pad addition
@@ -342,8 +836,88 @@ def register_library_tools(mcp):
                 "shape": shape,
                 "layer": layer,
                 "rotation": rotation,
+                "corner_radius": corner_radius,
             },
         )
+        hint = BulkHintTracker.record_and_hint("lib_add_footprint_pad")
+        if hint and isinstance(result, dict):
+            result["_hint_bulk"] = hint
+        return result
+
+    @mcp.tool()
+    async def lib_add_footprint_pads(
+        pads: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Add MANY pads to the current footprint in ONE call.
+
+        PREFER THIS over looping `lib_add_footprint_pad`. A 64-pad QFP
+        built one pad at a time is 64 LLM turns and 64
+        PreProcess/PostProcess+save cycles; with this tool it's one turn,
+        one PreProcess/PostProcess, one save. Pad coords are NOT snapped
+        to a grid (footprints use fine pitches like 50 mils / 0.5 mm).
+
+        Args:
+            pads: List of pad dicts, each with:
+                - designator (str, required) -- e.g. "1", "2", "A1"
+                - x, y       (int, mils), pad centre
+                - x_size, y_size (int, mils, default 60)
+                - hole_size  (int, mils, default 0 = SMD)
+                - shape      (str, default "rectangular"), one of
+                  round / rectangular / octagonal / roundrect (modern IPC
+                  rounded-rectangle SMD). Oval = round with x_size!=y_size.
+                - corner_radius (int %, default 25) for shape="roundrect"
+                - rotation   (float deg, default 0)
+                - layer      (str, default "TopLayer"). Only used for SMD
+                  pads (hole_size=0); a drilled pad is forced through-hole
+                  (MultiLayer). Use "BottomLayer" for bottom-side SMD.
+
+        Example, a 4-pad 0402 + corner pad in one call:
+            lib_add_footprint_pads(pads=[
+                {"designator": "1", "x": -25, "y": 0, "x_size": 30,
+                 "y_size": 40},
+                {"designator": "2", "x":  25, "y": 0, "x_size": 30,
+                 "y_size": 40},
+            ])
+
+        Returns:
+            Dict with added, failed, total counts.
+        """
+        op_strs: list[str] = []
+        skipped_invalid = 0
+        for p in pads:
+            desig = str(p.get("designator", "")).strip()
+            if not desig:
+                skipped_invalid += 1
+                continue
+            fields = [
+                f"designator={desig}",
+                f"x={round(p.get('x', 0))}",
+                f"y={round(p.get('y', 0))}",
+                f"x_size={round(p.get('x_size', 60))}",
+                f"y_size={round(p.get('y_size', 60))}",
+                f"hole_size={round(p.get('hole_size', 0))}",
+                f"shape={p.get('shape', 'rectangular')}",
+                f"corner_radius={round(p.get('corner_radius', 25))}",
+                f"rotation={p.get('rotation', 0)}",
+                f"layer={p.get('layer', 'TopLayer')}",
+            ]
+            op_strs.append(";".join(fields))
+
+        if not op_strs:
+            return {
+                "error": "No valid pads (every entry was missing a designator)",
+                "added": 0,
+                "total": len(pads),
+                "skipped_invalid": skipped_invalid,
+            }
+
+        bridge = get_bridge()
+        result = await bridge.send_command_async(
+            "library.add_footprint_pads",
+            {"pads": "~~".join(op_strs)},
+        )
+        if isinstance(result, dict) and skipped_invalid:
+            result["skipped_invalid"] = skipped_invalid
         return result
 
     @mcp.tool()
@@ -363,7 +937,10 @@ def register_library_tools(mcp):
             x2: End X in mils
             y2: End Y in mils
             width: Track width in mils
-            layer: Layer (typically TopOverlay for silkscreen)
+            layer: Layer name. Default "TopOverlay" (silkscreen). Any
+                Altium layer is accepted, e.g. "BottomOverlay" or
+                "Mechanical1".."Mechanical16" for courtyard / assembly
+                outlines.
 
         Returns:
             Dictionary confirming track addition
@@ -373,6 +950,72 @@ def register_library_tools(mcp):
             "library.add_footprint_track",
             {"x1": x1, "y1": y1, "x2": x2, "y2": y2, "width": width, "layer": layer},
         )
+        hint = BulkHintTracker.record_and_hint("lib_add_footprint_track")
+        if hint and isinstance(result, dict):
+            result["_hint_bulk"] = hint
+        return result
+
+    @mcp.tool()
+    async def lib_add_footprint_tracks(
+        tracks: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Add MANY tracks to the current footprint in ONE call.
+
+        PREFER THIS over looping `lib_add_footprint_track`. A silkscreen
+        outline + assembly outline is 8+ segments; built one at a time
+        that's 8+ LLM turns and 8+ PreProcess/PostProcess+save cycles.
+        Batched it's one turn, one PreProcess/PostProcess, one save.
+
+        Args:
+            tracks: List of track dicts, each with:
+                - x1, y1, x2, y2 (int, mils) -- endpoints
+                - width (int, mils, default 10)
+                - layer (str, default "TopOverlay" silkscreen). Any
+                  Altium layer name, e.g. "BottomOverlay" or
+                  "Mechanical1".."Mechanical16" for courtyard/assembly.
+
+        Example, a 100x60 mil silkscreen rectangle in one call:
+            lib_add_footprint_tracks(tracks=[
+                {"x1": -50, "y1": -30, "x2":  50, "y2": -30},
+                {"x1":  50, "y1": -30, "x2":  50, "y2":  30},
+                {"x1":  50, "y1":  30, "x2": -50, "y2":  30},
+                {"x1": -50, "y1":  30, "x2": -50, "y2": -30},
+            ])
+
+        Returns:
+            Dict with added, failed, total counts.
+        """
+        op_strs: list[str] = []
+        skipped_invalid = 0
+        for t in tracks:
+            if not all(k in t for k in ("x1", "y1", "x2", "y2")):
+                skipped_invalid += 1
+                continue
+            fields = [
+                f"x1={round(t.get('x1', 0))}",
+                f"y1={round(t.get('y1', 0))}",
+                f"x2={round(t.get('x2', 0))}",
+                f"y2={round(t.get('y2', 0))}",
+                f"width={round(t.get('width', 10))}",
+                f"layer={t.get('layer', 'TopOverlay')}",
+            ]
+            op_strs.append(";".join(fields))
+
+        if not op_strs:
+            return {
+                "error": "No valid tracks (each needs x1,y1,x2,y2)",
+                "added": 0,
+                "total": len(tracks),
+                "skipped_invalid": skipped_invalid,
+            }
+
+        bridge = get_bridge()
+        result = await bridge.send_command_async(
+            "library.add_footprint_tracks",
+            {"tracks": "~~".join(op_strs)},
+        )
+        if isinstance(result, dict) and skipped_invalid:
+            result["skipped_invalid"] = skipped_invalid
         return result
 
     @mcp.tool()
@@ -394,7 +1037,9 @@ def register_library_tools(mcp):
             start_angle: Start angle in degrees
             end_angle: End angle in degrees
             width: Line width in mils
-            layer: Layer for the arc
+            layer: Layer name. Default "TopOverlay" (silkscreen). Any
+                Altium layer accepted, e.g. "Mechanical1".."Mechanical16"
+                for pin-1 / assembly markers.
 
         Returns:
             Dictionary confirming arc addition
@@ -544,6 +1189,325 @@ def register_library_tools(mcp):
         result = await bridge.send_command_async(
             "library.get_footprints", params,
         )
+        return result
+
+    @mcp.tool()
+    async def lib_audit_footprint_policies(
+        library_path: Optional[str] = None,
+        policy: Optional[dict] = None,
+    ) -> dict[str, Any]:
+        """Sweep a PcbLib and flag footprints that break the library's own
+        conventions — inconsistent layer usage, pad rules, pin-1 markings,
+        courtyard, silkscreen, 3D models, designator style.
+
+        For each policy dimension it learns the library's DOMINANT convention
+        across all footprints and reports every footprint that deviates (so it
+        works on any house style without hard-coded rules). Pass ``policy`` to
+        pin a dimension to a required value instead, e.g.
+        ``{"silk_layer": "Top Overlay", "courtyard": true}``.
+
+        Each finding names the footprint, the dimension, and the expected vs
+        actual value — enough to drive a fix, not just a report.
+
+        Designators are checked for presence, layer, height, and for sitting on
+        the footprint's AVERAGE PAD CENTRE rather than the library origin (which
+        is arbitrary). Tune the centring window with
+        ``policy={"designator_center_tol": <mils>}``.
+
+        Geometry is read with the bulk ``library.get_library_geometry``
+        command, which walks the library once and pages the result. A library
+        of ~1000 footprints is one pass and a handful of round trips rather
+        than one round trip (and one full library re-scan) per footprint.
+
+        Args:
+            library_path: Optional .PcbLib to focus first; defaults to the
+                focused library.
+            policy: Optional explicit conventions to enforce; omitted
+                dimensions are inferred from the library.
+
+        Returns ``{library_path, footprint_count, conventions, findings,
+        summary}``.
+        """
+        from ..design.footprint_policy import (
+            audit_footprint_library,
+            plan_footprint_fixes,
+        )
+
+        bridge = get_bridge()
+        footprints, resolved_path = await _read_library_geometry(
+            bridge, library_path)
+        report = audit_footprint_library(footprints, policy=policy)
+        report["fixes"] = plan_footprint_fixes(report)
+        report["library_path"] = resolved_path
+        return report
+
+    @mcp.tool()
+    async def lib_convert_designators_to_stroke(
+        library_path: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Convert every TrueType ``.Designator`` in a PcbLib to a stroke font.
+
+        A TrueType PCB text will not persist a position change made through
+        ``XLocation`` — the write reads back changed, then Altium recomputes the
+        position from the TrueType layout on reload and it reverts. That is why a
+        handful of designators per library refuse to centre. ``Bold``/``Italic``
+        are TrueType-only attributes (a stroke text cannot be bold), so a bold or
+        italic designator is the reliable TrueType tell.
+
+        This clears ``UseTTFonts``, ``Bold`` and ``Italic`` on each such
+        designator, reads back to confirm, saves, and reloads. Afterwards those
+        designators are stroke and ``lib_fix_designators`` can centre them.
+
+        Returns ``{library_path, designators, converted, names, saved}``.
+        """
+        bridge = get_bridge()
+        params: dict[str, Any] = {}
+        if library_path:
+            params["library_path"] = library_path
+        res = await bridge.send_command_async(
+            "library.convert_designators_to_stroke", params,
+            timeout=_GEOMETRY_TIMEOUT)
+        res = res if isinstance(res, dict) else {}
+        saved = False
+        if res.get("converted"):
+            resolved = res.get("library_path") or library_path
+            try:
+                await bridge.send_command_async(
+                    "application.save_all", {}, timeout=_GEOMETRY_TIMEOUT)
+                saved = True
+            except Exception as e:
+                res.setdefault("errors", []).append(f"save failed: {e}")
+            await _reload_library(bridge, resolved)
+        res["saved"] = saved
+        return res
+
+    @mcp.tool()
+    async def lib_reload_library(library_path: str) -> dict[str, Any]:
+        """Close and reopen a PcbLib so Altium rebuilds its caches from disk.
+
+        ``IPCB_Text.BoundingRectangle`` is populated when the document loads and
+        is NOT refreshed when a text moves or is resized — not even by
+        ``GraphicallyInvalidate``. Anything that reads a text's extent after
+        writing to it therefore gets the OLD box. Reload between a write and the
+        next read.
+
+        SAVE FIRST: this does not save, and closing a dirty document loses the
+        edits or raises a prompt. ``lib_fix_designators`` already does this.
+        """
+        bridge = get_bridge()
+        return await bridge.send_command_async(
+            "library.reload_library", {"library_path": library_path},
+            timeout=_GEOMETRY_TIMEOUT)
+
+    @mcp.tool()
+    async def lib_probe_designator(
+        footprint_name: str,
+        library_path: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Diagnostic: dump one footprint's raw designator geometry.
+
+        Read-only. Returns the footprint origin and bounding rectangle, the pad
+        extents, and the ``.Designator`` anchor, bounding rectangle, size and
+        width — all in native TCoord. Use it to establish what
+        ``IPCB_Text.BoundingRectangle`` actually measures before trusting it to
+        centre anything.
+
+        Returns ``{footprint, fp_x, fp_y, fp_rect, pad_count, pad_rect,
+        desig_anchor, desig_rect, desig_size, desig_width, desig_text}``.
+        """
+        bridge = get_bridge()
+        params: dict[str, Any] = {"footprint_name": footprint_name}
+        if library_path:
+            params["library_path"] = library_path
+        return await bridge.send_command_async(
+            "library.probe_designator", params, timeout=_GEOMETRY_TIMEOUT)
+
+    @mcp.tool()
+    async def lib_fix_designators(
+        library_path: Optional[str] = None,
+        dry_run: bool = True,
+        fix_layer: bool = True,
+        fix_center: bool = True,
+        fix_height: bool = False,
+        add_missing: bool = False,
+        policy: Optional[dict] = None,
+    ) -> dict[str, Any]:
+        """Bring every footprint's ``.Designator`` onto the library's OWN
+        convention: the layer, height and centring the majority already use.
+
+        Nothing is hard-coded. The target layer, its raw ordinal, the norm
+        height and the centring tolerance are all inferred from this library
+        (see ``lib_audit_footprint_policies``); ``policy`` overrides any of
+        them. "Centred" means on the AVERAGE PAD CENTRE, not the library
+        origin.
+
+        DEFAULTS TO A DRY RUN. With ``dry_run=True`` (the default) it reports
+        exactly which footprints it would touch, on which layer, and at which
+        coordinates, and writes nothing. Pass ``dry_run=False`` to apply.
+
+        Applying RUNS TO CONVERGENCE: apply, save, reload the PcbLib, re-plan,
+        repeat until nothing is left. The reload is mandatory, not cosmetic —
+        Altium caches each text's bounding rectangle at load and never refreshes
+        it when the text moves or is resized, so a second pass without a reload
+        would centre against stale geometry and shove designators off the part.
+        Resizing a text also changes its box, so height fixes and centring
+        settle over successive passes rather than one.
+
+        PARTIAL SUCCESS IS EXPECTED AND REPORTED, NOT HIDDEN. A small number of
+        designators (a handful per library) do not persist a position change
+        through Altium's save for reasons not yet diagnosed — the write reads
+        back changed but the value reverts on reload. Rather than loop forever or
+        claim success, the tool stops when a pass makes no progress and returns
+        ``converged: false`` with the offending footprints in ``unrepairable``
+        for a human to centre by hand. Everything else is applied. ``applied``
+        counts only writes confirmed by read-back, never attempts.
+
+        Args:
+            library_path: .PcbLib to fix; defaults to the focused library.
+            dry_run: report the plan without writing (default True).
+            fix_layer: move designators off the convention layer onto it.
+            fix_center: re-centre designators beyond the library's tolerance.
+            fix_height: also normalise text height to the library norm.
+            add_missing: create a ``.Designator`` on footprints that lack one.
+            policy: explicit conventions, e.g.
+                ``{"designator_center_tol": 50, "designator_height": 20}``.
+
+        Returns ``{library_path, dry_run, conventions, planned, applied,
+        created, passes, converged, failed, skipped, actions}``.
+        """
+        from ..design.footprint_policy import plan_designator_repairs
+
+        bridge = get_bridge()
+        footprints, resolved_path = await _read_library_geometry(
+            bridge, library_path)
+        if not footprints:
+            return {"success": False,
+                    "error": "no footprints (open the PcbLib)"}
+
+        plan = plan_designator_repairs(
+            footprints, fix_layer=fix_layer, fix_center=fix_center,
+            fix_height=fix_height, add_missing=add_missing, policy=policy)
+        actions = plan["actions"]
+
+        result: dict[str, Any] = {
+            "library_path": resolved_path,
+            "dry_run": dry_run,
+            "conventions": plan["conventions"],
+            "planned": len(actions),
+            "skipped": plan["skipped"],
+            "actions": actions,
+        }
+        if dry_run or not actions:
+            result["applied"] = 0
+            result["failed"] = []
+            return result
+
+        # Baseline BEFORE any write: the loop rebinds `footprints` each pass,
+        # and blaming a write for duplicates that were already there makes the
+        # guard cry wolf and stop being believed.
+        from ..design.footprint_policy import _designator_count
+        before_dupes = {fp.get("name") for fp in footprints
+                        if _designator_count(fp) > 1}
+
+        # Apply, save, RELOAD, re-plan -- until nothing is left to do.
+        #
+        # One pass is never enough. Altium caches each text's BoundingRectangle
+        # at load and does not refresh it when XLocation or Size changes, so
+        # after a write every rectangle in memory is stale. Centring is computed
+        # from that rectangle, so a second pass in the same session would move
+        # designators by a wrong delta. Reloading the document drops the caches;
+        # the next read gets true geometry. Resizing a text also changes its
+        # box, so height fixes and centring genuinely need separate passes.
+        failed: list[dict] = []
+        applied, created, saved, passes = 0, 0, False, 0
+        touched: set = set()
+
+        while actions and passes < _MAX_PASSES:
+            passes += 1
+            touched.update(a["footprint"] for a in actions)
+            a, c = await _apply_edits(bridge, actions, resolved_path, failed)
+            applied += a
+            created += c
+            if not a:
+                break
+
+            try:
+                await bridge.send_command_async(
+                    "application.save_all", {}, timeout=_GEOMETRY_TIMEOUT)
+                saved = True
+            except Exception as e:
+                failed.append({"footprint": "*", "error": f"save failed: {e}"})
+                break
+
+            if not await _reload_library(bridge, resolved_path):
+                failed.append({
+                    "footprint": "*",
+                    "error": "library reload failed; stopping after one pass "
+                             "(further passes would read a stale bounding-box "
+                             "cache and misplace designators)"})
+                break
+
+            footprints, _ = await _read_library_geometry(bridge, resolved_path)
+            next_actions = plan_designator_repairs(
+                footprints, fix_layer=fix_layer, fix_center=fix_center,
+                fix_height=fix_height, add_missing=add_missing,
+                policy=policy)["actions"]
+
+            # A pass that changes nothing will never change anything. Repeating
+            # it burns passes and, worse, reports a growing `applied` count for
+            # edits that are not landing.
+            if _same_plan(actions, next_actions):
+                stuck = [a["footprint"] for a in next_actions]
+                failed.append({
+                    "footprint": "*",
+                    "error": f"{len(stuck)} designators would not move; "
+                             f"stopping (no progress): {', '.join(stuck[:10])}"})
+                actions = next_actions
+                break
+            actions = next_actions
+
+        result["passes"] = passes
+        result["converged"] = not actions
+        if actions:
+            result["remaining"] = len(actions)
+            result["unrepairable"] = [a["footprint"] for a in actions][:25]
+
+        # Read the library BACK and confirm no footprint gained a second
+        # .Designator. A create that lands on the wrong component is invisible
+        # to the writer, so the only honest check is to re-measure.
+        if applied:
+            from ..design.footprint_policy import _designator_offsets
+
+            after, _ = await _read_library_geometry(bridge, resolved_path)
+            dupes = [fp.get("name") for fp in after
+                     if _designator_count(fp) > 1
+                     and fp.get("name") not in before_dupes]
+            result["verified_no_duplicates"] = not dupes
+            result["preexisting_duplicates"] = sorted(before_dupes)
+            if dupes:
+                result["duplicates_created"] = dupes[:25]
+                failed.append({
+                    "footprint": "*",
+                    "error": f"{len(dupes)} footprints now have duplicate "
+                             f".Designator strings — RESTORE FROM BACKUP"})
+
+            # A designator left at the board origin instead of on its part sits
+            # tens of thousands of mils away. Nothing legitimate does that.
+            stray = [fp.get("name") for fp, off, _, _ in
+                     _designator_offsets(after)
+                     if fp.get("name") in touched and off > _STRAY_MILS]
+            result["verified_no_stray_designators"] = not stray
+            if stray:
+                result["strays_created"] = stray[:25]
+                failed.append({
+                    "footprint": "*",
+                    "error": f"{len(stray)} designators landed >{_STRAY_MILS} "
+                             f"mils from their pads — RESTORE FROM BACKUP"})
+
+        result["applied"] = applied
+        result["created"] = created
+        result["failed"] = failed
+        result["saved"] = saved
         return result
 
     # =========================================================================
@@ -1035,18 +1999,17 @@ def register_library_tools(mcp):
     ) -> dict[str, Any]:
         """Multi-target label-style writer for SchLib symbols.
 
-        Same job as ``lib_set_label_format`` but applies SEVERAL
-        target/style ops in one IPC round-trip. The library is
-        opened once and walked once; every op is applied to each
-        component in turn. Five sequential single-target calls
+        Applies SEVERAL label target/style ops to SchLib symbols in
+        one IPC round-trip (there is no singular variant). The library
+        is opened once and walked once; every op is applied to each
+        component in turn. Five sequential per-target writes would
         collapse into one trip plus one library walk -- which is
         the dominant cost on large libraries (each individual call
         runs an IPC, a workspace lookup, a doc-focus check and a
         CompInfoReader walk).
 
-        Each ``op`` is a dict with the same shape as the
-        single-target tool's args -- no field has a built-in default,
-        only the ones you supply get written:
+        Each ``op`` is a dict describing one label target -- no field
+        has a built-in default, only the ones you supply get written:
 
             {"target": "designator",         # required
              "font_id": <int>,               # optional
@@ -1278,6 +2241,7 @@ def register_library_tools(mcp):
         start_angle: float = 0,
         end_angle: float = 360,
         width: int = 1,
+        grid: int = 25,
     ) -> dict[str, Any]:
         """Add an arc to the current library symbol.
 
@@ -1288,6 +2252,9 @@ def register_library_tools(mcp):
             start_angle: Start angle in degrees (0 = right, 90 = up)
             end_angle: End angle in degrees
             width: Line width (0=zero, 1=small, 2=medium, 3=large)
+            grid: snap grid (mils); arcs are glyph detail and don't need
+                the 100-mil pin grid (rule 15), so the default is a finer
+                25 (e.g. inductor coils). Pass 100 for coarse, 0/1 for none.
 
         Returns:
             Dictionary confirming arc addition
@@ -1296,9 +2263,9 @@ def register_library_tools(mcp):
         result = await bridge.send_command_async(
             "library.add_symbol_arc",
             {
-                "x_center": _snap(int(x_center)),
-                "y_center": _snap(int(y_center)),
-                "radius": _snap(int(radius)),
+                "x_center": _snap_grid(x_center, grid),
+                "y_center": _snap_grid(y_center, grid),
+                "radius": _snap_grid(radius, grid),
                 "start_angle": start_angle,
                 "end_angle": end_angle,
                 "width": width,
@@ -1309,6 +2276,7 @@ def register_library_tools(mcp):
     @mcp.tool()
     async def lib_add_symbol_polygon(
         vertices: str,
+        grid: int = 25,
     ) -> dict[str, Any]:
         """Add a polygon (filled shape) to the current library symbol.
 
@@ -1317,17 +2285,21 @@ def register_library_tools(mcp):
                 Example: "0,0,100,0,100,100,0,100" creates a square with
                 vertices at (0,0), (100,0), (100,100), (0,100).
                 Minimum 3 vertices (6 values) required.
+            grid: snap grid (mils) for the vertices. A filled polygon is
+                glyph detail (e.g. a diode triangle) and doesn't need the
+                100-mil pin grid (rule 15), so the default is a finer 25;
+                pass 100 for coarse or 0/1 to disable snapping.
 
         Returns:
             Dictionary confirming polygon addition with vertex count
         """
-        # Snap each (x, y) vertex pair to the schematic 100-mil grid.
-        # Off-grid polygon vertices look ragged and don't align with
-        # the pin grid the rest of the symbol uses.
+        # Snap each (x, y) vertex pair to the chosen glyph grid (default 25;
+        # finer than the 100-mil pin grid per rule 15) so triangles/chevrons
+        # keep their shape instead of collapsing.
         try:
             coords = [int(v.strip()) for v in vertices.split(",") if v.strip()]
             if len(coords) >= 6 and len(coords) % 2 == 0:
-                snapped = [_snap(c) for c in coords]
+                snapped = [_snap_grid(c, grid) for c in coords]
                 vertices = ",".join(str(c) for c in snapped)
         except (ValueError, AttributeError):
             # Pass through; bridge will reject malformed vertices itself.

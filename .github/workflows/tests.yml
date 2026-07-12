@@ -27,5 +27,13 @@ jobs:
       - name: Pascal bundle consistency
         run: python scripts/altium/build.py
 
+      # Free Pascal lets the cross-validation suite (tests/test_cross_validate.py)
+      # actually run instead of self-skipping: it compiles the real Pascal
+      # string/JSON/unit helpers with fpc and asserts byte-for-byte parity with
+      # their Python mirrors. Without fpc on PATH those tests skip silently, so
+      # a regression in a shared helper would pass CI unnoticed.
+      - name: Install Free Pascal Compiler
+        run: choco install freepascal --no-progress -y
+
       - name: Run test suite
         run: python -m pytest tests/ -q

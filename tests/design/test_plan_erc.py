@@ -234,6 +234,42 @@ def test_clean_pins_no_short():
     assert not [i for i in rep.issues if i.code == "shorted_pin"]
 
 
+def test_shorted_passive_both_pins_one_net_is_error():
+    # R1 has both pins on net A -> inert resistor, a shorted_component error.
+    plan = _plan(
+        parts=[Part(refdes="U1", lib_ref="IC"), Part(refdes="R1", lib_ref="RES")],
+        nets=[_net("A", [("U1", "1"), ("R1", "1"), ("R1", "2")]),
+              _net("B", [("U1", "2"), ("U1", "3")])],
+    )
+    rep = check_plan_erc(plan)
+    shorts = [i for i in rep.issues if i.code == "shorted_component"]
+    assert len(shorts) == 1
+    assert shorts[0].severity == "error"
+    assert shorts[0].refs == ("R1", "A")
+    assert rep.passed is False
+
+
+def test_passive_across_two_nets_is_not_shorted():
+    plan = _plan(
+        parts=[Part(refdes="U1", lib_ref="IC"), Part(refdes="C1", lib_ref="CAP")],
+        nets=[_net("VCC", [("U1", "1"), ("C1", "1")], is_power=True),
+              _net("GND", [("U1", "2"), ("C1", "2")], is_ground=True)],
+    )
+    rep = check_plan_erc(plan)
+    assert not [i for i in rep.issues if i.code == "shorted_component"]
+
+
+def test_connector_pins_on_one_net_not_shorted_component():
+    # A connector with several pins on GND is legitimate; only R/C/L are scoped.
+    plan = _plan(
+        parts=[Part(refdes="J1", lib_ref="HDR"), Part(refdes="U1", lib_ref="IC")],
+        nets=[_net("GND", [("J1", "1"), ("J1", "2"), ("U1", "2")], is_ground=True),
+              _net("SIG", [("J1", "3"), ("U1", "1")])],
+    )
+    rep = check_plan_erc(plan)
+    assert not [i for i in rep.issues if i.code == "shorted_component"]
+
+
 def test_contradictory_power_ground_flags_is_error():
     plan = _plan(
         parts=[Part(refdes="U1", lib_ref="IC"), Part(refdes="R1", lib_ref="RES")],

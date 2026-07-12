@@ -15,6 +15,7 @@ from eda_agent.design.length_matching import (
     skew_for_length,
     match_tolerance_for_rise_time,
     match_group_report,
+    intra_pair_skew,
     assess_length_match,
 )
 
@@ -182,3 +183,78 @@ def test_assess_microstrip_faster_than_stripline():
     ms = assess_length_match(geometry="microstrip", skew_budget_ps=10.0)
     sl = assess_length_match(geometry="stripline", skew_budget_ps=10.0)
     assert ms["tolerance_mils"] > sl["tolerance_mils"]
+
+
+# --------------------------------------------------------------------------- #
+# Intra-pair (P-vs-N) skew
+# --------------------------------------------------------------------------- #
+def test_intra_pair_simple_mismatch():
+    # Single-segment legs: P is 50 mils longer than N.
+    r = intra_pair_skew((("DP",), ("DM",)), {"DP": 1050.0, "DM": 1000.0},
+                        _STRIP_FR4)
+    assert r.leg_lengths == (1050.0, 1000.0)
+    assert r.mismatch_mils == pytest.approx(50.0)
+    assert r.longer_leg == 0
+    assert r.compensation_mils == pytest.approx(50.0)  # lengthen the short (N) leg
+    assert r.skew_ps == pytest.approx(skew_for_length(50.0, _STRIP_FR4))
+
+
+def test_intra_pair_sums_split_segments():
+    # A series resistor splits each leg; the leg length is the segment sum.
+    legs = (("DP_C", "DP_U"), ("DM_C", "DM_U"))
+    lengths = {"DP_C": 300.0, "DP_U": 700.0,    # P total 1000
+               "DM_C": 320.0, "DM_U": 660.0}    # N total 980
+    r = intra_pair_skew(legs, lengths, _STRIP_FR4)
+    assert r.leg_lengths == (1000.0, 980.0)
+    assert r.mismatch_mils == pytest.approx(20.0)
+    assert r.longer_leg == 0
+
+
+def test_intra_pair_within_and_over_budget():
+    legs = (("DP",), ("DM",))
+    # 20-mil mismatch; 5 ps budget ~= 29 mils on FR4 stripline -> within.
+    ok = intra_pair_skew(legs, {"DP": 1020.0, "DM": 1000.0}, _STRIP_FR4,
+                         skew_budget_ps=5.0)
+    assert ok.within_tolerance
+    # 40-mil mismatch exceeds the same ~29-mil window -> over.
+    bad = intra_pair_skew(legs, {"DP": 1040.0, "DM": 1000.0}, _STRIP_FR4,
+                          skew_budget_ps=5.0)
+    assert not bad.within_tolerance
+    assert bad.tolerance_mils == pytest.approx(length_for_skew(5.0, _STRIP_FR4))
+
+
+def test_intra_pair_no_budget_is_always_within():
+    r = intra_pair_skew((("DP",), ("DM",)), {"DP": 2000.0, "DM": 1000.0},
+                        _STRIP_FR4)
+    assert r.tolerance_mils is None
+    assert r.within_tolerance
+
+
+def test_intra_pair_zero_mismatch():
+    r = intra_pair_skew((("DP",), ("DM",)), {"DP": 1000.0, "DM": 1000.0},
+                        _STRIP_FR4, skew_budget_ps=1.0)
+    assert r.mismatch_mils == 0.0
+    assert r.skew_ps == 0.0
+    assert r.within_tolerance
+
+
+def test_intra_pair_explicit_tolerance_wins_over_budget():
+    r = intra_pair_skew((("DP",), ("DM",)), {"DP": 1010.0, "DM": 1000.0},
+                        _STRIP_FR4, tolerance_mils=5.0, skew_budget_ps=999.0)
+    assert r.tolerance_mils == pytest.approx(5.0)
+    assert not r.within_tolerance  # 10 > 5
+
+
+def test_intra_pair_rejects_wrong_leg_count():
+    with pytest.raises(ValueError):
+        intra_pair_skew((("DP",),), {"DP": 1.0}, _STRIP_FR4)
+
+
+def test_intra_pair_rejects_missing_length():
+    with pytest.raises(ValueError):
+        intra_pair_skew((("DP",), ("DM",)), {"DP": 1000.0}, _STRIP_FR4)
+
+
+def test_intra_pair_rejects_empty_leg():
+    with pytest.raises(ValueError):
+        intra_pair_skew((("DP",), ()), {"DP": 1000.0}, _STRIP_FR4)

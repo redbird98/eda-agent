@@ -29,6 +29,12 @@ Var
     { Pause: when True, Dispatcher's poll loop skips ScanForRequestFile.    }
     PausedFlag       : Boolean;
 
+    { Renew: set by the Renew button, consumed once by the Dispatcher to    }
+    { reset its real idle deadline (LastActivityMs). The form's             }
+    { LastActivityTick alone only moves the visible countdown, not the      }
+    { actual auto-shutdown timer that lives local to StartMCPServer.        }
+    RenewRequested   : Boolean;
+
     { Spinner state. SpinnerFrame indexes into a 4-phase moon glyph cycle. }
     SpinnerFrame     : Integer;
     InFlightCommand  : String;
@@ -565,6 +571,7 @@ Begin
         OnlySlowFlag    := False;
         AlwaysOnTopFlag := True;
         PausedFlag      := False;
+        RenewRequested  := False;
         InFlightActive  := False;
         SpinnerFrame    := 0;
         FilterText      := '';
@@ -665,9 +672,12 @@ End;
 
 Procedure btn_RenewClick(Sender : TObject);
 Begin
-    { Dispatcher recomputes idle on every poll, but we reset the local      }
-    { "last activity" tick here too so the visible countdown jumps back     }
-    { to the full window without waiting for a real command.                }
+    { Signal the Dispatcher to reset its REAL idle deadline (LastActivityMs,}
+    { local to StartMCPServer) on its next poll -- without this the renew    }
+    { only moved the visible countdown and the bridge still auto-shut-down.  }
+    Try RenewRequested := True; Except End;
+    { Also reset the local tick so the visible countdown jumps back to the   }
+    { full window immediately, without waiting for the next poll.            }
     Try LastActivityTick := GetTickCount; Except End;
 End;
 

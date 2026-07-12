@@ -7,13 +7,69 @@ by reimplementing them in Python and testing against identical inputs/outputs.
 Any divergence between the Python reimplementation and expected behavior IS a bug.
 """
 
+import inspect
 import json
 import pytest
+import re
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
 from tests.altium_simulator import AltiumSimulator, SIM_PROTOCOL_VERSION
+
+
+# Binary Altium fixtures that stay local-only: they are large binaries that
+# also embed a local machine's absolute paths, so they are deliberately not
+# committed. Tests that need them run wherever the file is present (a dev box)
+# and skip where it is absent (CI, a fresh clone). The skip is applied
+# automatically below so individual tests do not each need a guard.
+_FIXTURE_DIR = Path(__file__).resolve().parent / "integration" / "fixtures"
+_LOCAL_ONLY_FIXTURES = ("main.SchDoc", "EDAAgentTest.PcbDoc",
+                        "EDAAgentTest_ICs.SchLib", "EDAAgentTest_Export.OutJob")
+# Committed fixtures that are only useful together with a local-only one: the
+# project files aggregate main.SchDoc, so a project test needs it too.
+_AGGREGATOR_FIXTURES = ("EDAAgentTest.PrjPcb", "EDAAgentTest.PrjPcbStructure")
+
+
+def pytest_collection_modifyitems(config, items):
+    """Skip tests that need a local-only binary fixture when it is absent."""
+    missing = [n for n in _LOCAL_ONLY_FIXTURES if not (_FIXTURE_DIR / n).exists()]
+    if not missing:
+        return
+    aggregators_broken = "main.SchDoc" in missing
+    skip = pytest.mark.skip(
+        reason="needs a local-only binary Altium fixture not committed to the "
+               "repo (" + ", ".join(missing) + ")")
+    for item in items:
+        func = getattr(item, "function", None)
+        mod = getattr(item, "module", None)
+        if func is None or mod is None:
+            continue
+        try:
+            src = inspect.getsource(func)
+        except (OSError, TypeError):
+            continue
+        needs = False
+        # A module-level Path variable (FIXTURE, SCH, PRJ, LIB, ...) that points
+        # at a fixtures file which is now missing, or at a project aggregator
+        # whose sheet is missing, and that the test actually references.
+        for var, val in vars(mod).items():
+            if not isinstance(val, Path):
+                continue
+            if "fixtures" not in str(val).replace("\\", "/"):
+                continue
+            broken = (not val.exists()) or (
+                aggregators_broken and val.name in _AGGREGATOR_FIXTURES)
+            if broken and re.search(r"\b" + re.escape(var) + r"\b", src):
+                needs = True
+                break
+        # A test that builds a fixtures path inline (the "fixtures" segment plus
+        # a missing filename appear in its own source). The "fixtures" check
+        # keeps tests that make a same-named file in a temp dir from matching.
+        if not needs and "fixtures" in src and any(n in src for n in missing):
+            needs = True
+        if needs:
+            item.add_marker(skip)
 
 
 @pytest.fixture

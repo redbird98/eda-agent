@@ -1,4 +1,4 @@
-{ SPDX-License-Identifier: Apache-2.0                                   }
+﻿{ SPDX-License-Identifier: Apache-2.0                                   }
 { Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>                                      }
 {..............................................................................}
 { Main.pas - Constants, IPC primitives and JSON helpers for the Altium bridge   }
@@ -13,7 +13,7 @@ Const
     // returns, mismatch means Altium is running a stale compiled script
     // (DelphiScript caches compiled units until the script project is
     // reopened or Altium is restarted).
-    SCRIPT_VERSION = '2026.06.15.3';
+    SCRIPT_VERSION = '2026.07.11.2';
 
     // Wire protocol version. Bumped whenever the request/response JSON shape
     // changes incompatibly. Python and Pascal must agree; mismatch returns
@@ -100,8 +100,8 @@ End;
 { unambiguous even when a single operation's property list contains '|'.       }
 {                                                                               }
 { Defined in Main.pas so Library.pas and Generic.pas can both use them,       }
-{ the Altium project compiles files in DesignN order (Main → ... → Library →  }
-{ ... → Generic) and a callee must come earlier than its caller.               }
+{ the Altium project compiles files in DesignN order (Main â†’ ... â†’ Library â†’  }
+{ ... â†’ Generic) and a callee must come earlier than its caller.               }
 {..............................................................................}
 
 Function NextBatchOp(Var Remaining : String) : String;
@@ -1051,22 +1051,62 @@ Begin
     WriteFileContent(FinalPath, JsonContent);
 End;
 
-{ Wipe leftover request_*.json files at session start so a previous run's   }
-{ orphan can't replay against this session. Per-request response files are  }
-{ left to Python's age-based sweep at attach time.                           }
-Procedure CleanupOrphanResponses;
+{ Wipe leftover request_*.json files at session start so a previous run's    }
+{ orphan can't replay against this session. A crashed loop, or a client that }
+{ abandoned a long sweep, leaves request files on disk; without this the     }
+{ next session would answer them all before serving anything new -- and each }
+{ answer would resolve against whatever document is focused NOW, not the one }
+{ the caller meant.                                                          }
+{                                                                              }
+{ The purged count is logged, so an operator can tell "the loop is slow" from }
+{ "the loop is draining a backlog".                                          }
+Procedure CleanupOrphanRequests;
 Var
     Files : TStringList;
-    I : Integer;
+    I, Purged : Integer;
 Begin
+    Purged := 0;
     Files := TStringList.Create;
     Try
         FindFiles(WorkspaceDir, 'request_*.json', 63, False, Files);
         For I := 0 To Files.Count - 1 Do
-            Try DeleteFile(Files[I]); Except End;
+            Try
+                DeleteFile(Files[I]);
+                Inc(Purged);
+            Except End;
     Finally
         Files.Free;
     End;
+    If Purged > 0 Then
+        AppendLog(FormatLogStamp + ',0,_purge_requests,count=' + IntToStr(Purged)
+            + ',0,');
+End;
+
+{ Wipe leftover response_*.json files at session start. Python deletes its   }
+{ own response file after reading it, but a client that timed out (or died)  }
+{ leaves the response it never collected. These accumulate forever otherwise.}
+{ Only safe at startup: no client can still be waiting on a response written }
+{ by a session that has already ended.                                       }
+Procedure CleanupOrphanResponses;
+Var
+    Files : TStringList;
+    I, Purged : Integer;
+Begin
+    Purged := 0;
+    Files := TStringList.Create;
+    Try
+        FindFiles(WorkspaceDir, 'response_*.json', 63, False, Files);
+        For I := 0 To Files.Count - 1 Do
+            Try
+                DeleteFile(Files[I]);
+                Inc(Purged);
+            Except End;
+    Finally
+        Files.Free;
+    End;
+    If Purged > 0 Then
+        AppendLog(FormatLogStamp + ',0,_purge_responses,count=' + IntToStr(Purged)
+            + ',0,');
 End;
 
 {..............................................................................}

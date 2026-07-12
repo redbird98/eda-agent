@@ -46,6 +46,44 @@ class TestBulkHintTracker:
         for _ in range(10):
             assert BulkHintTracker.record_and_hint("some_other_tool") is None
 
+    def test_library_footprint_pad_nudges_to_bulk(self):
+        # looping the singular footprint-pad tool steers to the batch tool
+        hint = None
+        for _ in range(8):
+            hint = BulkHintTracker.record_and_hint("lib_add_footprint_pad")
+            if hint:
+                break
+        assert hint is not None
+        assert hint["bulk_tool"] == "lib_add_footprint_pads"
+
+    def test_library_footprint_track_nudges_to_bulk(self):
+        hint = None
+        for _ in range(8):
+            hint = BulkHintTracker.record_and_hint("lib_add_footprint_track")
+            if hint:
+                break
+        assert hint is not None
+        assert hint["bulk_tool"] == "lib_add_footprint_tracks"
+
+    def test_design_authoring_tools_nudge_to_compose(self):
+        # looping add_part / add_block / connect_bus steers to compose_netlist
+        for tool in ("design_add_part", "design_add_circuit_block",
+                     "design_connect_bus"):
+            BulkHintTracker.reset()
+            hint = None
+            for _ in range(5):
+                hint = BulkHintTracker.record_and_hint(tool)
+                if hint:
+                    break
+            assert hint is not None, tool
+            assert hint["bulk_tool"] == "design_compose_netlist", tool
+
+    def test_compose_netlist_never_self_nudges(self):
+        # the bulk tool itself must not be registered as a singular source
+        for _ in range(10):
+            assert BulkHintTracker.record_and_hint(
+                "design_compose_netlist") is None
+
     def test_distinct_tools_tracked_separately(self):
         for _ in range(2):
             BulkHintTracker.record_and_hint("obj_create")

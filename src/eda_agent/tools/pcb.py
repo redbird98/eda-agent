@@ -306,7 +306,7 @@ def register_pcb_tools(mcp):
         `pcb_plan_placement`, `design_visual_review`, …) operate on the
         *focused* board — and `app_set_active_document` does NOT reliably set
         that for a PcbDoc. Call this first to point them all at the board
-        you mean. (`pcb_place_component(s)` already accept `board_path`
+        you mean. (`pcb_place_components` already accepts `board_path`
         directly.)
 
         Args:
@@ -329,7 +329,7 @@ def register_pcb_tools(mcp):
 
         By default removes only EMPTY nets (no connected pads / tracks /
         vias) — the cleanup for stray nets left behind after deleting
-        components, e.g. nets created by `pcb_place_component`'s synced
+        components, e.g. nets created by `pcb_place_components`' synced
         mode. A net that still has connections is skipped unless
         ``force=True`` (forcing orphans those pads/tracks, so use it
         deliberately).
@@ -691,8 +691,8 @@ def register_pcb_tools(mcp):
     ) -> dict[str, Any]:
         """Move and/or rotate MANY PCB components in ONE IPC round-trip.
 
-        PREFER THIS over looping `pcb_move_component`. Each call to the
-        singular tool is a full LLM turn (5-15 s); one call to this tool
+        PREFER THIS over moving one component per call. Each singular
+        move is a full LLM turn (5-15 s); one call to this tool
         repositions every component in the list in a single Altium
         transaction.
 
@@ -3174,8 +3174,8 @@ def register_pcb_tools(mcp):
         DOES NOT actually move the component. Computes the predicted
         axis-aligned bounding box at the proposed pose, then AABB-tests
         against every other component's current bounding rect. Use this
-        BEFORE every `pcb_move_component` / `pcb_move_components` call
-        when placing parts on a board that already has placed parts.
+        BEFORE every `pcb_move_components` call when placing parts on a
+        board that already has placed parts.
 
         Args:
             designator: Component to test (must exist on the board).
@@ -3649,7 +3649,7 @@ def register_pcb_tools(mcp):
     ) -> dict[str, Any]:
         """Place many track segments on the active PCB in ONE IPC round-trip.
 
-        PREFER THIS over looping `pcb_place_track` whenever you have
+        PREFER THIS over placing one segment at a time whenever you have
         more than one segment to place. The whole batch is wrapped in
         a single PreProcess/PostProcess and a single save, so 50
         tracks take roughly the same wall time as 1. Typical uses:
@@ -4397,7 +4397,7 @@ def register_pcb_tools(mcp):
 
     @mcp.tool()
     async def pcb_export_coordinates() -> dict[str, Any]:
-        """Export component placement coordinates, same as pcb_get_components but formatted for pick-and-place.
+        """Export component placement coordinates formatted for pick-and-place (like `pcb_get_components`, but the pick-and-place shape: adds side, omits bbox detail).
 
         Returns designator, footprint, comment, position (x, y),
         rotation, layer, and side (Top/Bottom) for every component.

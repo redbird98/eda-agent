@@ -536,7 +536,7 @@ Var
     ProcessedOk : Boolean;
 Begin
     EnsureWorkspaceDir;
-    CleanupOrphanResponses;
+    CleanupOrphanRequests;
 
     WriteSelfTestRequest('ipctest1', 'application.ping');
     RequestPath := RequestFilePath('ipctest1');
@@ -579,7 +579,7 @@ Begin
     AssertTrue(Not ProcessedOk, 'ProcessSingleRequest returns False for empty request body');
 
     // No request file at all: ScanForRequestFile finds nothing, returns False.
-    CleanupOrphanResponses;
+    CleanupOrphanRequests;
     ProcessedOk := ProcessSingleRequest;
     AssertTrue(Not ProcessedOk, 'ProcessSingleRequest returns False when no file');
 End;

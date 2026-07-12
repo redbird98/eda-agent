@@ -403,4 +403,15 @@ class DesignPlan(BaseModel):
                         f"net {n.name} references unknown refdes {pr.refdes}"
                     )
 
+        # A BOM line that names a refdes the plan no longer has is a dangling
+        # reference -- it slips past every field validator (the BOM is just a
+        # list of strings) and would ship a wrong bill. Common after a part
+        # is deleted without scrubbing the BOM.
+        for bl in self.bom:
+            for rd in bl.refdes_list:
+                if rd not in part_refdes:
+                    problems.append(
+                        f"BOM line references unknown refdes {rd}"
+                    )
+
         return problems

@@ -2,13 +2,13 @@
 # Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """Design discipline, the rules a Claude Code agent follows when designing.
 
-Surfaced via the ``design.get_discipline`` MCP tool. Claude Code reads it
+Surfaced via the ``design_get_discipline`` MCP tool. Claude Code reads it
 once at the start of a design session and uses it to bound its choices
 (net-label-driven schematics, datasheet-first part selection, NDA-clean
 corpus, prefer existing-lib parts, etc.).
 
 The DesignPlan JSON schema is appended so the agent knows the exact shape
-it must produce when handing a plan to ``design.execute_plan``.
+it must produce when handing a plan to ``design_execute_plan``.
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ these rules before producing a plan; they bound your choices.
 
 1. **Output a DesignPlan that validates strictly against the schema below.**
    No extra fields. No prose mixed in. When you hand a plan to
-   `design.execute_plan` it must be valid JSON matching the schema; the
+   `design_execute_plan` it must be valid JSON matching the schema; the
    executor rejects malformed input.
 
 2. **Every Part must either:**
@@ -125,13 +125,13 @@ these rules before producing a plan; they bound your choices.
 12. **Atomic-parts contract.** When `status='existing'`, the planner
     must populate `mpn`, `footprint`, and `datasheet_url` on the Part
     from the inventory snapshot (which exposes those fields for every
-    component when retrieved via `design.snapshot_inventory`). This
+    component when retrieved via `design_snapshot_inventory`). This
     matches the KiCad Atomic / Digi-Key Library / atopile / JITX
     standard: every existing symbol carries MPN + footprint + datasheet
     URL bound at the part level so the resulting BOM is complete and
     the PCB has a footprint on every component without human cleanup.
     Missing any of these fields emits an `atomic_parts` warning during
-    `design.validate` and produces a BOM with blank MPN / Mfr columns.
+    `design_validate` and produces a BOM with blank MPN / Mfr columns.
     If the inventory snapshot itself is missing one of these fields on
     a component, surface that in `open_questions` rather than silently
     shipping an incomplete Part.
@@ -260,6 +260,35 @@ these rules before producing a plan; they bound your choices.
     relaxes — there's only one or two sensible layouts. The rule
     applies to anything with 4+ pins.
 
+19. **Match the EXISTING schematic's styles — INSPECT first, never impose
+    defaults.** Before adding ANY object (wire, net label, port, power
+    port, text/note, junction, parameter, or a placed symbol) to a sheet
+    that ALREADY has content, you MUST read the styles in use on that
+    sheet and conform to them. A new object in a different font, colour,
+    text size, or line width than its neighbours reads as bolted-on and
+    is the #1 tell of machine-generated work. Concretely, read and match:
+    - **Fonts** — text height, face, bold/italic of existing designators,
+      net labels, and notes via `obj_get_font_spec` / `obj_get_font_id`
+      (resolve the FontID an existing label uses; reuse THAT id, do not
+      mint a new font).
+    - **Colours** — wire colour, net-label colour, text colour, and
+      symbol body fill, read from existing objects with `obj_query`
+      (don't hardcode a colour; sample what the sheet already uses).
+    - **Line widths / styles** — wire and bus width, junction size.
+    - **Parameter presentation** — visibility, justification, and offset
+      of Designator/Comment on already-placed components (match rule 16's
+      defaults ONLY on a blank sheet; otherwise match what's there).
+    - **Sheet** — size, border/title-block template, and units via
+      `sch_get_sheet_parameters` + `obj_get_document_info`; new content
+      stays on the same grid and within the same template.
+    Use `lib_audit_styles` to surface the dominant style across a library
+    or sheet when in doubt. Defaults (rule 16/17, Altium yellow body,
+    standard font) apply ONLY to a genuinely BLANK new sheet with no
+    existing style to match — and then pick ONE consistent style and
+    reuse it for every object you add. When extending or editing a
+    user's existing schematic, the existing style ALWAYS wins over the
+    agent's defaults.
+
 ## Tool-usage rules (read before driving the tools)
 
 Operational rules for using the MCP tools correctly, independent of any
@@ -309,7 +338,8 @@ one design. They apply in every session.
    unconnected (DRC flags them) and a later ECO treats the parts as "extra
    in PCB". Fine for artwork, panelization, or testing. *Synced* — also
    pass `unique_id` (the schematic component's UniqueId, from
-   `query_objects(eSchComponent, "Designator.Text,UniqueId")`) and
+   `obj_query(object_type="eSchComponent",
+   properties="Designator.Text,UniqueId")`) and
    `pad_nets` `{pad: net}` (from the compiled netlist via
    `proj_get_connectivity_many`). That stamps the sch↔PCB link AND creates +
    assigns each pad's net, giving real connectivity (ratsnest + DRC) with
@@ -334,6 +364,90 @@ one design. They apply in every session.
    Connectivity comes from the netlist; the render comes from the geometry.
    Do not substitute one for the other.
 
+9. **Author components with the one-call generators, never primitive-by-
+   primitive.** When creating a NEW library part:
+   - **Footprint:** `lib_create_standard_footprint(name, family, ...)` emits
+     the WHOLE footprint (every pad + silkscreen + courtyard) in one call.
+     `family` = `chip` (0402/0603 passives) / `sip` (single-row headers) /
+     `dual` (SOIC/SOP/SON/SOT/SOT-23/DIP) / `header` (2-row pin/box header,
+     IDC, SWD/JTAG) / `tab` (SOT-223/DPAK/TO-220 power packages, pass
+     tab_w/tab_h) / `quad` (QFP/QFN) / `bga`. Pass the
+     datasheet's recommended land-pattern dimensions (pitch, pad size,
+     row_span); `hole>0` for through-hole, `exposed_pad>0` for a QFN
+     thermal pad. Do NOT place pads one at a time.
+   - **IC symbol:** `lib_create_ic_symbol(name, left_pins, right_pins)` --
+     you choose the functional grouping (inputs/power/control left, outputs
+     right, rule 18); it lays out the body + pins grid-aligned in one call.
+   - **Passive symbol:** `lib_create_passive_symbol(name, kind)` for
+     resistor/capacitor/inductor/diode glyphs.
+   - If you must drop primitives by hand, ALWAYS use the BULK tools --
+     `lib_add_footprint_pads`/`lib_add_footprint_tracks`/`lib_add_pins`/
+     `lib_add_symbol_lines` -- one call for the whole set, never a loop of
+     the singular `lib_add_footprint_pad`/`lib_add_footprint_track`
+     (rule 4). Glyph
+     lines/arcs/polygons accept a finer `grid` than the 100-mil pin grid.
+
+10. **Build the netlist from canonical blocks, not pin-by-pin.** When a
+    plan needs a boilerplate sub-circuit -- a decoupling network, a
+    reset pull-up, a feedback divider, an RC low/high-pass or Pi filter,
+    a crystal + load caps, a status LED, a low- or high-side switch --
+    fold it in with
+    `design_add_circuit_block(plan_json, block, params)`
+    instead of hand-writing every cap, pin endpoint, and net merge. It
+    allocates unique refdes, wires each pin to the right net, tags
+    power/ground + roles, and re-validates in one step; chain calls to
+    grow the plan. You still own the part choice (pass `lib_ref` /
+    `value` / `footprint`, computing values via
+    `design_compute_component_value`); the block owns only the wiring
+    pattern. Net endpoints the block does not create (a pull-up's
+    signal, a divider's rail) must already exist in the plan. Call
+    `design_list_circuit_blocks` first to get each block's exact
+    parameter names -- a mistyped optional key is silently dropped.
+    For a wide parallel interface (data / address bus), use
+    `design_connect_bus` -- it joins the i-th pin of each part into one
+    net per bit, so the bus is one call and bit alignment can't drift.
+    To place the core parts themselves (an MCU, a connector), use
+    `design_add_part` with a `{pin: net}` map -- shared-net pins (an IC's
+    several VCC pins) merge automatically. The three together --
+    add_part, add_circuit_block, connect_bus -- author a full netlist
+    without hand-writing raw net JSON. To apply MANY of these at once,
+    use `design_compose_netlist([...ops...])` -- the bulk form, one call
+    instead of one round-trip per part/block/bus (prefer it over looping
+    the singular tools, exactly as you batch Altium ops). Once the parts
+    are in, `design_generate_bom` rolls them up into the plan's BOM and
+    its `lines_without_mpn` tells you which parts still need a sourced
+    part number -- derive it, do not hand-group refdes. To FIX a plan
+    after review (a wrong value, a part to drop, two nets to combine),
+    use `design_edit_plan` -- it scrubs a deleted part from every net and
+    de-dupes a net merge for you; do not re-emit the whole plan JSON.
+
+    The canonical authoring flow, end to end (start from a plan that
+    already has the supply rails as nets, then build outward in one
+    bulk call):
+
+        design_compose_netlist(plan_json, operations=[
+          {"op":"add_part","refdes":"U1","lib_ref":"STM32G031",
+           "connections":{"1":"VCC","16":"GND","5":"OSC_IN",
+                          "6":"OSC_OUT","9":"NRST"},
+           "power_nets":["VCC"],"ground_nets":["GND"]},
+          {"op":"add_block","block":"decoupling",
+           "params":{"power_net":"VCC","ground_net":"GND",
+                     "lib_ref":"C_0402","value":"100nF","count":4}},
+          {"op":"add_block","block":"crystal",
+           "params":{"xin_net":"OSC_IN","xout_net":"OSC_OUT",
+                     "ground_net":"GND","lib_ref":"XTAL_8M",
+                     "cap_lib_ref":"C_0402","cap_value":"18pF"}},
+          {"op":"add_block","block":"pullup",
+           "params":{"signal_net":"NRST","rail_net":"VCC",
+                     "lib_ref":"R_0402","value":"10k"}},
+        ])
+        # -> design_generate_bom -> design_validate_plan -> design_execute_plan
+
+    Call `design_list_circuit_blocks` if unsure of a block's params, and
+    `design_validate_plan` after every authoring step -- it returns the
+    same ERC-lite the bulk tools embed, so a floating net or a bad value
+    surfaces before the Altium round-trip.
+
 ## Autonomous design workflow
 
 The agent is the planner. There is no hardcoded topology library, no
@@ -349,10 +463,10 @@ buck, an LDO, an MCU board, an audio amp, or a sensor frontend.
    automotive), and any explicit part-family preferences. If the spec
    is ambiguous, record the assumption in `open_questions`.
 
-2. **Read this discipline + schema:** `design.get_discipline`.
+2. **Read this discipline + schema:** `design_get_discipline`.
 
 3. **Read the user's library inventory:**
-   `design.snapshot_inventory(library_paths=[...])`. The inventory
+   `design_snapshot_inventory(library_paths=[...])`. The inventory
    exposes mpn / manufacturer / footprint / datasheet for every
    component. Prefer existing parts.
 
@@ -414,20 +528,20 @@ buck, an LDO, an MCU board, an audio amp, or a sensor frontend.
      doesn't fit one of these, invent a clear new tag and document
      it on the net in `open_questions`.
 
-8. **`design.validate_plan(plan_json=...)`** — schema + cross-check.
+8. **`design_validate_plan(plan_json=...)`** — schema + cross-check.
    Cheap, no Altium round-trip.
 
-9. **`design.execute_plan(plan_json=..., project_path=...)`** — opens
+9. **`design_execute_plan(plan_json=..., project_path=...)`** — opens
    / creates the project, places parts, drops labels / power ports
    at each pin endpoint, stamps Manufacturer / MPN / Value / Footprint
    on every placed symbol, saves.
 
-10. **Read `design.execute_plan`'s return.** Failures with
+10. **Read `design_execute_plan`'s return.** Failures with
     `pin_not_found` or `place_failed` are usually inventory / plan
     mismatches (wrong pin number on the symbol, missing part). Fix
     those before validating.
 
-11. **`design.audit_schematic(project_path=...)`** — visual / layout
+11. **`design_audit_schematic(project_path=...)`** — visual / layout
     audit BEFORE ERC. Three violation classes, each with enough geometry
     to compute a corrective move:
     - `overlaps`: pairs of components whose bboxes intersect → push apart.
@@ -438,7 +552,7 @@ buck, an LDO, an MCU board, an audio amp, or a sensor frontend.
     Feed violations back into layout adjustments before ERC; messy layout
     manufactures spurious ERC noise downstream.
 
-12. **`design.validate(project_path=...)`** — ERC + unconnected pins +
+12. **`design_validate(project_path=...)`** — ERC + unconnected pins +
     atomic-parts warnings, structured ValidationReport.
 
 13. **Iterate.** If `passed: false`, read the report's errors
@@ -451,7 +565,7 @@ buck, an LDO, an MCU board, an audio amp, or a sensor frontend.
 - The executor is mechanical: it only reads what is in the plan. Anything
   the planner forgets stays missing. Decoupling caps do not appear unless
   you put them in. Pull-ups, terminations, ESD diodes too.
-- "needs_creation" parts halt `design.execute_plan` with a clear error.
+- "needs_creation" parts halt `design_execute_plan` with a clear error.
   Treat that as a signal to either pick an existing part or branch into a
   library authoring sub-task before resuming.
 - Net labels are dropped at the actual pin world coordinate via a Pascal
