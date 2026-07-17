@@ -213,12 +213,18 @@ Var
     LS : String;
 Begin
     LS := LowerCase(Trim(S));
+    { Accept Altium's raw enum name too (e.g. 'eElectricOutput'), not only the }
+    { short human form, and drop underscores so 'open_collector' and          }
+    { 'opencollector' both match.                                             }
+    If Copy(LS, 1, 9) = 'eelectric' Then LS := Copy(LS, 10, Length(LS));
+    LS := StringReplace(LS, '_', '', -1);
+
     If (LS = 'input') Or (LS = 'in') Then Result := eElectricInput
     Else If (LS = 'output') Or (LS = 'out') Then Result := eElectricOutput
     Else If (LS = 'io') Or (LS = 'bidir') Or (LS = 'bidirectional') Then Result := eElectricIO
     Else If LS = 'power' Then Result := eElectricPower
-    Else If (LS = 'open_collector') Or (LS = 'oc') Then Result := eElectricOpenCollector
-    Else If (LS = 'open_emitter') Or (LS = 'oe') Then Result := eElectricOpenEmitter
+    Else If (LS = 'opencollector') Or (LS = 'oc') Then Result := eElectricOpenCollector
+    Else If (LS = 'openemitter') Or (LS = 'oe') Then Result := eElectricOpenEmitter
     Else If (LS = 'hiz') Or (LS = 'tri') Or (LS = 'tristate') Then Result := eElectricHiZ
     Else Result := eElectricPassive;
 End;
@@ -300,6 +306,25 @@ Begin
     Result := (LowerCase(S) = 'true') Or (S = '1');
 End;
 
+{ True iff S is a plain (optionally negative) integer literal. Used to gate    }
+{ StrToInt so a non-numeric value never raises EConvertError - the exception   }
+{ was caught anyway, but Altium's IDE break-on-exception pops a modal that     }
+{ blocks the polling loop.                                                     }
+Function IsIntStr(S : String) : Boolean;
+Var
+    I, StartPos : Integer;
+Begin
+    S := Trim(S);
+    Result := False;
+    If S = '' Then Exit;
+    StartPos := 1;
+    If S[1] = '-' Then StartPos := 2;
+    If StartPos > Length(S) Then Exit;   { a lone '-' is not an integer }
+    For I := StartPos To Length(S) Do
+        If (S[I] < '0') Or (S[I] > '9') Then Exit;
+    Result := True;
+End;
+
 Function StrToFloatDef(S : String; Default : Double) : Double;
 Var
     OldSep : Char;
@@ -330,7 +355,10 @@ End;
 
 Function StrToIntDef(S : String; Default : Integer) : Integer;
 Begin
-    If (S = '') Or (S = 'null') Then
+    { Guard the conversion: a non-integer value (blank, 'null', or a symbolic  }
+    { token like 'eElectricOutput') returns Default WITHOUT calling StrToInt,  }
+    { so no EConvertError is raised. The Try/Except stays as a backstop.       }
+    If Not IsIntStr(S) Then
         Result := Default
     Else
     Begin
@@ -340,6 +368,16 @@ Begin
             Result := Default;
         End;
     End;
+End;
+
+{ Resolve an electrical-type value to the integer ordinal assigned directly to }
+{ ISch_Pin.Electrical. Accepts an integer ('2'), the human form ('output') or }
+{ Altium's raw enum name ('eElectricOutput'). Never raises. Round-trips with   }
+{ GetSchProperty('Electrical'), which returns IntToStr(Obj.Electrical).        }
+Function ElectricalOrdinal(Value : String) : Integer;
+Begin
+    If IsIntStr(Value) Then Result := StrToIntDef(Value, 0)
+    Else Result := Ord(StrToPinElectrical(Value));
 End;
 
 // UnescapeJsonString is defined in Main.pas (compiles first)

@@ -6,10 +6,10 @@
   ],
   "zones": [],
   "parts": [
-    {"refdes": "R1", "lib_ref": "RES 10K 1% 100mW 0603", "lib_path": "C:\\Dropbox\\Work\\Altium\\SELibrary\\SELibrary_RESISTORS\\SELibrary_RESISTORS.SchLib", "value": "10k", "status": "existing", "sheet": "EDAAgentTest", "rationale": "Top half of divider"},
-    {"refdes": "R2", "lib_ref": "RES 10K 1% 100mW 0603", "lib_path": "C:\\Dropbox\\Work\\Altium\\SELibrary\\SELibrary_RESISTORS\\SELibrary_RESISTORS.SchLib", "value": "10k", "status": "existing", "sheet": "EDAAgentTest", "rationale": "Bottom half of divider"},
-    {"refdes": "C1", "lib_ref": "CAP 100nF 50V X5R 10% 0603", "lib_path": "C:\\Dropbox\\Work\\Altium\\SELibrary\\SELibrary_CAPACITORS\\SELibrary_CAPACITORS.SchLib", "value": "100nF", "status": "existing", "sheet": "EDAAgentTest", "rationale": "VMID decoupling"},
-    {"refdes": "C2", "lib_ref": "CAP 100nF 50V X5R 10% 0603", "lib_path": "C:\\Dropbox\\Work\\Altium\\SELibrary\\SELibrary_CAPACITORS\\SELibrary_CAPACITORS.SchLib", "value": "100nF", "status": "existing", "sheet": "EDAAgentTest", "rationale": "VCC bypass"}
+    {"refdes": "R1", "lib_ref": "RES 10K 1% 100mW 0603", "lib_path": "C:\\path\\to\\StdLib\\StdLib_RESISTORS\\StdLib_RESISTORS.SchLib", "value": "10k", "status": "existing", "sheet": "EDAAgentTest", "rationale": "Top half of divider"},
+    {"refdes": "R2", "lib_ref": "RES 10K 1% 100mW 0603", "lib_path": "C:\\path\\to\\StdLib\\StdLib_RESISTORS\\StdLib_RESISTORS.SchLib", "value": "10k", "status": "existing", "sheet": "EDAAgentTest", "rationale": "Bottom half of divider"},
+    {"refdes": "C1", "lib_ref": "CAP 100nF 50V X5R 10% 0603", "lib_path": "C:\\path\\to\\StdLib\\StdLib_CAPACITORS\\StdLib_CAPACITORS.SchLib", "value": "100nF", "status": "existing", "sheet": "EDAAgentTest", "rationale": "VMID decoupling"},
+    {"refdes": "C2", "lib_ref": "CAP 100nF 50V X5R 10% 0603", "lib_path": "C:\\path\\to\\StdLib\\StdLib_CAPACITORS\\StdLib_CAPACITORS.SchLib", "value": "100nF", "status": "existing", "sheet": "EDAAgentTest", "rationale": "VCC bypass"}
   ],
   "nets": [
     {"name": "VCC", "is_power": true, "pins": [{"refdes": "R1", "pin": "1"}, {"refdes": "C2", "pin": "1"}]},

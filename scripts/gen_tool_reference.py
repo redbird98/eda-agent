@@ -34,17 +34,19 @@ _MATURITY_NOTE = {
 
 _CATEGORY_ORDER = [
     "meta", "application", "project", "library", "schematic", "generic",
-    "pcb", "audit", "design", "simulation", "routing", "other",
+    "pcb", "audit", "design", "simulation", "routing", "kicad", "other",
 ]
 
 
 def _collect() -> list[dict]:
     from mcp.server.fastmcp import FastMCP
-    from eda_agent.tools import register_all_tools
+    from eda_agent.tools import register_backend
     from eda_agent.tools import metadata as M
 
+    # "both" registers the full surface: the Altium suite, the KiCad-native
+    # tools, and the EDA-agnostic tools, so the reference documents everything.
     mcp = FastMCP("gen")
-    register_all_tools(mcp)
+    register_backend(mcp, "both")
     tools = asyncio.run(mcp.list_tools())
     out = []
     for t in tools:

@@ -13,7 +13,7 @@ Const
     // returns, mismatch means Altium is running a stale compiled script
     // (DelphiScript caches compiled units until the script project is
     // reopened or Altium is restarted).
-    SCRIPT_VERSION = '2026.07.11.2';
+    SCRIPT_VERSION = '2026.07.16.2';
 
     // Wire protocol version. Bumped whenever the request/response JSON shape
     // changes incompatibly. Python and Pascal must agree; mismatch returns
@@ -300,48 +300,65 @@ Var
     ServerDoc : IServerDocument;
     PrevView : IServerDocumentView;
     Path : String;
-    I : Integer;
+    I, P : Integer;
 Begin
     Result := Nil;
 
-    { Fast path: PCB tab already focused. `PCBServer.GetCurrentPCBBoard` is }
-    { the documented entry point and on this build is declared at runtime, }
-    { the IDE flags it at compile time on some builds but the runtime      }
-    { resolves it. (`PCBServer.GetPCBBoardByPath` is genuinely undeclared  }
-    { on this build, so we cannot use the path-based lookup.)              }
-    Result := PCBServer.GetCurrentPCBBoard;
-    If Result <> Nil Then Exit;
-
-    { Fallback: no PCB tab is focused. Find the project's PCB doc, open it }
-    { (which moves focus to it), grab the board pointer, and restore the   }
-    { user's previous view so they don't blink away from where they were.  }
-    { The IPCB_Board pointer stays valid after focus moves back.            }
     Workspace := GetWorkspace;
     If Workspace = Nil Then Exit;
-    Project := Workspace.DM_FocusedProject;
-    If Project = Nil Then Exit;
 
+    { Fast path: a PCB tab is focused, so the PCB editor server is loaded    }
+    { and PCBServer.GetCurrentPCBBoard resolves. Gate on the focused doc's   }
+    { kind, read through the DM layer (which never loads a server). If no    }
+    { PcbDoc has been opened this session the PCB server module is not       }
+    { registered, and merely REFERENCING PCBServer.GetCurrentPCBBoard raises }
+    { an uncatchable "Undeclared identifier" modal (late-bound against the   }
+    { absent server) that Try/Except cannot swallow and that hangs the       }
+    { polling loop. So only touch PCBServer when a PCB is actually focused.  }
+    Doc := Workspace.DM_FocusedDocument;
+    If (Doc <> Nil) And (UpperCase(Doc.DM_DocumentKind) = 'PCB') Then
+    Begin
+        Result := PCBServer.GetCurrentPCBBoard;
+        If Result <> Nil Then Exit;
+    End;
+
+    { Fallback: no PCB tab is focused (the user is on a schematic, a library }
+    { or the script project). Walk EVERY project open in the workspace - not }
+    { just the focused one, which is often the script project with no PcbDoc }
+    { - find the first PcbDoc, and open it. Opening the document loads the   }
+    { PCB server and moves focus to it; a non-nil ServerDoc from            }
+    { OpenDocument('PCB', ...) proves the server is now registered, so the   }
+    { GetCurrentPCBBoard read below is safe. The IPCB_Board pointer stays    }
+    { valid after we restore the user's previous view.                       }
     PrevView := Nil;
     Try
         If (Client <> Nil) Then PrevView := Client.GetCurrentView;
     Except End;
 
-    For I := 0 To Project.DM_LogicalDocumentCount - 1 Do
+    For P := 0 To Workspace.DM_ProjectCount - 1 Do
     Begin
-        Doc := Project.DM_LogicalDocuments(I);
-        If Doc = Nil Then Continue;
-        Path := '';
-        Try Path := Doc.DM_FullPath; Except End;
-        If Path = '' Then Continue;
-        If (UpperCase(Doc.DM_DocumentKind) <> 'PCB') And
-           (Pos('.PCBDOC', UpperCase(Path)) <= 0) Then Continue;
+        Project := Workspace.DM_Projects(P);
+        If Project = Nil Then Continue;
 
-        ServerDoc := Nil;
-        Try ServerDoc := Client.OpenDocument('PCB', Path); Except End;
-        If ServerDoc = Nil Then Continue;
+        For I := 0 To Project.DM_LogicalDocumentCount - 1 Do
+        Begin
+            Doc := Project.DM_LogicalDocuments(I);
+            If Doc = Nil Then Continue;
+            Path := '';
+            Try Path := Doc.DM_FullPath; Except End;
+            If Path = '' Then Continue;
+            If (UpperCase(Doc.DM_DocumentKind) <> 'PCB') And
+               (Pos('.PCBDOC', UpperCase(Path)) <= 0) Then Continue;
 
-        Try Client.ShowDocument(ServerDoc); Except End;
-        Try Result := PCBServer.GetCurrentPCBBoard; Except End;
+            ServerDoc := Nil;
+            Try ServerDoc := Client.OpenDocument('PCB', Path); Except End;
+            If ServerDoc = Nil Then Continue;
+
+            Try Client.ShowDocument(ServerDoc); Except End;
+            Try Result := PCBServer.GetCurrentPCBBoard; Except End;
+            If Result <> Nil Then Break;
+        End;
+
         If Result <> Nil Then Break;
     End;
 

@@ -47,6 +47,14 @@ dependencies = [
 render = [
     "matplotlib>=3.5,<4",
 ]
+# KiCad backend (EDA_AGENT_BACKEND=kicad / --backend kicad). kipy is the
+# official KiCad IPC client; it is imported lazily inside the bridge so the
+# core install and the Altium backend never need it, and the KiCad tools
+# degrade to a clear "install kicad-python" reason when it is absent. Needs
+# KiCad 9+ with Preferences > Plugins > KiCad API server enabled.
+kicad = [
+    "kicad-python>=0.7",
+]
 dev = [
     "pytest>=7.0",
     "pytest-asyncio>=0.21",

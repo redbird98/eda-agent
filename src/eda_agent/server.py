@@ -4,13 +4,14 @@
 
 import argparse
 import logging
+import os
 import sys
 import threading
 from pathlib import Path
 from typing import Optional
 from mcp.server.fastmcp import FastMCP
 
-from .tools import register_all_tools
+from .tools import register_backend, DEFAULT_BACKEND
 from .config import get_config
 
 logger = logging.getLogger("eda_agent")
@@ -97,11 +98,21 @@ def setup_logging() -> None:
     root.setLevel(logging.INFO)
 
 
-# Create global FastMCP instance
-mcp = FastMCP("eda-agent")
+# Which EDA tool this server drives. Resolved once, at import, from the
+# environment so it is settled before the dashboard (which reads the
+# registered tool set) or any subcommand touches ``mcp``. MCP clients select
+# it in their server config's ``env``; the ``--backend`` CLI flag re-execs
+# with this set for terminal use. Altium is the default so existing installs
+# are unaffected.
+ACTIVE_BACKEND = os.environ.get("EDA_AGENT_BACKEND", DEFAULT_BACKEND)
 
-# Register all tools
-register_all_tools(mcp)
+# Create global FastMCP instance, named for the backend so a client that
+# lists several eda-agent servers can tell them apart.
+mcp = FastMCP(f"eda-agent-{ACTIVE_BACKEND.strip().lower() or DEFAULT_BACKEND}")
+
+# Register only the selected backend's tools. Returns the normalised name
+# (an unrecognised value falls back to the default).
+ACTIVE_BACKEND = register_backend(mcp, ACTIVE_BACKEND)
 
 
 def _probe_port_owner(host: str, port: int) -> Optional[int]:
@@ -450,6 +461,17 @@ def main() -> int:
         "--headless", action="store_true",
         help="Alias for --no-dashboard.",
     )
+    # Top-level so `eda-agent --backend kicad` works with no subcommand, the
+    # way MCP clients invoke the binary. The real selection happens at import
+    # from EDA_AGENT_BACKEND; when this flag names a different backend we
+    # re-exec with that env set so registration runs against the right one.
+    parser.add_argument(
+        "--backend", choices=("altium", "kicad", "both"), default=None,
+        help=("Which EDA tool to drive (default: altium). Selects the tool "
+              "surface: 'altium' is the full Altium suite, 'kicad' the "
+              "KiCad-native tools, 'both' the union. Equivalent to setting "
+              "EDA_AGENT_BACKEND."),
+    )
     subparsers = parser.add_subparsers(dest="command", metavar="COMMAND")
 
     # serve -- default when no args given
@@ -464,6 +486,10 @@ def main() -> int:
     serve_p.add_argument(
         "--headless", action="store_true",
         help="Alias for --no-dashboard.",
+    )
+    serve_p.add_argument(
+        "--backend", choices=("altium", "kicad", "both"), default=None,
+        help="Which EDA tool to drive (see top-level flag).",
     )
 
     # scripts-path
@@ -619,6 +645,19 @@ def main() -> int:
                             "severity (default: error).")
 
     args = parser.parse_args()
+
+    # Backend was already registered at import from EDA_AGENT_BACKEND. If
+    # --backend asks for a different one, re-exec once with the env set so the
+    # reload registers the right tool surface. MCP clients pass the backend via
+    # env, not this flag, so their startup never re-execs. A sentinel prevents
+    # an exec loop if the child somehow disagrees.
+    requested = getattr(args, "backend", None)
+    if (requested and requested != ACTIVE_BACKEND
+            and not os.environ.get("_EDA_AGENT_BACKEND_REEXEC")):
+        os.environ["EDA_AGENT_BACKEND"] = requested
+        os.environ["_EDA_AGENT_BACKEND_REEXEC"] = "1"
+        os.execv(sys.executable,
+                 [sys.executable, "-m", "eda_agent.server", *sys.argv[1:]])
 
     if args.command is None or args.command == "serve":
         # Honour the flag whether it was given at the top level

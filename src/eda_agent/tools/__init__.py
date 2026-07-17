@@ -27,6 +27,16 @@ from .design import register_design_tools
 from .render import register_render_tools
 from .audit import register_audit_tools
 from .route import register_route_tools
+from .kicad import register_kicad_tools
+from .eda import register_eda_tools
+from .calc import register_calc_tools
+from .plan import register_plan_tools
+
+# Recognised backends. "altium" is the default and stays the full historical
+# suite; "kicad" exposes only the KiCad-native tools; "both" unions them for
+# the rare user who drives both EDA tools from one server.
+BACKENDS = ("altium", "kicad", "both")
+DEFAULT_BACKEND = "altium"
 
 
 def register_all_tools(mcp):
@@ -44,8 +54,42 @@ def register_all_tools(mcp):
     register_route_tools(mcp)
 
 
+def register_backend(mcp, backend: str = DEFAULT_BACKEND) -> str:
+    """Register the tool surface for one backend and return the name used.
+
+    An unknown backend falls back to the default rather than raising, so a
+    stray value in the environment can never leave the server toolless.
+    """
+    backend = (backend or DEFAULT_BACKEND).strip().lower()
+    if backend not in BACKENDS:
+        backend = DEFAULT_BACKEND
+    if backend in ("altium", "both"):
+        register_all_tools(mcp)
+    if backend in ("kicad", "both"):
+        register_kicad_tools(mcp)
+    # The engineering calculators (pcb_calc_*) are pure physics and
+    # EDA-independent. Altium's register_all_tools already defines them, so add
+    # them only for a KiCad-only server to reach calculator parity without
+    # double-registering under "both".
+    if backend == "kicad":
+        register_calc_tools(mcp)
+        register_plan_tools(mcp)
+    # The EDA-agnostic main-flow tools (review_design, get_board_info,
+    # list_components, list_nets) work on whichever backend is active, so they
+    # register for every backend.
+    register_eda_tools(mcp)
+    return backend
+
+
 __all__ = [
     "register_all_tools",
+    "register_backend",
+    "register_kicad_tools",
+    "register_eda_tools",
+    "register_calc_tools",
+    "register_plan_tools",
+    "BACKENDS",
+    "DEFAULT_BACKEND",
     "register_application_tools",
     "register_project_tools",
     "register_library_tools",
@@ -57,4 +101,5 @@ __all__ = [
     "register_render_tools",
     "register_audit_tools",
     "register_route_tools",
+    "register_kicad_tools",
 ]

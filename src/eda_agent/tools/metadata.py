@@ -67,6 +67,7 @@ _CATEGORY_BY_PREFIX = (
     ("sim_", "simulation"),
     ("route_", "routing"),
     ("tool_", "meta"),
+    ("kicad_", "kicad"),
 )
 
 # Which Pascal-dispatch category backs each tool category, and whether the
