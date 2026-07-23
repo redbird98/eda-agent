@@ -1556,6 +1556,7 @@ def register_library_tools(mcp):
         component_name: str,
         footprint_name: str,
         footprint_library: str = "",
+        replace: bool = True,
     ) -> dict[str, Any]:
         """Link a footprint to a schematic component.
 
@@ -1563,11 +1564,18 @@ def register_library_tools(mcp):
         component_name. Open/focus the target component in the SchLib editor
         before calling this.
 
+        With replace=True (the default) any existing footprint (PCBLIB) model
+        on the component is removed first, so re-linking replaces rather than
+        appends. Pass replace=False to keep prior footprint models and add
+        another (the old append behaviour, which bloats a component with
+        duplicate models).
+
         Args:
             component_name: Name of the schematic component (currently ignored,
                 see note above)
             footprint_name: Name of the footprint to link
             footprint_library: Library containing the footprint (optional if same library)
+            replace: remove existing footprint models before adding (default True)
 
         Returns:
             Dictionary confirming link
@@ -1579,6 +1587,7 @@ def register_library_tools(mcp):
                 "component_name": component_name,
                 "footprint_name": footprint_name,
                 "library_name": footprint_library,
+                "replace": "true" if replace else "false",
             },
         )
         return result
@@ -1876,6 +1885,12 @@ def register_library_tools(mcp):
               - parameter_styles: list of {name, value, style:{font_id,
                 color, is_hidden, x, y, orientation, justification}}
                 in the same order parameters appear on the symbol.
+              - models: list of the component's implementations (footprint
+                / SPICE / 3D links), each {model_name, model_type,
+                is_current, datafile_links:[{entity_name, file_kind,
+                location}]}. datafile_links is the model's source (the
+                library it resolves from); empty when the footprint binds
+                by name only. Empty list when the part carries no models.
               - `_datasheet_guidance` + `_datasheet_parts`.
         """
         bridge = get_bridge()
@@ -2637,6 +2652,172 @@ def register_library_tools(mcp):
         return result
 
     @mcp.tool()
+    async def lib_copy_footprint(
+        source_name: str,
+        new_name: str = "",
+        source_library: str = "",
+        dest_library: str = "",
+        overwrite: bool = False,
+    ) -> dict[str, Any]:
+        """Copy one footprint (all pads/primitives) into a PcbLib, optionally renaming.
+
+        Footprint analog of lib_copy_component: full-copies the footprint with
+        no delete. source_library defaults to the focused PcbLib; dest_library
+        defaults to the source. A same-library copy requires a different
+        new_name. Errors if new_name already exists in dest unless overwrite.
+
+        Args:
+            source_name: the footprint to copy.
+            new_name: name for the copy (default source_name).
+            source_library: source .PcbLib path (default the focused lib).
+            dest_library: destination .PcbLib path (default source).
+            overwrite: replace a same-named footprint already in dest.
+
+        Returns:
+            {"success": true, "source": "...", "new_name": "...",
+             "same_library": bool}.
+        """
+        params: dict[str, Any] = {"source_name": source_name}
+        if new_name:
+            params["new_name"] = new_name
+        if source_library:
+            params["source_library"] = source_library
+        if dest_library:
+            params["dest_library"] = dest_library
+        if overwrite:
+            params["overwrite"] = "true"
+        bridge = get_bridge()
+        return await bridge.send_command_async("library.copy_footprint", params)
+
+    @mcp.tool()
+    async def lib_move_components(
+        source_schlib: str,
+        dest_schlib: str,
+        names: Optional[list[str]] = None,
+        name_regex: str = "",
+        delete_from_source: bool = True,
+        overwrite: bool = False,
+    ) -> dict[str, Any]:
+        """Move matching components (symbol + params + models) between SchLibs.
+
+        Bulk analog of lib_copy_component: copies every matching component from
+        source_schlib to dest_schlib (Replicate carries the whole symbol, its
+        parameters and its models) in one pass, then removes them from source
+        unless delete_from_source is False. This is the piece that makes a full
+        library split a single call.
+
+        Provide either names (explicit LibReferences) or name_regex (matched
+        against the source's component names). With names it is one IPC call;
+        with name_regex the source component list is fetched first to resolve
+        the matches, then the move runs. A component already present in dest is
+        skipped unless overwrite=True.
+
+        Args:
+            source_schlib: source .SchLib path.
+            dest_schlib: destination .SchLib path.
+            names: explicit list of component LibReferences to move.
+            name_regex: regex matched against source component names when names
+                is not given.
+            delete_from_source: remove moved components from source (default True).
+            overwrite: replace a same-named component already in dest.
+
+        Returns:
+            {"success": true, "moved": N, "skipped": N, "failed": N}.
+        """
+        resolved: list[str] = list(names or [])
+        if not resolved and name_regex:
+            import re
+
+            listing = await get_bridge().send_command_async(
+                "library.get_components", {"library_path": source_schlib}
+            )
+            comps = (listing or {}).get("components") or []
+            pat = re.compile(name_regex)
+            for c in comps:
+                nm = c.get("name") or c.get("lib_ref") or ""
+                if nm and pat.search(nm):
+                    resolved.append(nm)
+        if not resolved:
+            return {
+                "error": "no components to move: provide names[] or a "
+                "name_regex that matches at least one source component"
+            }
+        bridge = get_bridge()
+        return await bridge.send_command_async(
+            "library.move_components",
+            {
+                "source_library": source_schlib,
+                "dest_library": dest_schlib,
+                "names": "~~".join(resolved),
+                "delete_from_source": "true" if delete_from_source else "false",
+                "overwrite": "true" if overwrite else "false",
+            },
+        )
+
+    @mcp.tool()
+    async def lib_move_footprints(
+        source_pcblib: str,
+        dest_pcblib: str,
+        names: Optional[list[str]] = None,
+        name_regex: str = "",
+        delete_from_source: bool = True,
+        overwrite: bool = False,
+    ) -> dict[str, Any]:
+        """Move matching footprints between PcbLibs (the PcbLib analog of move).
+
+        Copies every matching footprint (all pads and primitives, via a full
+        copy) from source_pcblib to dest_pcblib, then removes them from source
+        unless delete_from_source is False. The footprint counterpart of
+        lib_move_components; together they split a full library.
+
+        Provide either names (explicit footprint names) or name_regex (matched
+        against the source's footprint names). With names it is one IPC call;
+        with name_regex the source footprint list is fetched first. A footprint
+        already present in dest is skipped unless overwrite=True.
+
+        Args:
+            source_pcblib: source .PcbLib path.
+            dest_pcblib: destination .PcbLib path.
+            names: explicit list of footprint names to move.
+            name_regex: regex matched against source footprint names when names
+                is not given.
+            delete_from_source: remove moved footprints from source (default True).
+            overwrite: replace a same-named footprint already in dest.
+
+        Returns:
+            {"success": true, "moved": N, "skipped": N, "failed": N}.
+        """
+        resolved: list[str] = list(names or [])
+        if not resolved and name_regex:
+            import re
+
+            listing = await get_bridge().send_command_async(
+                "library.get_footprints", {"library_path": source_pcblib}
+            )
+            fps = (listing or {}).get("footprints") or []
+            pat = re.compile(name_regex)
+            for f in fps:
+                nm = f.get("name") or ""
+                if nm and pat.search(nm):
+                    resolved.append(nm)
+        if not resolved:
+            return {
+                "error": "no footprints to move: provide names[] or a "
+                "name_regex that matches at least one source footprint"
+            }
+        bridge = get_bridge()
+        return await bridge.send_command_async(
+            "library.move_footprints",
+            {
+                "source_library": source_pcblib,
+                "dest_library": dest_pcblib,
+                "names": "~~".join(resolved),
+                "delete_from_source": "true" if delete_from_source else "false",
+                "overwrite": "true" if overwrite else "false",
+            },
+        )
+
+    @mcp.tool()
     async def lib_split_pin_functions() -> dict[str, Any]:
         """Split slash-delimited pin names into pin function lists.
 
@@ -2682,6 +2863,298 @@ def register_library_tools(mcp):
         bridge = get_bridge()
         return await bridge.send_command_async(
             "library.uninstall_library", {"library_path": library_path}
+        )
+
+    @mcp.tool()
+    async def lib_delete_component(
+        component_name: str,
+        library_path: str = "",
+    ) -> dict[str, Any]:
+        """Delete one symbol from a schematic library (.SchLib).
+
+        Removes the component whose LibReference is ``component_name`` and
+        marks the library dirty for deferred save (flushed by app_save_all).
+        Deletes a single named part; if the name is not found the call
+        errors (COMPONENT_NOT_FOUND) rather than silently doing nothing.
+        There is no wildcard mass-delete.
+
+        Args:
+            component_name: the component's LibReference (its library name).
+            library_path: optional absolute .SchLib path to target; defaults
+                to the currently focused library document.
+
+        Returns:
+            {"success": true, "library_path": "...", "deleted": "..."}.
+        """
+        bridge = get_bridge()
+        return await bridge.send_command_async(
+            "library.delete_component",
+            {"component_name": component_name, "library_path": library_path},
+        )
+
+    @mcp.tool()
+    async def lib_delete_footprint(
+        footprint_name: str,
+        library_path: str = "",
+    ) -> dict[str, Any]:
+        """Delete one footprint from a PCB library (.PcbLib).
+
+        Finds the footprint by name, removes and deregisters it, then saves
+        the .PcbLib. Deletes a single named footprint; if the name is not
+        found the call errors (FOOTPRINT_NOT_FOUND). No wildcard mass-delete.
+
+        Args:
+            footprint_name: the footprint's name in the library.
+            library_path: optional absolute .PcbLib path to target; defaults
+                to the currently focused library document.
+
+        Returns:
+            {"success": true, "library_path": "...", "deleted": "..."}.
+        """
+        bridge = get_bridge()
+        return await bridge.send_command_async(
+            "library.delete_footprint",
+            {"footprint_name": footprint_name, "library_path": library_path},
+        )
+
+    @mcp.tool()
+    async def lib_set_model_name(
+        component_name: str,
+        new_model_name: str,
+        model_name: str = "",
+        library_path: str = "",
+    ) -> dict[str, Any]:
+        """Set a model's model_name (footprint reference) on a SchLib symbol.
+
+        Rewrites the ModelName of one of the component's implementations.
+        If model_name is given, the model whose current ModelName matches is
+        targeted; otherwise the current (or first) model is used.
+
+        Args:
+            component_name: the component's LibReference.
+            new_model_name: the new model_name to write.
+            model_name: optional current model_name to target a specific one.
+            library_path: optional .SchLib path; defaults to the focused lib.
+
+        Returns:
+            {"success": true, "component": "...", "new_model_name": "..."}.
+        """
+        bridge = get_bridge()
+        return await bridge.send_command_async(
+            "library.set_model_name",
+            {
+                "component_name": component_name,
+                "new_model_name": new_model_name,
+                "model_name": model_name,
+                "library_path": library_path,
+            },
+        )
+
+    @mcp.tool()
+    async def lib_set_model_source(
+        component_name: str,
+        source_library: str,
+        model_name: str = "",
+        use_component_library: Optional[bool] = None,
+        library_path: str = "",
+    ) -> dict[str, Any]:
+        """Write the datafile-link Location (source library) on a footprint model.
+
+        A footprint whose datafile link has an empty Location resolves in the
+        SchLib editor by name but cannot embed into a self-contained compiled
+        library, so the footprint goes missing in the used/compiled output
+        even though the package's own compile reports no error. This writes
+        Location so the model is embeddable. Location is set in place (never
+        through AddDataFileLink with a path, which wedges AD26). Targets PCBLIB
+        models matching model_name, or all PCBLIB models when it is empty.
+
+        IMPORTANT: get the exact source_library string from a known-good model
+        that already embeds correctly. Read it via lib_get_component_details,
+        whose models array now shows each model's location and
+        use_component_library. This tool writes exactly what you pass; it does
+        not infer the format.
+
+        Args:
+            component_name: the component's LibReference.
+            source_library: the source-library reference written into Location.
+            model_name: optional footprint model name to target one model.
+            use_component_library: optional; sets the embed-vs-search flag.
+            library_path: optional .SchLib path; defaults to the focused lib.
+
+        Returns:
+            {"success": true, "component": "...", "source_library": "...",
+             "models_updated": N}.
+        """
+        params: dict[str, Any] = {
+            "component_name": component_name,
+            "source_library": source_library,
+            "model_name": model_name,
+            "library_path": library_path,
+        }
+        if use_component_library is not None:
+            params["use_component_library"] = (
+                "true" if use_component_library else "false"
+            )
+        bridge = get_bridge()
+        return await bridge.send_command_async("library.set_model_source", params)
+
+    @mcp.tool()
+    async def lib_remove_model(
+        component_name: str,
+        model_name: str,
+        keep_one: bool = False,
+        library_path: str = "",
+    ) -> dict[str, Any]:
+        """Remove models (implementations) from a SchLib component by name.
+
+        Removes every implementation whose ModelName equals model_name. With
+        keep_one=True it keeps the first match and removes the rest, which
+        deletes duplicate model links while preserving one. Errors if the
+        component is not found; returns removed=0 if no model matches.
+
+        Args:
+            component_name: the component's LibReference.
+            model_name: the ModelName of the model(s) to remove.
+            keep_one: keep the first match and remove the rest (dedup).
+            library_path: optional .SchLib path; defaults to the focused lib.
+
+        Returns:
+            {"success": true, "model_name": "...", "removed": N,
+             "kept_one": bool}.
+        """
+        bridge = get_bridge()
+        return await bridge.send_command_async(
+            "library.remove_model",
+            {
+                "component_name": component_name,
+                "model_name": model_name,
+                "keep_one": "true" if keep_one else "false",
+                "library_path": library_path,
+            },
+        )
+
+    @mcp.tool()
+    async def lib_rename_footprint(
+        footprint_name: str,
+        new_name: str,
+        library_path: str = "",
+    ) -> dict[str, Any]:
+        """Rename a footprint in a PCB library (.PcbLib).
+
+        Renames the footprint whose name is footprint_name to new_name.
+        Errors if footprint_name is not found or new_name already exists in
+        the library. Saves the .PcbLib.
+
+        Args:
+            footprint_name: the current footprint name.
+            new_name: the new footprint name.
+            library_path: optional .PcbLib path; defaults to the focused lib.
+
+        Returns:
+            {"success": true, "footprint": "...", "new_name": "..."}.
+        """
+        bridge = get_bridge()
+        return await bridge.send_command_async(
+            "library.rename_footprint",
+            {
+                "footprint_name": footprint_name,
+                "new_name": new_name,
+                "library_path": library_path,
+            },
+        )
+
+    @mcp.tool()
+    async def lib_probe_footprint(
+        footprint_name: str,
+        library_path: str = "",
+    ) -> dict[str, Any]:
+        """Read-only dump of a PcbLib footprint's name-bearing fields.
+
+        Use this to locate where an old name persists after a rename. On a
+        PcbLib footprint, Name and Pattern are the SAME property (renaming Name
+        writes both), and the footprint's only metadata is Name, Description,
+        Height. So a leftover old name lives in a child primitive: this returns
+        every text primitive's object_id and text, plus name/description/
+        height_mils/primitive_count. Nothing is written.
+
+        Args:
+            footprint_name: the footprint name.
+            library_path: optional .PcbLib path; defaults to the focused lib.
+
+        Returns:
+            {"success": true, "footprint": "...", "description": "...",
+             "height_mils": N, "primitive_count": N,
+             "texts": [{"object_id": N, "text": "..."}]}.
+        """
+        bridge = get_bridge()
+        return await bridge.send_command_async(
+            "library.probe_footprint",
+            {"footprint_name": footprint_name, "library_path": library_path},
+        )
+
+    @mcp.tool()
+    async def lib_normalize_implementations(
+        library_path: str = "",
+        rename_map: Optional[dict[str, str]] = None,
+        dedupe_only: bool = False,
+        source_library: str = "",
+        use_component_library: Optional[bool] = None,
+    ) -> dict[str, Any]:
+        """Clean up every component's models in a SchLib for a self-contained package.
+
+        Whole-library sweep. Per component it: clears the component-level
+        provenance (SourceLibraryName, TargetFileName); collapses duplicate
+        models, keeping ONE per (model_type, model_name) IN PLACE so the kept
+        model's parameters, MapAsString pin-map, and datafile link are all
+        preserved; re-flags the survivor current if any duplicate was;
+        optionally renames a model's name and its datafile entity via
+        rename_map; and repairs any footprint (PCBLIB) left with no datafile
+        link. It does NOT destroy and rebuild implementations, so nothing on a
+        model is lost.
+
+        With source_library set, it also writes that value into the Location
+        of every PCBLIB model's datafile link, turning a name-only library
+        (footprints resolve but do not embed) into an embeddable one in the
+        same pass. Existing Locations are only overwritten when source_library
+        is given; they are never blanked. Get the exact string from a
+        known-good model first (see lib_set_model_source).
+
+        Note: it preserves what is present; it cannot resurrect data a prior
+        broken run already dropped. If a library was damaged by an earlier
+        version, restore the backup and run this on it.
+
+        If you are also renaming footprint entities, run lib_rename_footprint
+        on the PcbLib first, then pass the same {old: new} as rename_map so
+        symbol and footprint stay matched.
+
+        Args:
+            library_path: optional .SchLib path; defaults to the focused lib.
+            rename_map: optional {old_model_name: new_model_name} applied to
+                the kept model's name and matching datafile entity.
+            dedupe_only: skip renames; only collapse duplicates + clear source.
+            source_library: optional; when set, written into every PCBLIB
+                model's datafile Location so footprints embed on compile.
+            use_component_library: optional; sets the embed-vs-search flag on
+                the models whose Location is written.
+
+        Returns:
+            {"success": true, "components_touched": N, "duplicates_removed": N,
+             "sources_cleared": N, "links_repaired": N, "sources_set": N}.
+        """
+        pairs = ";".join(f"{k}={v}" for k, v in (rename_map or {}).items())
+        params: dict[str, Any] = {
+            "library_path": library_path,
+            "rename_map": pairs,
+            "dedupe_only": "true" if dedupe_only else "false",
+            "source_library": source_library,
+        }
+        if use_component_library is not None:
+            params["use_component_library"] = (
+                "true" if use_component_library else "false"
+            )
+        bridge = get_bridge()
+        return await bridge.send_command_async(
+            "library.normalize_implementations", params
         )
 
     @mcp.tool()

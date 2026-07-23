@@ -357,7 +357,7 @@ Lifecycle, parameters, compilation, analysis, outputs, ECO sync, variants.
 | `proj_list_outjob_containers` / `proj_run_outjob` / `proj_run_outjob_all` | OutJob execution (`proj_run_outjob_all` fires every container in one pass) |
 | `proj_generate_fab_package` | Run every OutJob container (Gerber / NC drill / IPC-356 / P&P / assembly / BOM) and return a consolidated manifest of produced files; optional STEP / DXF |
 
-### Library (46 tools)
+### Library (57 tools)
 
 Symbol and footprint creation, linking, batch editing, comparison.
 
