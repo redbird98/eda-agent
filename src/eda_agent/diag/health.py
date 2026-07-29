@@ -12,6 +12,7 @@ from pathlib import Path
 
 from eda_agent.config import (
     WORKSPACE_POINTER_FILE,
+    workspace_pointer_file,
     get_config,
 )
 from eda_agent.diag.checks import Check, Severity, Status
@@ -45,18 +46,21 @@ def _check_workspace_dir() -> Check:
 
 
 def _check_pointer_file() -> Check:
-    if not WORKSPACE_POINTER_FILE.exists():
+    # Resolve through the same helper the writer uses so an
+    # EDA_AGENT_POINTER_FILE override is diagnosed, not the real file.
+    pointer = workspace_pointer_file()
+    if not pointer.exists():
         return Check(
             name="workspace pointer file",
             status=Status.FAIL,
-            message=f"{WORKSPACE_POINTER_FILE} missing",
+            message=f"{pointer} missing",
             fix=(
                 "Run `eda-agent install-scripts` to create the pointer "
                 "file. DelphiScript reads it to find the IPC workspace."
             ),
         )
     try:
-        contents = WORKSPACE_POINTER_FILE.read_text(encoding="ascii").strip()
+        contents = pointer.read_text(encoding="ascii").strip()
     except OSError as exc:
         return Check(
             name="workspace pointer file readable",
@@ -81,7 +85,7 @@ def _check_pointer_file() -> Check:
     return Check(
         name="workspace pointer",
         status=Status.PASS,
-        message=str(WORKSPACE_POINTER_FILE),
+        message=str(pointer),
     )
 
 

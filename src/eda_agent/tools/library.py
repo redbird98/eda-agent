@@ -1755,9 +1755,16 @@ def register_library_tools(mcp):
 
         Returns:
             Dictionary with ``count`` and ``components`` list. Each
-            component carries name, alias_name, part_count, description,
-            (only when with_parameters is True) parameters, and (only when
-            with_designator is True) designator.
+            component carries index, name, alias_name, part_count,
+            description, (only when with_parameters is True) parameters,
+            and (only when with_designator is True) designator.
+
+            ``index`` is a stable addressing key (position in library
+            order). Pass it as ``component_index`` to lib_get_component_details
+            / lib_delete_component / lib_rename_component to reach a
+            component whose ``name`` contains bytes you cannot reproduce
+            (an embedded double-quote, or a control char from a broken
+            import), the case where matching by name fails.
         """
         bridge = get_bridge()
         params: dict[str, Any] = {}
@@ -1836,8 +1843,9 @@ def register_library_tools(mcp):
 
     @mcp.tool()
     async def lib_get_component_details(
-        component_name: str,
+        component_name: str = "",
         library_path: Optional[str] = None,
+        component_index: Optional[int] = None,
     ) -> dict[str, Any]:
         """Get full inspection of one library component in a single call.
 
@@ -1866,6 +1874,13 @@ def register_library_tools(mcp):
             component_name: Component LibRef as it appears in the .SchLib.
             library_path: Optional .SchLib full path. When omitted the
                 currently focused library is used.
+            component_index: Alternative to component_name. The integer
+                `index` from lib_get_components. Use this to reach a
+                component whose LibReference carries bytes you cannot
+                reproduce (an embedded double-quote, or a control char
+                left by a broken import) -- the name never has to round
+                trip through the caller. Provide exactly one of
+                component_name / component_index.
 
         Returns:
             Dict with:
@@ -1893,8 +1908,16 @@ def register_library_tools(mcp):
                 by name only. Empty list when the part carries no models.
               - `_datasheet_guidance` + `_datasheet_parts`.
         """
+        if not component_name and component_index is None:
+            raise ValueError(
+                "Provide component_name or component_index"
+            )
         bridge = get_bridge()
-        params: dict[str, Any] = {"component_name": component_name}
+        params: dict[str, Any] = {}
+        if component_name:
+            params["component_name"] = component_name
+        if component_index is not None:
+            params["component_index"] = component_index
         if library_path:
             params["library_path"] = library_path
         result = await bridge.send_command_async(
@@ -2867,8 +2890,9 @@ def register_library_tools(mcp):
 
     @mcp.tool()
     async def lib_delete_component(
-        component_name: str,
+        component_name: str = "",
         library_path: str = "",
+        component_index: Optional[int] = None,
     ) -> dict[str, Any]:
         """Delete one symbol from a schematic library (.SchLib).
 
@@ -2882,14 +2906,73 @@ def register_library_tools(mcp):
             component_name: the component's LibReference (its library name).
             library_path: optional absolute .SchLib path to target; defaults
                 to the currently focused library document.
+            component_index: alternative to component_name; the integer
+                `index` from lib_get_components. Use it to delete a part
+                whose name carries unreproducible bytes (embedded quote or
+                control char). Provide exactly one of the two.
 
         Returns:
             {"success": true, "library_path": "...", "deleted": "..."}.
         """
+        if not component_name and component_index is None:
+            raise ValueError("Provide component_name or component_index")
         bridge = get_bridge()
+        params: dict[str, Any] = {"library_path": library_path}
+        if component_name:
+            params["component_name"] = component_name
+        if component_index is not None:
+            params["component_index"] = component_index
         return await bridge.send_command_async(
-            "library.delete_component",
-            {"component_name": component_name, "library_path": library_path},
+            "library.delete_component", params,
+        )
+
+    @mcp.tool()
+    async def lib_rename_component(
+        new_name: str,
+        component_name: str = "",
+        library_path: str = "",
+        component_index: Optional[int] = None,
+    ) -> dict[str, Any]:
+        """Rename one symbol's LibReference in a schematic library (.SchLib).
+
+        This is the repair path for a component whose current name carries
+        bytes a caller cannot reproduce (an embedded double-quote, or a
+        control char left by a broken import). Address it by
+        ``component_index`` from lib_get_components, give it a clean
+        ``new_name``, and every name-based tool can reach it again.
+
+        The component is removed and re-added under the new name so the
+        library's internal by-name index is rebuilt. Errors with
+        NAME_EXISTS if a different component already uses ``new_name``.
+        Marks the library dirty for deferred save.
+
+        Args:
+            new_name: the clean LibReference to write.
+            component_name: current LibReference of the target. Provide this
+                or component_index.
+            library_path: optional absolute .SchLib path; defaults to the
+                focused library.
+            component_index: the integer `index` from lib_get_components,
+                the name-free way to pick the target. Provide this or
+                component_name.
+
+        Returns:
+            {"success": true, "library_path": "...", "old_name": "...",
+             "new_name": "..."}.
+        """
+        if not component_name and component_index is None:
+            raise ValueError("Provide component_name or component_index")
+        bridge = get_bridge()
+        params: dict[str, Any] = {
+            "new_name": new_name,
+            "library_path": library_path,
+        }
+        if component_name:
+            params["component_name"] = component_name
+        if component_index is not None:
+            params["component_index"] = component_index
+        return await bridge.send_command_async(
+            "library.rename_component", params,
         )
 
     @mcp.tool()
@@ -3091,6 +3174,106 @@ def register_library_tools(mcp):
             "library.probe_footprint",
             {"footprint_name": footprint_name, "library_path": library_path},
         )
+
+    @mcp.tool()
+    async def lib_get_pad_geometry(
+        footprint_name: str,
+        library_path: str = "",
+    ) -> dict[str, Any]:
+        """Full-precision pad geometry of one PcbLib footprint, in mm.
+
+        The measurement half of the datasheet land-pattern audit. Unlike
+        the integer-mil dump behind lib_audit_footprint_policies, every
+        dimension here is a float in millimetres (a 0.65 mm pitch loses
+        10 um to integer-mil rounding, which a tolerance comparison
+        against the datasheet cannot afford). Coordinates are relative
+        to the footprint's own origin.
+
+        Args:
+            footprint_name: the footprint name in the library.
+            library_path: optional .PcbLib path; defaults to the
+                focused library.
+
+        Returns:
+            {name, description, library_path, pad_count, pads: [{
+             name, x_mm, y_mm, w_mm, h_mm, shape, corner_pct, rotation,
+             hole_mm, hole_w_mm, hole_type, plated, layer,
+             paste_expansion_mm, paste_expansion_source,
+             mask_expansion_mm, mask_expansion_source}]}.
+            *_expansion_source is 'manual' when the pad overrides the
+            design rule, 'rule' otherwise (value 0 in that case: the
+            rule's value lives in the design rules, not on the pad).
+        """
+        bridge = get_bridge()
+        return await bridge.send_command_async(
+            "library.get_pad_geometry",
+            {"footprint_name": footprint_name, "library_path": library_path},
+        )
+
+    @mcp.tool()
+    async def lib_audit_footprint_vs_datasheet(
+        footprint_name: str,
+        spec_json: Any,
+        library_path: str = "",
+    ) -> dict[str, Any]:
+        """Audit a footprint against the manufacturer's land pattern.
+
+        Deterministic comparison of the REAL pad geometry (read live
+        from the .PcbLib) against a land-pattern spec transcribed from
+        the manufacturer datasheet: pad count, every pad's position /
+        size / shape / drill, the numbering sequence, pitch (implied by
+        positions), the thermal pad, and its paste policy. Alignment is
+        automatic (centroid + best of the four 90-degree rotations), so
+        library origin and rotation conventions do not produce false
+        errors; a MIRRORED pattern is deliberately not compensated and
+        reports as position/sequence errors.
+
+        DATASHEET DISCIPLINE: the spec must be transcribed from the
+        manufacturer datasheet fetched in this conversation, and
+        ``spec.source`` must cite it (url + figure/page + part number).
+        Symbol metadata, distributor drawings, or memory of a package
+        are not acceptable sources. There are no built-in package
+        tables here, and that is intentional.
+
+        The spec (JSON object or string):
+          source: {datasheet_url, reference, part_number}   REQUIRED
+          pads: [{name, x, y, w, h, shape?, hole?}]         explicit, mm
+          dual_row: {count, pitch, span, pad_w, pad_h, shape?}
+          quad: {count, pitch, span_x, span_y, pad_w, pad_h, shape?}
+          thermal_pad: {name, x, y, w, h, shape?}
+          thermal_paste: 'full' | 'windowed'
+          position_tol / size_tol: mm, default 0.05
+
+        dual_row expands with the SOIC/SOP convention (pin 1 top-left,
+        CCW); quad with the QFP/QFN convention (pin 1 top of left side,
+        CCW). For any other numbering give explicit ``pads``.
+
+        Returns:
+            {ok, rotation_applied_deg, findings: [{check, severity,
+             message, pad?, expected?, actual?}]} plus the footprint
+            geometry under 'footprint' for reference. ok is true only
+            with zero error-severity findings.
+        """
+        import json as _json
+
+        from eda_agent.design.footprint_audit import (
+            LandPatternSpec,
+            audit_footprint_against_spec,
+        )
+
+        if isinstance(spec_json, str):
+            spec_json = _json.loads(spec_json)
+        spec = LandPatternSpec.model_validate(spec_json)
+
+        bridge = get_bridge()
+        footprint = await bridge.send_command_async(
+            "library.get_pad_geometry",
+            {"footprint_name": footprint_name, "library_path": library_path},
+        )
+        report = audit_footprint_against_spec(spec, footprint)
+        report["footprint"] = footprint
+        report["spec_source"] = spec.source.model_dump()
+        return report
 
     @mcp.tool()
     async def lib_normalize_implementations(

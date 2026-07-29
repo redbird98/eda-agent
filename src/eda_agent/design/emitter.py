@@ -224,6 +224,7 @@ def _emit_sheet(
         _emit_parameter_stamps(
             instances, parameter_stamps, sheet_path, bridge, result
         )
+        _emit_text_positions(instances, sheet_path, bridge, result)
     # 3. Bulk wires.
     wires = canvas.wires_on(sheet_name)
     if wires:
@@ -439,11 +440,43 @@ def _emit_bus_entries(
             break
 
 
+def _emit_text_positions(
+    instances: list, sheet_path: Path, bridge: Any, result: EmitResult
+) -> None:
+    """Mirror text_placement's collision-free annotation anchors onto the
+    live sheet (Designator / Comment sub-object Locations). Skips
+    instances the pass left at defaults."""
+    ops: list[str] = []
+    for inst in instances:
+        dp = getattr(inst, "designator_pos", None)
+        if dp is None:
+            continue
+        fields = [
+            f"designator={inst.refdes}", f"dx={dp[0]}", f"dy={dp[1]}",
+        ]
+        vp = getattr(inst, "value_pos", None)
+        if vp is not None:
+            fields.append(f"vx={vp[0]}")
+            fields.append(f"vy={vp[1]}")
+        ops.append(";".join(fields))
+    if not ops:
+        return
+    try:
+        bridge.send_command(
+            "generic.set_sch_text_positions",
+            {"positions": "~~".join(ops), "sheet_path": str(sheet_path)},
+            timeout=_PARAM_TIMEOUT_S * max(1, len(ops) // 8),
+        )
+    except Exception as exc:
+        result.notes.append(f"text position pass failed: {exc}")
+
+
 def _emit_labels(
     labels: list, bridge: Any, result: EmitResult, sheet_name: str
 ) -> None:
     payload = "~~".join(
         f"text={l.text};x={l.x};y={l.y};orientation={l.orientation}"
+        f";justification={getattr(l, 'justification', 0)}"
         for l in labels
     )
     try:

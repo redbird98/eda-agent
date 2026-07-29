@@ -357,7 +357,7 @@ Lifecycle, parameters, compilation, analysis, outputs, ECO sync, variants.
 | `proj_list_outjob_containers` / `proj_run_outjob` / `proj_run_outjob_all` | OutJob execution (`proj_run_outjob_all` fires every container in one pass) |
 | `proj_generate_fab_package` | Run every OutJob container (Gerber / NC drill / IPC-356 / P&P / assembly / BOM) and return a consolidated manifest of produced files; optional STEP / DXF |
 
-### Library (57 tools)
+### Library (60 tools)
 
 Symbol and footprint creation, linking, batch editing, comparison.
 
@@ -369,9 +369,11 @@ Symbol and footprint creation, linking, batch editing, comparison.
 | `lib_create_footprint` | Footprint creation |
 | `lib_add_footprint_pad` / `lib_add_footprint_track` / `lib_add_footprint_arc` | Footprint primitives |
 | `lib_link_footprint` / `lib_link_3d_model` | Link footprint / 3D model to symbol |
-| `lib_get_components` / `lib_get_component_details` / `lib_search` | Browse and search |
+| `lib_get_components` / `lib_get_component_details` / `lib_search` | Browse and search. `lib_get_components` returns a stable `index` per component |
+| `lib_rename_component` / `lib_delete_component` | Rename or delete one symbol. Both accept `component_index` (the `index` from `lib_get_components`) as well as `component_name`, so a part whose LibReference holds bytes a caller cannot reproduce (an embedded quote or a control char from a broken import) is still reachable |
 | `lib_batch_set_params` / `lib_batch_rename` | Bulk parameter / rename operations |
 | `lib_diff_libraries` | Compare two libraries |
+| `lib_get_pad_geometry` / `lib_audit_footprint_vs_datasheet` | Audit one footprint against the manufacturer's recommended land pattern. The agent transcribes the datasheet drawing into a spec (pad grid, dimensions, numbering, thermal pad, paste policy - citation required); the tool reads the real pad geometry in mm precision and reports every discrepancy with expected-vs-actual: count, per-pad position/size/shape/drill, numbering sequence, thermal paste. Alignment to the library's origin and rotation convention is automatic; a mirrored pattern is deliberately reported, never compensated |
 | `lib_audit_footprint_policies` | Sweep a whole PcbLib and flag footprints that break the library's *own* conventions - pad rules (numbering scheme, drill/layer integrity), pin-1 markings, layer usage, courtyard, silkscreen, 3D models, designator presence/layer/height/centring. Infers each convention by majority across the library; every finding carries expected-vs-actual to drive a fix. Pass `policy` to enforce an explicit standard |
 | `lib_convert_designators_to_stroke` | Convert every TrueType `.Designator` in a PcbLib to a stroke font (clears bold/italic/UseTTFonts). TrueType PCB text won't persist a position change - it reverts on reload - so bold/italic designators can't be centred until converted. Reads back to confirm, saves, reloads |
 | `lib_reload_library` | Close and reopen a PcbLib so Altium rebuilds its caches from disk. `IPCB_Text.BoundingRectangle` is populated at load and is never refreshed when a text moves or resizes, so any read after a write returns the old box. Save first |
@@ -380,7 +382,7 @@ Symbol and footprint creation, linking, batch editing, comparison.
 | `lib_update_footprint_heights_from_3d` | Propagate `IPCB_ComponentBody.OverallHeight` up to `Footprint.Height` so placement-collision DRC actually fires (libraries from vendors often ship Height=0) |
 | `lib_inspect_cse_zip` / `lib_extract_cse_zip` | SamacSys / Component Search Engine zip import: identify the .SchLib / .PcbLib / STEP members (and any path-traversal members - those reject the whole archive), then stage the files and return an ordered install plan of `lib_install_library` / `lib_link_footprint` / `lib_link_3d_model` calls. Extraction is pure Python |
 
-### Schematic and general (93 tools)
+### Schematic and general (94 tools)
 
 Schematic-side operations plus viewport and sheet management.
 
@@ -398,7 +400,8 @@ Schematic-side operations plus viewport and sheet management.
 | `sch_set_sheet_size` | Change SheetStyle (A / A0-A4 / Letter / Legal / Custom) |
 | `sch_place_no_erc` / `sch_place_junction` / `sch_place_image` / `sch_place_note` / `place_directive` | Markers, annotations, directives |
 | `sch_place_rectangle` / `sch_place_line` | Graphical primitives |
-| `obj_copy` / `obj_count` / `proj_replace_component` | Bulk operations |
+| `obj_copy` / `obj_count` / `proj_replace_component` | Bulk operations. `proj_replace_component` also syncs the component's Design Item ID so a re-linked part re-matches against the new library instead of showing Not Found |
+| `sch_clear_source_library` | Unpin placed components from a stale source library: clears SourceLibraryName and syncs DesignItemId to LibReference so Altium re-matches from Available Libraries. Schematic mirror of `pcb_clear_source_footprint_library`; per sheet, with optional designator filter |
 | `obj_set_grid` / `sch_set_units` | Change snap / visible grid / UnitSystem (mm ↔ mil) |
 | `obj_get_font_spec` / `obj_get_font_id` | Font table lookup |
 | `obj_batch_create` / `obj_batch_delete` | Generic bulk create / delete meta-tools |

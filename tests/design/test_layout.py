@@ -1098,3 +1098,132 @@ def test_shove_single_and_empty_plan_trivially_returns() -> None:
     cleaned, residual = _hard_shove_pass(one_part, [])
     assert cleaned == []
     assert residual == 0
+
+
+def _divider_plan() -> DesignPlan:
+    """Divider column: VCC - R1 - VMID - C1 - GND, plus R2 off-column.
+
+    R1 touches the power rail, C1 only ground: professional convention
+    puts R1 ABOVE C1 in a shared column.
+    """
+    return DesignPlan(
+        spec="x",
+        summary="x",
+        sheets=[Sheet(name="main")],
+        parts=[
+            Part(refdes="R1", lib_ref="RES", sheet="main"),
+            Part(refdes="R2", lib_ref="RES", sheet="main"),
+            Part(refdes="C1", lib_ref="CAP", sheet="main"),
+            Part(refdes="C2", lib_ref="CAP", sheet="main"),
+        ],
+        nets=[
+            Net(name="VCC", is_power=True,
+                pins=[PinRef(refdes="R1", pin="1"),
+                      PinRef(refdes="C2", pin="1")]),
+            Net(name="VMID",
+                pins=[PinRef(refdes="R1", pin="2"),
+                      PinRef(refdes="R2", pin="1"),
+                      PinRef(refdes="C1", pin="1")]),
+            Net(name="GND", is_ground=True,
+                pins=[PinRef(refdes="C1", pin="2"),
+                      PinRef(refdes="R2", pin="2"),
+                      PinRef(refdes="C2", pin="2")]),
+        ],
+    )
+
+
+def test_order_rail_columns_puts_power_part_on_top() -> None:
+    """An inverted column (ground-touching cap ABOVE the rail resistor)
+    is reordered so potential descends top to bottom."""
+    from eda_agent.design.layout import order_rail_columns
+
+    plan = _divider_plan()
+    placed = [
+        # C1 wrongly ABOVE R1 in the same x column, both vertical.
+        PlacedPart(refdes="C1", sheet="main", x_mils=5100, y_mils=4600,
+                   rotation=270),
+        PlacedPart(refdes="R1", sheet="main", x_mils=5100, y_mils=3600,
+                   rotation=270),
+        # R2 / C2 in their own columns: untouched.
+        PlacedPart(refdes="R2", sheet="main", x_mils=6500, y_mils=3600,
+                   rotation=270),
+        PlacedPart(refdes="C2", sheet="main", x_mils=7000, y_mils=3600,
+                   rotation=270),
+    ]
+    out = {p.refdes: p for p in order_rail_columns(plan, placed)}
+    assert out["R1"].y_mils == 4600  # power part took the top slot
+    assert out["C1"].y_mils == 3600  # ground part took the bottom slot
+    assert out["R2"].y_mils == 3600  # solo column untouched
+    # Pure permutation: x, sheet, rotation unchanged.
+    assert out["R1"].x_mils == 5100 and out["C1"].x_mils == 5100
+    assert all(p.rotation == 270 for p in out.values())
+
+
+def test_order_rail_columns_leaves_correct_column_alone() -> None:
+    """A column already in descending-potential order is not touched."""
+    from eda_agent.design.layout import order_rail_columns
+
+    plan = _divider_plan()
+    placed = [
+        PlacedPart(refdes="R1", sheet="main", x_mils=5100, y_mils=4600,
+                   rotation=270),
+        PlacedPart(refdes="C1", sheet="main", x_mils=5100, y_mils=3600,
+                   rotation=270),
+        PlacedPart(refdes="R2", sheet="main", x_mils=6500, y_mils=3600,
+                   rotation=270),
+        PlacedPart(refdes="C2", sheet="main", x_mils=7000, y_mils=3600,
+                   rotation=270),
+    ]
+    assert order_rail_columns(plan, placed) == placed
+
+
+def test_order_rail_columns_skips_horizontal_and_multi_pin() -> None:
+    """Horizontal parts and 3+-pin parts never participate."""
+    from eda_agent.design.layout import order_rail_columns
+
+    plan = _divider_plan()
+    placed = [
+        # Same column but horizontal: rule must not fire.
+        PlacedPart(refdes="C1", sheet="main", x_mils=5100, y_mils=4600,
+                   rotation=0),
+        PlacedPart(refdes="R1", sheet="main", x_mils=5100, y_mils=3600,
+                   rotation=0),
+        PlacedPart(refdes="R2", sheet="main", x_mils=6500, y_mils=3600,
+                   rotation=270),
+        PlacedPart(refdes="C2", sheet="main", x_mils=7000, y_mils=3600,
+                   rotation=270),
+    ]
+    assert order_rail_columns(plan, placed) == placed
+
+
+def test_no_stranded_parts_rule_promotes_cheapest_net() -> None:
+    """A part whose every net is label_per_pin gets one net promoted to
+    wire; parts with a port or wire connection are left alone."""
+    from eda_agent.design._wiring import _apply_no_stranded_parts_rule
+
+    plan = _divider_plan()
+    nets = list(plan.nets)
+    # Simulate: VMID and GND both fell back to labels; VCC is a port.
+    reps = {"VCC": "port", "VMID": "label_per_pin", "GND": "label_per_pin"}
+    promoted = _apply_no_stranded_parts_rule(
+        nets, reps, {"R1", "R2", "C1", "C2"},
+    )
+    # R1 has VCC as a port -> connected. C1 and R2 have only labels ->
+    # each must gain a wire. GND (2 pins) is cheaper than VMID (3 pins)
+    # and covers both C1 and R2 in one promotion.
+    assert reps["GND"] == "wire"
+    assert promoted == ["GND"]
+    assert reps["VMID"] == "label_per_pin"  # untouched: parts now served
+    assert reps["VCC"] == "port"
+
+
+def test_no_stranded_parts_rule_noop_when_all_connected() -> None:
+    from eda_agent.design._wiring import _apply_no_stranded_parts_rule
+
+    plan = _divider_plan()
+    reps = {"VCC": "port", "VMID": "wire", "GND": "port"}
+    promoted = _apply_no_stranded_parts_rule(
+        list(plan.nets), reps, {"R1", "R2", "C1", "C2"},
+    )
+    assert promoted == []
+    assert reps == {"VCC": "port", "VMID": "wire", "GND": "port"}

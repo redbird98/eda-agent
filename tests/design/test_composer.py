@@ -215,13 +215,17 @@ def test_ic_anchored_motif_anchors_to_ic_baseline_position():
     )
     result = compose_layout(plan)
     by_refdes = {p.refdes: p for p in result.placements}
-    # boot_cap canonical offset is (-1000, 600) from the U anchor.
-    # The IC stays at its Sugiyama baseline; the cap is offset.
+    # boot_cap canonical offset is (300, 1300) from the U anchor: the
+    # cap bridges ABOVE the IC so neither the BOOT nor the SW wire has
+    # to wrap around the body. The IC stays at its Sugiyama baseline;
+    # the cap is offset.
     if "C1" in result.motif_parts:
         ux, uy = by_refdes["U1"].x_mils, by_refdes["U1"].y_mils
         cx, cy = by_refdes["C1"].x_mils, by_refdes["C1"].y_mils
-        # Canonical offset (-1000, 600). Snap-to-100 might shift by up
-        # to 99 mils per axis from the post-Sugiyama IC position. Use
-        # a tolerant check.
-        assert abs((cx - ux) - (-1000)) <= 100
-        assert abs((cy - uy) - 600) <= 100
+        # Snap-to-100 might shift by up to 99 mils per axis from the
+        # post-Sugiyama IC position; the splat's collision-escape shift
+        # ladder can add up to another 600. Assert the CONVENTION (cap
+        # clearly above the body, near the IC's column) rather than the
+        # exact offset pair.
+        assert (cy - uy) >= 1000, "boot cap must sit above the IC body"
+        assert abs(cx - ux) <= 1000, "boot cap must stay by the IC column"

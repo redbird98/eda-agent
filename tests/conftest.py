@@ -8,6 +8,7 @@ Any divergence between the Python reimplementation and expected behavior IS a bu
 """
 
 import inspect
+import os
 import json
 import pytest
 import re
@@ -193,3 +194,23 @@ def validate_error_response(resp: dict, request_id: str,
     assert "message" in resp["error"]
     if expected_code:
         assert resp["error"]["code"] == expected_code
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _isolate_workspace_pointer(tmp_path_factory):
+    r"""Keep the whole test session away from the machine-global pointer.
+
+    ``C:\ProgramData\eda-agent\workspace-path.txt`` tells a running
+    Altium script which directory to poll, and the script reads it once at
+    startup. A test that writes its tmp workspace there silently redirects
+    a live polling loop at a throwaway folder: the script keeps reporting
+    healthy with zero requests while every real call times out.
+
+    ``config.write_workspace_pointer`` already refuses to touch the real
+    path under pytest; this fixture is the second layer, so any code path
+    that reaches the pointer another way still lands on a scratch file.
+    """
+    scratch = tmp_path_factory.mktemp("pointer") / "workspace-path.txt"
+    os.environ["EDA_AGENT_POINTER_FILE"] = str(scratch)
+    yield
+    os.environ.pop("EDA_AGENT_POINTER_FILE", None)

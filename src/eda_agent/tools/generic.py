@@ -1495,6 +1495,62 @@ def register_generic_tools(mcp):
         return result
 
     @mcp.tool()
+    async def sch_clear_source_library(
+        sheet_path: str = "",
+        designators: Optional[list[str]] = None,
+        clear_source_library: bool = True,
+        sync_design_item_id: bool = True,
+    ) -> dict[str, Any]:
+        """Unpin placed schematic components from a stale source library.
+
+        Schematic mirror of ``pcb_clear_source_footprint_library``. When
+        a library is renamed, moved, or consolidated, placed components
+        keep pointing at it through two component PROPERTIES:
+
+        - ``SourceLibraryName``: which library file the part came from.
+        - ``DesignItemId``: which library ITEM it re-matches against
+          ("Design Item ID" in the Properties panel). A re-link that
+          updates only LibReference leaves this naming the OLD item,
+          which is exactly the ``<Not Found>`` state in the panel.
+
+        Per matching component this clears SourceLibraryName (when set)
+        and syncs DesignItemId to LibReference (when they differ), so
+        Altium re-matches from whatever is currently in Available
+        Libraries. Both actions are independently switchable.
+
+        DesignItemId is a component property, NOT a parameter: writing
+        it through the parameter-stamping API only creates a stray user
+        parameter of that name. Use this tool (bulk) or ``obj_modify``
+        with property ``DesignItemId`` (single component).
+
+        Args:
+            sheet_path: absolute .SchDoc path; empty = the focused
+                sheet. For a whole project, call once per sheet (see
+                proj_list_documents).
+            designators: restrict to these designators (whole-string,
+                case-sensitive); None/empty = every component on the
+                sheet.
+            clear_source_library: clear ``SourceLibraryName``.
+            sync_design_item_id: set ``DesignItemId`` = LibReference
+                where they differ.
+
+        Returns:
+            {"total": inspected, "cleared_source_library": n,
+             "synced_design_item_id": n}.
+        """
+        bridge = get_bridge()
+        params: dict[str, Any] = {
+            "sheet_path": sheet_path,
+            "clear_source_library": "true" if clear_source_library else "false",
+            "sync_design_item_id": "true" if sync_design_item_id else "false",
+        }
+        if designators:
+            params["designators"] = ",".join(designators)
+        return await bridge.send_command_async(
+            "generic.clear_sch_source_library", params
+        )
+
+    @mcp.tool()
     async def sch_get_constraint_groups() -> dict[str, Any]:
         """Enumerate IDocument.DM_ConstraintGroups on the active schematic.
 

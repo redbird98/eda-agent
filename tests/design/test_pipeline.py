@@ -316,17 +316,21 @@ def test_pipeline_power_net_produces_port_glyph():
     assert any("gnd" in p.style.lower() for p in gnd_ports)
 
 
-def test_cluster_radius_is_the_shared_constant():
-    """The pipeline's rail-cluster radius is the shared 1-inch constant for
-    every net size (no special-case giant cluster for small nets), so the
-    preview matches the executor's apply path."""
+def test_cluster_radius_is_asymmetric_by_kind():
+    """Rail-glyph clustering radius is per-KIND, not per-net-size, and the
+    preview matches the executor's apply path. Ground glyphs are narrow,
+    so a decap row gets per-cap drops (tight radius); power bars carry
+    the net NAME, wider than a decap column pitch, so nearby rail pins
+    share one bar (wide radius)."""
     from eda_agent.design.pipeline import _cluster_radius_for_net
     from eda_agent.design.canvas import POWER_RAIL_CLUSTER_RADIUS_MILS
 
-    assert POWER_RAIL_CLUSTER_RADIUS_MILS == 1000
+    assert POWER_RAIL_CLUSTER_RADIUS_MILS == 300
     for n in (2, 5, 6, 12, 40):
         actions = [(None, (i * 100, 0), 0) for i in range(n)]
-        assert _cluster_radius_for_net(actions) == POWER_RAIL_CLUSTER_RADIUS_MILS
+        assert _cluster_radius_for_net(actions, is_ground=True) \
+            == POWER_RAIL_CLUSTER_RADIUS_MILS
+        assert _cluster_radius_for_net(actions, is_ground=False) == 1000
 
 
 def test_spread_ground_pins_get_per_pin_symbols_not_one_cluster():
@@ -1343,3 +1347,114 @@ def test_pin_aware_fd_places_parts_on_their_ic_pin_side(monkeypatch):
     # And it is the chosen layout because it scores better than the side-blind
     # Sugiyama base, not in spite of the scorer.
     assert "pin_aware_fd" in " || ".join(n.text for n in result.notes)
+
+
+def test_corner_origin_symbol_placed_by_body_center():
+    """Real library symbols anchor at a CORNER, not the body centre (a
+    QFN28 bridge IC spans local x 300..1500, y 0..-1900 from its origin).
+    Placement passes reason in body-centre frame; the canvas build must
+    convert so a corner-origin symbol's BODY lands where the placement
+    said, instead of hanging its body diagonally off the target point
+    (which put IC-anchored satellites inside the pin field on the first
+    live-project run)."""
+    from eda_agent.design.layout import PlacedPart
+    from eda_agent.design.pipeline import build_canvas_from_plan
+
+    # Corner-origin IC: body entirely in +x / -y relative to the origin.
+    corner_ic = SymbolModel(
+        lib_path=_LIB, lib_ref="CORNER_IC",
+        pins=(
+            SymbolPin(designator="1", name="IN", x=300, y=-300,
+                      orientation=2, length=300, electrical_type="input"),
+            SymbolPin(designator="2", name="OUT", x=1500, y=-300,
+                      orientation=0, length=300, electrical_type="output"),
+            SymbolPin(designator="3", name="GND", x=300, y=-1700,
+                      orientation=2, length=300, electrical_type="power"),
+            SymbolPin(designator="4", name="VCC", x=300, y=-100,
+                      orientation=2, length=300, electrical_type="power"),
+        ),
+        body_bbox=SymbolBBox(x_min=300, y_min=-1900, x_max=1500, y_max=0),
+    )
+    syms = {(_LIB, "CORNER_IC"): corner_ic, (_LIB, "RES"): _passive("RES")}
+    plan = DesignPlan.model_validate({
+        "spec": "x", "summary": "x",
+        "sheets": [{"name": "main"}],
+        "parts": [
+            {"refdes": "U1", "lib_ref": "CORNER_IC", "lib_path": _LIB,
+             "status": "existing", "sheet": "main"},
+            {"refdes": "R1", "lib_ref": "RES", "lib_path": _LIB,
+             "status": "existing", "sheet": "main"},
+        ],
+        "nets": [
+            {"name": "SIG", "pins": [{"refdes": "U1", "pin": "2"},
+                                     {"refdes": "R1", "pin": "1"}]},
+            {"name": "GND", "is_ground": True,
+             "pins": [{"refdes": "U1", "pin": "3"},
+                      {"refdes": "R1", "pin": "2"}]},
+        ],
+    })
+    target = PlacedPart(refdes="U1", sheet="main", x_mils=5000, y_mils=4000,
+                        rotation=0)
+    r_target = PlacedPart(refdes="R1", sheet="main", x_mils=8000, y_mils=4000,
+                          rotation=270)
+    result = build_canvas_from_plan(
+        plan, MockExtractor(syms),
+        layout_overrides={"U1": target, "R1": r_target},
+    )
+    inst = next(i for i in result.canvas.instances if i.refdes == "U1")
+    bb = inst.world_bbox()
+    cx = (bb.x_min + bb.x_max) / 2
+    cy = (bb.y_min + bb.y_max) / 2
+    # Body centre must land on the placement point (within grid snap +
+    # the small post-passes' nudges), NOT offset by half the body.
+    assert abs(cx - 5000) <= 300, f"body centre x {cx} far from 5000"
+    assert abs(cy - 4000) <= 300, f"body centre y {cy} far from 4000"
+
+
+def test_offgrid_symbol_pins_snap_to_wiring_grid():
+    """A symbol whose local pin coordinates sit OFF the 100-mil grid must
+    still end up with on-grid world pins (snapped by pin residual, not by
+    origin) -- an off-grid pin never bonds to a wire in Altium."""
+    from eda_agent.design.layout import PlacedPart
+    from eda_agent.design.pipeline import build_canvas_from_plan
+
+    odd_part = SymbolModel(
+        lib_path=_LIB, lib_ref="ODD50",
+        pins=(
+            SymbolPin(designator="1", name="A", x=-250, y=50,
+                      orientation=2, length=100, electrical_type="passive"),
+            SymbolPin(designator="2", name="B", x=250, y=50,
+                      orientation=0, length=100, electrical_type="passive"),
+        ),
+        body_bbox=SymbolBBox(x_min=-250, y_min=-100, x_max=250, y_max=200),
+    )
+    syms = {(_LIB, "ODD50"): odd_part, (_LIB, "RES"): _passive("RES")}
+    plan = DesignPlan.model_validate({
+        "spec": "x", "summary": "x",
+        "sheets": [{"name": "main"}],
+        "parts": [
+            {"refdes": "X1", "lib_ref": "ODD50", "lib_path": _LIB,
+             "status": "existing", "sheet": "main"},
+            {"refdes": "R1", "lib_ref": "RES", "lib_path": _LIB,
+             "status": "existing", "sheet": "main"},
+        ],
+        "nets": [
+            {"name": "N1", "pins": [{"refdes": "X1", "pin": "2"},
+                                    {"refdes": "R1", "pin": "1"}]},
+            {"name": "N2", "pins": [{"refdes": "X1", "pin": "1"},
+                                    {"refdes": "R1", "pin": "2"}]},
+        ],
+    })
+    result = build_canvas_from_plan(
+        plan, MockExtractor(syms),
+        layout_overrides={
+            "X1": PlacedPart(refdes="X1", sheet="main", x_mils=5000,
+                             y_mils=4000, rotation=0),
+            "R1": PlacedPart(refdes="R1", sheet="main", x_mils=7000,
+                             y_mils=4000, rotation=0),
+        },
+    )
+    inst = next(i for i in result.canvas.instances if i.refdes == "X1")
+    for ep in inst.all_pin_endpoints():
+        assert ep.x % 100 == 0, f"pin {ep.pin_id} x {ep.x} off-grid"
+        assert ep.y % 100 == 0, f"pin {ep.pin_id} y {ep.y} off-grid"

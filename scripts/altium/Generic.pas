@@ -245,6 +245,7 @@ Begin
         Else If PropName = 'Name'        Then Result := Obj.Name
         Else If PropName = 'LibReference'       Then Result := Obj.LibReference
         Else If PropName = 'SourceLibraryName'  Then Result := Obj.SourceLibraryName
+        Else If PropName = 'DesignItemId'       Then Result := Obj.DesignItemId
         Else If PropName = 'ComponentDescription' Then Result := Obj.ComponentDescription
         Else If PropName = 'UniqueId'    Then Result := Obj.UniqueId
 
@@ -397,6 +398,20 @@ Begin
         Else If PropName = 'Text'        Then Obj.Text := Value
         Else If PropName = 'Name'        Then Obj.Name := Value
         Else If PropName = 'LibReference'       Then Obj.LibReference := Value
+        // SourceLibraryName is the design-cache field that records which
+        // library a placed component came from. It is read in GetSchProperty
+        // but had no write case, so obj_modify / batch_modify silently no-oped
+        // (recorded only as an "unknown property"). Clearing it to '' is the
+        // canonical way to detach a part from a stale source-library binding.
+        Else If PropName = 'SourceLibraryName'  Then Obj.SourceLibraryName := Value
+        // DesignItemId is the library ITEM the placed part re-matches
+        // against ("Design Item ID" in the UI). It is a component
+        // PROPERTY, not a parameter: stamping a parameter named
+        // DesignItemId just creates a stray user parameter, and with no
+        // write case here obj_modify silently no-oped while reporting
+        // matched. A stale DesignItemId after a library re-link is what
+        // produces the <Not Found> state in the Properties panel.
+        Else If PropName = 'DesignItemId'       Then Obj.DesignItemId := Value
         // `Description` is the natural name (matches get_component_info /
         // BOM column / lib_set_component_description); `ComponentDescription`
         // is what ISch_Component actually exposes -- both accepted.
@@ -4470,6 +4485,12 @@ Begin
             Begin
                 SchServer.ProcessControl.PreProcess(SchDoc, '');
                 Comp.LibReference := NewLibRef;
+                { DesignItemId must follow the new library reference or
+                  the part keeps re-matching against the OLD library item
+                  and shows <Not Found> after a re-link. Measured: a
+                  replace that updated only LibReference/SourceLibraryName
+                  left every re-linked part in that state. }
+                Try Comp.DesignItemId := NewLibRef; Except End;
                 If NewLibrary <> '' Then
                     Comp.SourceLibraryName := NewLibrary;
                 SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
@@ -5978,7 +5999,7 @@ End;
 Function Gen_PlaceNetLabels(Params : String; RequestId : String) : String;
 Var
     LabelsStr, Op, Remaining : String;
-    OpCount, Placed, Failed, Orientation : Integer;
+    OpCount, Placed, Failed, Orientation, Justification : Integer;
     Text : String;
     X, Y : Integer;
     SchDoc : ISch_Document;
@@ -6017,6 +6038,10 @@ Begin
             X := StrToIntDef(GetBatchField(Op, 'x'), 0);
             Y := StrToIntDef(GetBatchField(Op, 'y'), 0);
             Orientation := StrToIntDef(GetBatchField(Op, 'orientation'), 0);
+            { Justification 2 = bottom-right: text ENDS at the anchor so a }
+            { label on a LEFT-facing pin reads to the left of the pin      }
+            { while the anchor (electrical hotspot) stays on the wire.     }
+            Justification := StrToIntDef(GetBatchField(Op, 'justification'), 0);
 
             If Text = '' Then
             Begin
@@ -6037,6 +6062,7 @@ Begin
             NetLabel.Location := Loc;
             NetLabel.Text := Text;
             NetLabel.Orientation := Orientation;
+            Try NetLabel.Justification := Justification; Except End;
             NetLabel.Color := 0;
 
             SchDoc.RegisterSchObjectInContainer(NetLabel);
@@ -6373,6 +6399,141 @@ Begin
             SchDoc.GraphicallyInvalidate;
         End;
 
+        Failed := OpCount - Updated;
+    Finally
+        DesigList.Free;
+        OpsList.Free;
+    End;
+
+    Try
+        SrvDoc := Client.GetDocumentByPath(SchDoc.DocumentName);
+        If SrvDoc <> Nil Then SrvDoc.SetModified(True);
+    Except End;
+
+    Result := BuildSuccessResponse(RequestId,
+        '{"updated":' + IntToStr(Updated) +
+        ',"failed":' + IntToStr(Failed) +
+        ',"total":' + IntToStr(OpCount) + '}');
+End;
+
+{..............................................................................}
+{ Gen_SetSchTextPositions - move Designator (and optionally Comment) text of   }
+{ placed components to explicit sheet coordinates. The offline text-placement  }
+{ pass picks a collision-free side per part; this mirrors those anchors onto   }
+{ the live sheet so it matches the offline render. Coordinates are mils,       }
+{ absolute sheet frame (the same frame place_sch_components uses).             }
+{ Params: positions = 'designator=R1;dx=..;dy=..;vx=..;vy=..~~...'              }
+{         (vx/vy optional; omitted = leave Comment where the library put it),  }
+{         sheet_path (optional; falls back to the focused document).           }
+{..............................................................................}
+
+Function Gen_SetSchTextPositions(Params : String; RequestId : String) : String;
+Var
+    PosStr, SheetPath, Op, Remaining, FieldStr : String;
+    OpCount, Updated, Failed, OpIdx : Integer;
+    DX, DY, VX, VY : Integer;
+    HasV : Boolean;
+    SchDoc : ISch_Document;
+    Iter : ISch_Iterator;
+    Obj : ISch_GraphicalObject;
+    Comp : ISch_Component;
+    DesigList, OpsList : TStringList;
+    Loc : TLocation;
+    SrvDoc : IServerDocument;
+Begin
+    PosStr := ExtractJsonValue(Params, 'positions');
+    SheetPath := ExtractJsonValue(Params, 'sheet_path');
+    If PosStr = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAM', 'positions required');
+        Exit;
+    End;
+
+    SchDoc := Nil;
+    If SheetPath <> '' Then
+        Try SchDoc := SchServer.GetSchDocumentByPath(SheetPath); Except End;
+    If SchDoc = Nil Then
+        SchDoc := SchServer.GetCurrentSchDocument;
+    If SchDoc = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_SCHEMATIC',
+            'No schematic document is active');
+        Exit;
+    End;
+
+    DesigList := TStringList.Create;
+    OpsList := TStringList.Create;
+    Try
+        Remaining := PosStr;
+        OpCount := 0;
+        While True Do
+        Begin
+            Op := NextBatchOp(Remaining);
+            If Op = '' Then Break;
+            OpCount := OpCount + 1;
+            FieldStr := GetBatchField(Op, 'designator');
+            If FieldStr <> '' Then
+            Begin
+                DesigList.Add(FieldStr);
+                OpsList.Add(Op);
+            End;
+        End;
+
+        Updated := 0;
+        SchServer.ProcessControl.PreProcess(SchDoc, '');
+        Try
+            Iter := SchDoc.SchIterator_Create;
+            Try
+                Iter.AddFilter_ObjectSet(MkSet(eSchComponent));
+                Obj := Iter.FirstSchObject;
+                While Obj <> Nil Do
+                Begin
+                    Comp := Obj;
+                    OpIdx := DesigList.IndexOf(Comp.Designator.Text);
+                    If OpIdx >= 0 Then
+                    Begin
+                        Op := OpsList[OpIdx];
+                        DX := StrToIntDef(GetBatchField(Op, 'dx'), 0);
+                        DY := StrToIntDef(GetBatchField(Op, 'dy'), 0);
+                        HasV := (GetBatchField(Op, 'vx') <> '')
+                            And (GetBatchField(Op, 'vy') <> '');
+                        VX := StrToIntDef(GetBatchField(Op, 'vx'), 0);
+                        VY := StrToIntDef(GetBatchField(Op, 'vy'), 0);
+
+                        { Record-field write needs a materialized local. }
+                        SchBeginModify(Comp.Designator);
+                        Try
+                            Loc := Comp.Designator.Location;
+                            Loc.X := MilsToCoord(DX);
+                            Loc.Y := MilsToCoord(DY);
+                            Comp.Designator.Location := Loc;
+                            Comp.Designator.Autoposition := False;
+                        Except End;
+                        SchEndModify(Comp.Designator);
+
+                        If HasV Then
+                        Begin
+                            SchBeginModify(Comp.Comment);
+                            Try
+                                Loc := Comp.Comment.Location;
+                                Loc.X := MilsToCoord(VX);
+                                Loc.Y := MilsToCoord(VY);
+                                Comp.Comment.Location := Loc;
+                                Comp.Comment.Autoposition := False;
+                            Except End;
+                            SchEndModify(Comp.Comment);
+                        End;
+                        Inc(Updated);
+                    End;
+                    Obj := Iter.NextSchObject;
+                End;
+            Finally
+                SchDoc.SchIterator_Destroy(Iter);
+            End;
+        Finally
+            SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
+            SchDoc.GraphicallyInvalidate;
+        End;
         Failed := OpCount - Updated;
     Finally
         DesigList.Free;
@@ -7970,6 +8131,123 @@ Begin
 End;
 
 {..............................................................................}
+{ Gen_ClearSchSourceLibrary - schematic mirror of the PCB-side                }
+{ clear_source_footprint_library: unpin placed components from a stale        }
+{ source library so Altium re-matches them from Available Libraries.          }
+{ Per matching component: clear SourceLibraryName, and (default on) sync      }
+{ DesignItemId to LibReference - the corpus-standard repair for the           }
+{ <Not Found> state a re-link leaves behind when DesignItemId still names     }
+{ the OLD library item. DesignItemId is a component PROPERTY, not a           }
+{ parameter; the parameter-stamping path only creates a stray user            }
+{ parameter of that name.                                                      }
+{ Params: sheet_path (optional, focused doc default),                          }
+{         designators (optional comma list; empty = every component),          }
+{         clear_source_library=true, sync_design_item_id=true.                 }
+Function Gen_ClearSchSourceLibrary(Params : String; RequestId : String) : String;
+Var
+    SheetPath, DesigCsv, FlagStr, Desig, LibRef : String;
+    SchDoc : ISch_Document;
+    Iterator : ISch_Iterator;
+    Obj : ISch_GraphicalObject;
+    Comp : ISch_Component;
+    DesigList : TStringList;
+    ClearSrc, SyncId, WantAll : Boolean;
+    Total, ClearedSrc, Synced : Integer;
+    SrvDoc : IServerDocument;
+Begin
+    SheetPath := StringReplace(ExtractJsonValue(Params, 'sheet_path'), '\\', '\', -1);
+    DesigCsv := ExtractJsonValue(Params, 'designators');
+    FlagStr := ExtractJsonValue(Params, 'clear_source_library');
+    ClearSrc := Not ((FlagStr = 'false') Or (FlagStr = 'False') Or (FlagStr = '0'));
+    FlagStr := ExtractJsonValue(Params, 'sync_design_item_id');
+    SyncId := Not ((FlagStr = 'false') Or (FlagStr = 'False') Or (FlagStr = '0'));
+
+    SchDoc := Nil;
+    If SheetPath <> '' Then
+        Try SchDoc := SchServer.GetSchDocumentByPath(SheetPath); Except End;
+    If SchDoc = Nil Then
+        SchDoc := SchServer.GetCurrentSchDocument;
+    If SchDoc = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_SCHEMATIC',
+            'No schematic document is active');
+        Exit;
+    End;
+
+    DesigList := TStringList.Create;
+    Try
+        DesigList.CommaText := DesigCsv;
+        WantAll := DesigList.Count = 0;
+
+        Total := 0;
+        ClearedSrc := 0;
+        Synced := 0;
+
+        SchServer.ProcessControl.PreProcess(SchDoc, '');
+        Try
+            Iterator := SchDoc.SchIterator_Create;
+            Try
+                Iterator.AddFilter_ObjectSet(MkSet(eSchComponent));
+                Obj := Iterator.FirstSchObject;
+                While Obj <> Nil Do
+                Begin
+                    Comp := Obj;
+                    Desig := '';
+                    Try Desig := Comp.Designator.Text; Except End;
+                    If WantAll Or (DesigList.IndexOf(Desig) >= 0) Then
+                    Begin
+                        Inc(Total);
+                        If ClearSrc Then
+                        Begin
+                            Try
+                                If Comp.SourceLibraryName <> '' Then
+                                Begin
+                                    SchBeginModify(Comp);
+                                    Comp.SourceLibraryName := '';
+                                    SchEndModify(Comp);
+                                    Inc(ClearedSrc);
+                                End;
+                            Except End;
+                        End;
+                        If SyncId Then
+                        Begin
+                            Try
+                                LibRef := Comp.LibReference;
+                                If (LibRef <> '') And (Comp.DesignItemId <> LibRef) Then
+                                Begin
+                                    SchBeginModify(Comp);
+                                    Comp.DesignItemId := LibRef;
+                                    SchEndModify(Comp);
+                                    Inc(Synced);
+                                End;
+                            Except End;
+                        End;
+                    End;
+                    Obj := Iterator.NextSchObject;
+                End;
+            Finally
+                SchDoc.SchIterator_Destroy(Iterator);
+            End;
+        Finally
+            SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
+            SchDoc.GraphicallyInvalidate;
+        End;
+    Finally
+        DesigList.Free;
+    End;
+
+    Try
+        SrvDoc := Client.GetDocumentByPath(SchDoc.DocumentName);
+        If SrvDoc <> Nil Then SrvDoc.SetModified(True);
+    Except End;
+
+    Result := BuildSuccessResponse(RequestId,
+        '{"total":' + IntToStr(Total) +
+        ',"cleared_source_library":' + IntToStr(ClearedSrc) +
+        ',"synced_design_item_id":' + IntToStr(Synced) + '}');
+End;
+
+{..............................................................................}
 { Command Handler - must be at end                                            }
 {..............................................................................}
 
@@ -8243,6 +8521,7 @@ Begin
         'set_sch_units':    Result := Gen_SetSchUnits(Params, RequestId);
         'place_image':      Result := Gen_PlaceImage(Params, RequestId);
         'replace_component': Result := Gen_ReplaceComponent(Params, RequestId);
+        'clear_sch_source_library': Result := Gen_ClearSchSourceLibrary(Params, RequestId);
         'get_constraint_groups':      Result := Gen_GetConstraintGroups(Params, RequestId);
         'place_harness_connector':    Result := Gen_PlaceHarnessConnector(Params, RequestId);
         'place_cross_sheet_connector': Result := Gen_PlaceCrossSheetConnector(Params, RequestId);
@@ -8263,6 +8542,7 @@ Begin
         'place_power_ports':          Result := Gen_PlacePowerPorts(Params, RequestId);
         'get_sch_doc_pins':           Result := Gen_GetSchDocPins(Params, RequestId);
         'set_sch_components_parameters': Result := Gen_SetSchComponentsParameters(Params, RequestId);
+        'set_sch_text_positions':      Result := Gen_SetSchTextPositions(Params, RequestId);
         'place_sch_components_from_library': Result := Gen_PlaceSchComponentsFromLibrary(Params, RequestId);
         'attach_spice_primitives':    Result := Gen_AttachSpicePrimitivesBatch(Params, RequestId);
     Else

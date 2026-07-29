@@ -915,7 +915,14 @@ def _place_net_labels(
                 # Greedy clustering: each stub_end joins the first cluster
                 # whose nearest member is within CLUSTER_RADIUS_MILS. Shared
                 # with the pipeline preview so apply matches the canvas.
-                CLUSTER_RADIUS_MILS = POWER_RAIL_CLUSTER_RADIUS_MILS
+                # Asymmetric by kind (same rule as the pipeline's
+                # _cluster_radius_for_net): ground glyphs are narrow, so
+                # per-pin drops on a decap row read cleanly at the tight
+                # radius; power BARS carry the net name, wider than a
+                # decap column pitch, so nearby rail pins share one bar.
+                CLUSTER_RADIUS_MILS = (
+                    POWER_RAIL_CLUSTER_RADIUS_MILS if is_gnd else 1000
+                )
                 clusters: list[list[int]] = []  # list of indices into net_actions
                 for i, (_, (ex, ey), _) in enumerate(net_actions):
                     joined = False
