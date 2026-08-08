@@ -90,7 +90,7 @@ def register_generic_tools(mcp):
         (e.g., "set every 10k resistor's Tolerance to 1%").
 
         Args:
-            object_type: Altium object type constant (see query_objects)
+            object_type: Altium object type constant (see `obj_query`)
             set: Pipe-separated property=value assignments to apply, e.g.:
                 "Text=NEW_NAME", set Text property
                 "Location.X=100|Location.Y=200", set multiple properties
@@ -100,28 +100,28 @@ def register_generic_tools(mcp):
                 "doc:C:\\path\\to\\Sheet.SchDoc", specific sheet by path (no focus change)
                 "lib_component:NAME", a named symbol in the active SchLib
                     -- selects that component first, so there is no need
-                    for a separate set_current_component call
+                    for a separate lib_set_current_component call
             filter: Pipe-separated property=value conditions (AND logic)
 
         Returns:
             Dictionary with "matched" count and "sheets_processed"
 
         Example - rename a net across all sheets (one value fits all matches):
-            modify_objects(
+            obj_modify(
                 object_type="eNetLabel",
                 scope="project",
                 filter="Text=OLD_NET",
                 set="Text=NEW_NET"
             )
         Example - modify a specific sheet without switching:
-            modify_objects(
+            obj_modify(
                 object_type="eParameter",
                 scope="doc:C:\\path\\USB_LANBridge.SchDoc",
                 filter="Name=Title",
                 set="Text=USB-Ethernet Bridge"
             )
-        Example - edit a pin inside one SchLib symbol (no set_current_component):
-            modify_objects(
+        Example - edit a pin inside one SchLib symbol (no lib_set_current_component):
+            obj_modify(
                 object_type="ePin",
                 scope="lib_component:R_0402",
                 filter="Designator=1",
@@ -151,8 +151,12 @@ def register_generic_tools(mcp):
     ) -> dict[str, Any]:
         """Create and place a schematic object.
 
+        If you are creating more than one object, use `obj_batch_create`
+        instead — one IPC round-trip for the whole set vs one LLM turn
+        per object.
+
         Args:
-            object_type: Altium object type constant (see query_objects)
+            object_type: Altium object type constant (see `obj_query`)
             properties: Pipe-separated property=value assignments, e.g.:
                 "Text=MY_NET|Location.X=100|Location.Y=200"
             container: "document" (place on active schematic) or
@@ -184,8 +188,11 @@ def register_generic_tools(mcp):
     ) -> dict[str, Any]:
         """Find and delete schematic objects.
 
+        For several scope/type/filter sets at once, use `obj_batch_delete`
+        — one IPC round-trip vs one LLM turn per delete.
+
         Args:
-            object_type: Altium object type constant (see query_objects)
+            object_type: Altium object type constant (see `obj_query`)
             scope: "active_doc", "project", "doc:PATH", or
                 "lib_component:NAME" (a named symbol in the active SchLib)
             filter: Pipe-separated property=value conditions (AND logic).
@@ -254,7 +261,7 @@ def register_generic_tools(mcp):
 
         Looks up (or creates) an entry in the Altium font table matching the
         specified properties and returns its font ID. Use the returned font_id
-        to set an object's FontId property via modify_objects.
+        to set an object's FontId property via `obj_modify`.
 
         Args:
             size: Font size in points (e.g., 8, 10, 12)
@@ -291,7 +298,7 @@ def register_generic_tools(mcp):
         """Select objects matching a filter on the active document.
 
         Sets the selection state on matching schematic or PCB objects for
-        visual highlighting. Use deselect_all to clear.
+        visual highlighting. Use `obj_deselect_all` to clear.
 
         Args:
             object_type: Altium object type (schematic or PCB)
@@ -359,7 +366,7 @@ def register_generic_tools(mcp):
                   "lib_component:NAME" -- a named symbol in the active
                   SchLib. Mixing lib_component scopes across ops edits
                   many library symbols in ONE call, no per-symbol
-                  set_current_component round-trip.
+                  lib_set_current_component round-trip.
                 - object_type: Altium object type (e.g., "ePin", "eParameter",
                   "eSchComponent", "eNetLabel")
                 - filter: Pipe-separated filter conditions
@@ -371,7 +378,7 @@ def register_generic_tools(mcp):
             Dictionary with operations_processed count
 
         Example, edit pins across THREE different library symbols in ONE call:
-            batch_modify(operations=[
+            obj_batch_modify(operations=[
                 {"scope": "lib_component:R_0402", "object_type": "ePin",
                  "filter": "Designator=1", "set": "Name=A"},
                 {"scope": "lib_component:C_0402", "object_type": "ePin",
@@ -381,8 +388,8 @@ def register_generic_tools(mcp):
             ])
 
         Example, reposition 10 pins on a library symbol in ONE call
-        (vs. 10 separate modify_objects calls, each a full LLM turn):
-            batch_modify(operations=[
+        (vs. 10 separate `obj_modify` calls, each a full LLM turn):
+            obj_batch_modify(operations=[
                 {"scope": "active_doc", "object_type": "ePin",
                  "filter": "Name=S1",
                  "set":    "Location.X=200|Location.Y=-100|Orientation=2"},
@@ -396,7 +403,7 @@ def register_generic_tools(mcp):
             ])
 
         Example, update 4 parameters across every project sheet in ONE call:
-            batch_modify(operations=[
+            obj_batch_modify(operations=[
                 {"scope": "project", "object_type": "eParameter",
                  "filter": "Name=Engineer",     "set": "Text=John Smith"},
                 {"scope": "project", "object_type": "eParameter",
@@ -408,7 +415,7 @@ def register_generic_tools(mcp):
             ])
 
         Example, different titles on specific sheets in ONE call:
-            batch_modify(operations=[
+            obj_batch_modify(operations=[
                 {"scope": "doc:C:\\path\\TopLevel.SchDoc",
                  "object_type": "eParameter",
                  "filter": "Name=Title", "set": "Text=Top Level"},
@@ -761,7 +768,7 @@ def register_generic_tools(mcp):
         """Draw a short wire stub + net label on every unconnected schematic pin.
 
         Finds floating pins (via the same connectivity check as
-        get_unconnected_pins), then for each one places a wire extending from
+        `proj_get_unconnected_pins`), then for each one places a wire extending from
         the pin's electrical end outward along its orientation, terminated by a
         net label named "<designator>_<pin_number>". This makes dangling pins
         explicit so ERC reports them as named single-pin nets rather than silent
@@ -847,9 +854,9 @@ def register_generic_tools(mcp):
     ) -> dict[str, Any]:
         """Place a decorative line on the active schematic.
 
-        This is a graphic line, not a signal wire. Use place_wire for
-        electrical connections. Use this for hand-drawn borders, arrows,
-        diagram overlays.
+        This is a graphic line, not a signal wire. Use `sch_place_wires`
+        for electrical connections. Use this for hand-drawn borders,
+        arrows, diagram overlays.
 
         Args:
             x1, y1, x2, y2: Endpoints in mils
@@ -921,8 +928,8 @@ def register_generic_tools(mcp):
         must exactly match a .SchDoc that's a project member. Without
         that match the sheet symbol is dangling.
 
-        After placing, use place_sheet_entry (future tool) or manually
-        add sheet entries corresponding to the child sheet's ports.
+        After placing, use `sch_place_sheet_entry` to add sheet entries
+        corresponding to the child sheet's ports.
 
         Args:
             x1, y1, x2, y2: Sheet symbol box corners in mils
@@ -1207,7 +1214,7 @@ def register_generic_tools(mcp):
         clipboard, then clears selection.
 
         Args:
-            object_type: Altium schematic object type (see query_objects)
+            object_type: Altium schematic object type (see `obj_query`)
             filter: Pipe-separated property=value conditions (AND logic)
 
         Returns:
@@ -1226,10 +1233,10 @@ def register_generic_tools(mcp):
         scope: str = "active_doc",
         filter: str = "",
     ) -> dict[str, Any]:
-        """Quick count of objects by type, faster than query_objects when you only need the count.
+        """Quick count of objects by type, faster than `obj_query` when you only need the count.
 
         Args:
-            object_type: Altium object type constant (see query_objects for options)
+            object_type: Altium object type constant (see `obj_query` for options)
             scope: "active_doc" (default), "project", or
                 "doc:C:\\path\\Sheet.SchDoc" for a specific loaded sheet.
             filter: Pipe-separated property=value conditions (AND logic)
@@ -1341,7 +1348,7 @@ def register_generic_tools(mcp):
         """Set the unit system for the active schematic.
 
         Calls ISch_Document.SetState_Unit with a TUnit enum value. The
-        current unit is readable via get_document_info (unit_system field).
+        current unit is readable via `obj_get_document_info` (unit_system field).
 
         Args:
             unit: one of
@@ -1865,7 +1872,7 @@ def register_generic_tools(mcp):
                   library-symbol contents when a lib is active).
 
         Example, drop 3 net labels in one call:
-            batch_create(operations=[
+            obj_batch_create(operations=[
                 {"object_type": "eNetLabel",
                  "properties": "Text=VCC|Location.X=100|Location.Y=200"},
                 {"object_type": "eNetLabel",
@@ -1925,7 +1932,7 @@ def register_generic_tools(mcp):
 
         Example, purge all no-ERCs on a specific sheet and every
         junction on the project:
-            batch_delete(operations=[
+            obj_batch_delete(operations=[
                 {"scope": "doc:C:\\proj\\Power.SchDoc",
                  "object_type": "eNoERC", "filter": ""},
                 {"scope": "project",
@@ -1961,10 +1968,10 @@ def register_generic_tools(mcp):
     ) -> dict[str, Any]:
         """Place MANY wire segments on the active schematic in ONE call.
 
-        PREFER THIS over looping `place_wire`. Wiring up a netlist is
-        inherently N pairs of endpoints; the bulk version is 10-100x
-        faster in wall time because the whole batch shares one
-        PreProcess/PostProcess and one redraw.
+        PREFER THIS over placing wires one segment at a time (there is no
+        singular variant). Wiring up a netlist is inherently N pairs of
+        endpoints; the bulk version is 10-100x faster in wall time because
+        the whole batch shares one PreProcess/PostProcess and one redraw.
 
         Args:
             wires: List of wire dicts, each with x1, y1, x2, y2 in mils.
@@ -2001,9 +2008,9 @@ def register_generic_tools(mcp):
     ) -> dict[str, Any]:
         """Place MANY schematic components from libraries in ONE call.
 
-        PREFER THIS over looping `place_sch_component_from_library`.
-        Laying out a 50-part BOM is inherently a bulk operation;
-        done one-by-one it costs 50 LLM turns.
+        This is the only path for library placement (there is no singular
+        variant). Laying out a 50-part BOM is inherently a bulk operation;
+        done one-by-one it would cost 50 LLM turns.
 
         TARGET DOCUMENT: placement lands on the ACTIVE schematic. Right
         after `app_create_document` the new sheet is NOT auto-focused, so
@@ -2028,7 +2035,7 @@ def register_generic_tools(mcp):
                 - footprint (str, optional), override current footprint
 
         Example, place a 5-part BOM row:
-            place_sch_components_from_library(placements=[
+            sch_place_components(placements=[
                 {"library_path": "C:\\Lib\\ST.SchLib",
                  "lib_reference": "STM32F411RE",
                  "x": 1000, "y": 2000, "designator": "U1"},
@@ -2093,9 +2100,9 @@ def register_generic_tools(mcp):
 
         PREFER THIS after running `sim_get_readiness`, the
         readiness response typically lists 20-50 passives that all
-        need the SpicePrefix + Value parameter pair. Looping
-        `sch_attach_spice_primitive` costs one LLM turn per component;
-        this tool does the whole set in one round-trip.
+        need the SpicePrefix + Value parameter pair. Attaching them one
+        at a time would cost one LLM turn per component (there is no
+        singular variant); this tool does the whole set in one round-trip.
 
         Args:
             attachments: List of attach dicts, each with:

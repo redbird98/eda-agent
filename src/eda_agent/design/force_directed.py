@@ -171,7 +171,7 @@ def _rotation_for_part(part: Part, plan_nets: list[Net]) -> int:
     if has_power or has_ground:
         # 270 (CCW = 90 CW) is empirically correct for libraries whose
         # 2-pin parts have pin 1 on the RIGHT in native orientation
-        # (e.g. the user's SELibrary). A library-aware pre-place pass
+        # (e.g. common passive libraries). A library-aware pre-place pass
         # (query lib_get_pin_list, pick rotation based on which pin
         # ends up on top) is the generic fix; this is the interim.
         return 270

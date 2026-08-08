@@ -200,6 +200,12 @@ def _bridge_call(command: str, params: Optional[dict] = None,
         return None
 
 
+# Footprint-policy sweep: footprints per bulk-geometry page, and the per-page
+# timeout. The first page also opens the PcbLib, seconds on a large library.
+_GEOMETRY_PAGE = 250
+_GEOMETRY_TIMEOUT = 120.0
+
+
 # ---------------------------------------------------------------------------
 # activity.log tail
 # ---------------------------------------------------------------------------
@@ -772,6 +778,63 @@ def create_app(workspace_dir: Optional[Path] = None) -> Flask:
     @app.route("/api/snapshot")
     def snapshot() -> Response:
         return jsonify(tailer.snapshot())
+
+    @app.route("/api/recovery")
+    def recovery() -> Response:
+        """Current DelphiScript-fault state for the recovery banner.
+
+        Returns ``{"fault": null}`` when the polling loop is healthy, or the
+        recorded diagnosis + numbered recovery steps when a fault is pending
+        (cleared automatically once a command succeeds again).
+        """
+        from ..bridge.fault_state import read_fault
+        payload = read_fault(Path(app.config["WORKSPACE_DIR"]))
+        if payload is None:
+            return jsonify({"fault": None})
+        return jsonify(payload)
+
+    @app.route("/api/footprint-policy")
+    def footprint_policy() -> Response:
+        """Audit the focused PcbLib for inconsistent footprint policies.
+
+        Sweeps every footprint, infers the library's own conventions, and
+        returns the deviations — the read-only view of
+        ``lib_audit_footprint_policies``. Geometry comes from the bulk
+        ``library.get_library_geometry`` command, paged so a thousand-footprint
+        library is a few round trips rather than a thousand. Returns
+        ``{available: false}`` when no PcbLib is open (or Altium is
+        unreachable), so the panel can show a hint instead of an error.
+        """
+        from ..design.footprint_policy import (
+            audit_footprint_library,
+            plan_footprint_fixes,
+        )
+
+        footprints: list = []
+        library_path = None
+        offset, total = 0, None
+        while total is None or offset < total:
+            page = _bridge_call("library.get_library_geometry",
+                                {"offset": offset, "limit": _GEOMETRY_PAGE},
+                                timeout=_GEOMETRY_TIMEOUT)
+            if not isinstance(page, dict):
+                break
+            library_path = library_path or page.get("library_path")
+            total = page.get("total") or 0
+            batch = page.get("footprints") or []
+            footprints.extend(batch)
+            if not batch:
+                break
+            offset += len(batch)
+
+        if not footprints:
+            return jsonify({"available": False,
+                            "reason": "no PcbLib open, or Altium unreachable"})
+        report = audit_footprint_library(footprints)
+        report["fixes"] = plan_footprint_fixes(report)
+        report["available"] = True
+        report["library_path"] = library_path
+        return jsonify(report)
 
     @app.route("/api/altium/version")
     def altium_version() -> Response:

@@ -186,6 +186,21 @@ def test_cross_check_catches_unknown_refdes_in_net() -> None:
     assert any("R99" in p for p in problems)
 
 
+def test_cross_check_catches_dangling_bom_refdes() -> None:
+    # a BOM line naming a refdes the plan lacks is a dangling reference the
+    # field validators can't see (the BOM is just strings)
+    plan = _valid_minimal_plan()
+    plan.bom.append(BomLine(refdes_list=["ZZ99"], qty=1))
+    problems = plan.cross_check()
+    assert any("ZZ99" in p and "BOM" in p for p in problems)
+
+
+def test_cross_check_passes_valid_bom() -> None:
+    plan = _valid_minimal_plan()
+    plan.bom.append(BomLine(refdes_list=[plan.parts[0].refdes], qty=1))
+    assert plan.cross_check() == []
+
+
 def test_cross_check_catches_unknown_zone() -> None:
     plan = _valid_minimal_plan()
     plan.parts[0].zone = "ghost"

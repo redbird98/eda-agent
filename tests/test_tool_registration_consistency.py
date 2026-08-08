@@ -6,7 +6,9 @@ src/eda_agent/tools/__init__.py has THREE parallel lists that must stay
 in sync as tool modules are added:
 
   1. ``from .X import register_X_tools`` (top-of-file imports)
-  2. ``register_X_tools(mcp)`` calls inside ``register_all_tools``
+  2. ``register_X_tools(mcp)`` calls inside a registration entrypoint
+     (``register_all_tools`` for the Altium suite, or ``register_backend``
+     for the KiCad / neutral EDA-agnostic tools)
   3. ``__all__`` re-export list
 
 If any of these drift, the failure mode varies:
@@ -45,17 +47,25 @@ def _imported_registrars() -> set[str]:
     return names
 
 
+# The registration entrypoints. ``register_all_tools`` bundles the Altium
+# suite; ``register_backend`` orchestrates per-backend registration (Altium,
+# KiCad, the neutral EDA-agnostic tools). A registrar wired through either
+# counts as registered.
+_AGGREGATORS = {"register_all_tools", "register_backend"}
+
+
 def _called_registrars() -> set[str]:
-    """Names called inside ``register_all_tools`` in __init__.py."""
+    """Names called inside any registration entrypoint in __init__.py."""
     tree = ast.parse(INIT_PY.read_text(encoding="utf-8"))
     called = set()
     for node in tree.body:
-        if isinstance(node, ast.FunctionDef) and node.name == "register_all_tools":
-            for stmt in node.body:
-                if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
-                    fn = stmt.value.func
+        if isinstance(node, ast.FunctionDef) and node.name in _AGGREGATORS:
+            for stmt in ast.walk(node):
+                if isinstance(stmt, ast.Call):
+                    fn = stmt.func
                     if isinstance(fn, ast.Name) and fn.id.startswith("register_") \
-                            and fn.id.endswith("_tools"):
+                            and fn.id.endswith("_tools") \
+                            and fn.id not in _AGGREGATORS:
                         called.add(fn.id)
     return called
 
@@ -96,9 +106,10 @@ def _on_disk_registrars() -> set[str]:
 
 
 def test_imported_set_matches_called_set():
-    """Every imported registrar is called inside register_all_tools, and
-    vice versa. Catches "added the import but forgot the call" and
-    "added the call but the symbol doesn't actually exist"."""
+    """Every imported registrar is called inside a registration entrypoint
+    (register_all_tools or register_backend), and vice versa. Catches "added
+    the import but forgot the call" and "added the call but the symbol doesn't
+    actually exist"."""
     imported = _imported_registrars()
     called = _called_registrars()
     imported_not_called = imported - called

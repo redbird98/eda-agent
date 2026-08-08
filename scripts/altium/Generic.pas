@@ -416,7 +416,7 @@ Begin
         Else If PropName = 'Style'       Then Obj.Style := StrToIntDef(Value, 0)
         Else If PropName = 'IOType'      Then Obj.IOType := StrToIntDef(Value, 0)
         Else If PropName = 'Alignment'   Then Obj.Alignment := StrToIntDef(Value, 0)
-        Else If PropName = 'Electrical'  Then Obj.Electrical := StrToIntDef(Value, 0)
+        Else If PropName = 'Electrical'  Then Obj.Electrical := ElectricalOrdinal(Value)
         Else If PropName = 'Color'       Then Obj.Color := StrToIntDef(Value, 0)
         Else If PropName = 'AreaColor'   Then Obj.AreaColor := StrToIntDef(Value, 0)
         Else If PropName = 'TextColor'   Then Obj.TextColor := StrToIntDef(Value, 0)
@@ -563,6 +563,162 @@ Begin
 End;
 
 {..............................................................................}
+{ Pull an optional owner-designator constraint (OwnerDesignator=X or          }
+{ Designator=X) out of a pipe-separated parameter filter so a delete can      }
+{ target one component (e.g. U1) instead of every part on the sheet. Returns  }
+{ the designator value and rewrites FilterStr to the remaining conditions.    }
+{..............................................................................}
+
+Function PullOwnerDesignator(Var FilterStr : String) : String;
+Var
+    Remaining, Condition, Rest, PropName, PropUpper : String;
+    PipePos, EqPos : Integer;
+Begin
+    Result := '';
+    Rest := '';
+    Remaining := FilterStr;
+    While Remaining <> '' Do
+    Begin
+        PipePos := Pos('|', Remaining);
+        If PipePos > 0 Then
+        Begin
+            Condition := Copy(Remaining, 1, PipePos - 1);
+            Remaining := Copy(Remaining, PipePos + 1, Length(Remaining));
+        End
+        Else
+        Begin
+            Condition := Remaining;
+            Remaining := '';
+        End;
+
+        EqPos := Pos('=', Condition);
+        If EqPos > 0 Then
+        Begin
+            PropName := Copy(Condition, 1, EqPos - 1);
+            PropUpper := UpperCase(PropName);
+            If (PropUpper = 'OWNERDESIGNATOR') Or (PropUpper = 'DESIGNATOR') Then
+            Begin
+                Result := Copy(Condition, EqPos + 1, Length(Condition));
+                Continue;
+            End;
+        End;
+
+        { Keep every non-owner condition in the reduced filter. }
+        If Rest = '' Then Rest := Condition
+        Else Rest := Rest + '|' + Condition;
+    End;
+    FilterStr := Rest;
+End;
+
+{..............................................................................}
+{ Delete schematic parameters by their REAL owner. A component parameter is   }
+{ owned by its ISch_Component (created via Comp.AddSchObject), so             }
+{ SchDoc.RemoveSchObject silently no-ops on it - the same wrong-owner trap    }
+{ the sheet-entry delete works around. It must be removed via                 }
+{ Comp.RemoveSchObject. Sheet-level (title-block) parameters are owned by the }
+{ document and removed via SchDoc.RemoveSchObject. An optional owner          }
+{ designator in the filter restricts the delete to one component. Caller      }
+{ wraps this in PreProcess/PostProcess.                                       }
+{..............................................................................}
+
+Procedure DeleteParametersAnyOwner(SchDoc : ISch_Document; FilterStr : String;
+    Var TotalMatched : Integer);
+Var
+    OwnerDesig, ReducedFilter, CompDesig : String;
+    CompIter, ParamIter : ISch_Iterator;
+    Comp : ISch_Component;
+    Param, FoundParam : ISch_GraphicalObject;
+    Guard : Integer;
+Begin
+    ReducedFilter := FilterStr;
+    OwnerDesig := PullOwnerDesignator(ReducedFilter);
+
+    { Component-owned parameters. Guard against a catastrophic "delete every   }
+    { parameter on every part": require an owner designator or a non-empty     }
+    { reduced filter before touching component parameters.                     }
+    If (OwnerDesig <> '') Or (ReducedFilter <> '') Then
+    Begin
+        CompIter := SchDoc.SchIterator_Create;
+        Try
+            CompIter.AddFilter_ObjectSet(MkSet(eSchComponent));
+            Comp := CompIter.FirstSchObject;
+            While Comp <> Nil Do
+            Begin
+                CompDesig := '';
+                Try CompDesig := Comp.Designator.Text; Except End;
+                If (OwnerDesig = '') Or
+                   (UpperCase(CompDesig) = UpperCase(OwnerDesig)) Then
+                Begin
+                    { Re-scan after each removal to avoid iterator            }
+                    { invalidation; removing a child does not disturb the     }
+                    { outer component iterator.                               }
+                    Guard := 10000;
+                    While Guard > 0 Do
+                    Begin
+                        FoundParam := Nil;
+                        ParamIter := Comp.SchIterator_Create;
+                        Try
+                            ParamIter.AddFilter_ObjectSet(MkSet(eParameter));
+                            Param := ParamIter.FirstSchObject;
+                            While Param <> Nil Do
+                            Begin
+                                If MatchesFilter(Param, ReducedFilter) Then
+                                Begin
+                                    FoundParam := Param;
+                                    Break;
+                                End;
+                                Param := ParamIter.NextSchObject;
+                            End;
+                        Finally
+                            Comp.SchIterator_Destroy(ParamIter);
+                        End;
+                        If FoundParam = Nil Then Break;
+                        Comp.RemoveSchObject(FoundParam);
+                        Inc(TotalMatched);
+                        Dec(Guard);
+                    End;
+                End;
+                Comp := CompIter.NextSchObject;
+            End;
+        Finally
+            SchDoc.SchIterator_Destroy(CompIter);
+        End;
+    End;
+
+    { Sheet-level (document-owned) parameters. Skipped when an owner           }
+    { designator was given - that means "this component only".                }
+    If OwnerDesig = '' Then
+    Begin
+        Guard := 10000;
+        While Guard > 0 Do
+        Begin
+            FoundParam := Nil;
+            ParamIter := SchDoc.SchIterator_Create;
+            Try
+                ParamIter.SetState_IterationDepth(eIterateFirstLevel);
+                ParamIter.AddFilter_ObjectSet(MkSet(eParameter));
+                Param := ParamIter.FirstSchObject;
+                While Param <> Nil Do
+                Begin
+                    If MatchesFilter(Param, ReducedFilter) Then
+                    Begin
+                        FoundParam := Param;
+                        Break;
+                    End;
+                    Param := ParamIter.NextSchObject;
+                End;
+            Finally
+                SchDoc.SchIterator_Destroy(ParamIter);
+            End;
+            If FoundParam = Nil Then Break;
+            SchDoc.RemoveSchObject(FoundParam);
+            Inc(TotalMatched);
+            Dec(Guard);
+        End;
+    End;
+End;
+
+{..............................................................................}
 { Helper: Process objects in a single SchDoc                                  }
 { Mode: 'query', 'modify', 'delete'                                         }
 {..............................................................................}
@@ -587,6 +743,18 @@ Begin
     If Mode = 'delete' Then
     Begin
         SchServer.ProcessControl.PreProcess(SchDoc, '');
+
+        { Parameters are owned by their component (or by the document for   }
+        { sheet-level params), NOT reachable/removable through the plain    }
+        { doc-level RemoveSchObject loop below. Dispatch by owner.          }
+        If ObjTypeInt = eParameter Then
+        Begin
+            DeleteParametersAnyOwner(SchDoc, FilterStr, TotalMatched);
+            SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
+            SchDoc.GraphicallyInvalidate;
+            Exit;
+        End;
+
         MaxIter := 100000;
         While MaxIter > 0 Do
         Begin

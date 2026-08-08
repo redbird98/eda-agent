@@ -265,7 +265,7 @@ def register_audit_tools(mcp):
         adds a connection using the editor's default 8 mil width and
         moves on. The result is a thin orphan stub welded to a wide
         bus -- under load that thin section becomes a thermal hotspot
-        and eventually a fab-rework rework. Most agents and human
+        and eventually a fab rework. Most agents and human
         reviewers miss it because the bulk of the net looks fine.
 
         Algorithm: per net, collect min/max track widths on signal
@@ -344,7 +344,7 @@ def register_audit_tools(mcp):
         Checks every parameter (Comment, Value, Manufacturer, MPN,
         Description, etc.) on every component across the project.
         Skips empty values -- those are caught by other audits
-        (e.g. ``find_missing_datasheets``).
+        (e.g. ``audit_find_missing_datasheets``).
 
         Pattern: SDK-derived. No community-script reference; this is
         a defensive sanity check we should always run before release.
@@ -468,8 +468,7 @@ def register_audit_tools(mcp):
         Returns:
             Dict with `{checked, violations, items[]}` where each item
             carries `{designator}` for an unlocked component. Pair
-            with `pcb_set_locked` or `obj_batch_modify` to re-lock at
-            scale.
+            with `obj_batch_modify` to re-lock at scale.
         """
         bridge = get_bridge()
         return await bridge.send_command_async(

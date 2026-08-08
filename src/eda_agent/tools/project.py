@@ -259,11 +259,11 @@ def register_project_tools(mcp):
 
         Examples:
             # PREFERRED, one unfiltered call, then filter locally:
-            all_pins = get_nets(limit=10000)["pins"]
+            all_pins = proj_get_nets(limit=10000)["pins"]
             u1_pins = [p for p in all_pins if p["component"] == "U1"]
 
             # Guaranteed-fresh read after user edits:
-            fresh = get_nets(force_recompile=True, limit=10000)
+            fresh = proj_get_nets(force_recompile=True, limit=10000)
         """
         bridge = get_bridge()
         params: dict[str, Any] = {"limit": str(limit)}
@@ -934,7 +934,7 @@ def register_project_tools(mcp):
 
         OutJob files define output configurations (Gerber, PDF, BOM, etc.)
         organized into named containers. Use this to discover what outputs
-        are available before running them with run_outjob().
+        are available before running them with `proj_run_outjob`.
 
         Args:
             outjob_path: Path to the .OutJob file. If omitted, uses the
@@ -960,8 +960,8 @@ def register_project_tools(mcp):
     ) -> dict[str, Any]:
         """Execute a specific output container from an OutJob file.
 
-        First use get_outjob_containers() to list available containers,
-        then run the desired one by name. Supports both GeneratedFiles
+        First use `proj_list_outjob_containers` to list available
+        containers, then run the desired one by name. Supports both GeneratedFiles
         (Gerber, drill, BOM, etc.) and Publish (PDF) container types.
 
         Args:
@@ -1407,8 +1407,8 @@ def register_project_tools(mcp):
     ) -> dict[str, Any]:
         """Create a new project variant.
 
-        After creating, use set_active_variant() to switch to it, and
-        generic.modify_objects() to configure component variations.
+        After creating, use `proj_set_active_variant` to switch to it,
+        and `obj_modify` to configure component variations.
 
         Args:
             name: Name for the new variant
@@ -1721,13 +1721,13 @@ def register_project_tools(mcp):
         parameter object is created on the sheet.
 
         NOTE: the target sheet must already be loaded as a proper project
-        member. Call load_project_sheets once at the start of a batch;
-        auto-opening from inside set_document_parameter risks detaching
-        the sheet and rendering it as a "free document". If the sheet
-        isn't loaded this tool returns NOT_LOADED.
+        member. Call `proj_load_sheets` once at the start of a batch;
+        auto-opening from inside this tool risks detaching the sheet and
+        rendering it as a "free document". If the sheet isn't loaded this
+        tool returns NOT_LOADED.
 
         The write is persisted to disk immediately via the IServerDocument
-        API, no subsequent save_all is required.
+        API, no subsequent `app_save_all` is required.
 
         Args:
             file_path: Full path to the schematic document (.SchDoc).
@@ -1737,8 +1737,9 @@ def register_project_tools(mcp):
             value: Parameter value
 
         Returns:
-            Dictionary with file_path, name, value, and dirty=true.
-            Call save_all afterwards to persist to disk.
+            Dictionary with file_path, name, value, and dirty=true
+            (the in-memory flag; the disk write already happened, so no
+            `app_save_all` is needed for this parameter).
         """
         bridge = get_bridge()
         result = await bridge.send_command_async(
@@ -1809,7 +1810,7 @@ def register_project_tools(mcp):
              that the dialog was dismissed without applying.
 
         For unattended board population without a schematic, use
-        ``pcb_place_component`` instead (places geometry only — see its note
+        ``pcb_place_components`` instead (places geometry only — see its note
         about leaving the project unsynced).
 
         Returns:

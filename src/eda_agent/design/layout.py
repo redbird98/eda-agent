@@ -307,7 +307,7 @@ def _neighbour_aware_rotation(
     0 (horizontal).
 
     Uses 270 rather than 90 to match the existing library convention
-    (the user's SELibrary 2-pin parts have pin 1 on the right in
+    (some 2-pin passive libraries have pin 1 on the right in
     native orientation; 270 swings pin 1 to the top).
     """
     dx_sum = 0
@@ -373,8 +373,8 @@ def _apply_rotations(
         role = (part.role or "").strip().lower()
         if role in _INPUT_CONN_ROLES:
             # Input connector at left edge of sheet -> pins face right
-            # into the schematic interior. The user's SELibrary terminal
-            # blocks have pins on the LEFT in their native orientation,
+            # into the schematic interior. Some terminal-block library
+            # parts have pins on the LEFT in their native orientation,
             # so rotation 180 swings the pins around to face right.
             rotation = 180
         elif role in _OUTPUT_CONN_ROLES:

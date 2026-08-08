@@ -1873,8 +1873,8 @@ End;
 { via Action=PublishMultimedia. It never wrote a file. Diagnosis:              }
 {   1. The MediaFormat label strings ("PNG file (*.png)", "JPEG file           }
 {      (*.jpg,*.jpeg)", "Bitmap file (*.bmp)") were guesses. Real OutJob       }
-{      files seen in the wild (e.g. C:\Dropbox\Work\3DBiomedicalTech\...       }
-{      ProductionRelease.OutJob) carry strings like                            }
+{      files seen in the wild (a real production-release OutJob, not any       }
+{      public sample) carry strings like                                       }
 {      "Windows Media file (*.wmv,*.wma,*.asf)" - they are display-time GUI    }
 {      labels Altium matches against an internal format registry, and they     }
 {      are locale-dependent. No public sample shows the exact string for      }

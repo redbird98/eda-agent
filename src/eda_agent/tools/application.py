@@ -64,6 +64,101 @@ def register_application_tools(mcp):
     """Register application tools with the MCP server."""
 
     @mcp.tool()
+    async def tool_catalog(
+        category: str = "",
+        maturity: str = "",
+        interaction: str = "",
+        query: str = "",
+        with_description: bool = False,
+    ) -> dict[str, Any]:
+        """Discover tools by category / maturity / interaction without
+        loading every schema.
+
+        The surface has 350+ tools; loading them all strains a client's
+        context. This meta-tool returns a filtered, classified index so a
+        client can find the right tool first, then rely on its full schema.
+
+        Filters (all optional, AND-combined):
+            category: application, project, library, generic, schematic,
+                pcb, audit, design, simulation, routing.
+            maturity: offline | simulator | live_only (verification level).
+            interaction: readonly | silent | modal | partial. ``modal``
+                tools pop a blocking Altium dialog; ``partial`` ones leave
+                the job incomplete — plan around both.
+            query: case-insensitive substring over the tool name (and
+                description when ``with_description``).
+            with_description: include the one-line summary per tool.
+
+        Returns ``{count, tools:[{name, category, maturity, interaction
+        [, description]}], categories:{cat: n}}``.
+        """
+        from .metadata import tool_metadata
+
+        tools = await mcp.list_tools()
+        q = query.lower().strip()
+        out = []
+        cat_counts: dict[str, int] = {}
+        for t in tools:
+            md = tool_metadata(t.name)
+            if category and md["category"] != category:
+                continue
+            if maturity and md["maturity"] != maturity:
+                continue
+            if interaction and md["interaction"] != interaction:
+                continue
+            desc = (t.description or "").strip()
+            if q and q not in t.name.lower() and q not in desc.lower():
+                continue
+            cat_counts[md["category"]] = cat_counts.get(md["category"], 0) + 1
+            rec = dict(md)
+            if with_description:
+                rec["description"] = desc.split("\n", 1)[0][:200]
+            out.append(rec)
+        out.sort(key=lambda r: (r["category"], r["name"]))
+        return {
+            "count": len(out),
+            "categories": dict(sorted(cat_counts.items())),
+            "tools": out,
+        }
+
+    @mcp.tool()
+    async def tool_invoke(name: str, arguments: Optional[dict] = None) -> dict[str, Any]:
+        """Invoke any registered tool by name — the companion to
+        `tool_catalog`.
+
+        A client with a limited context can expose only the core tools plus
+        this pair: discover a tool with `tool_catalog`, then run it here by
+        name without ever loading its schema. ``arguments`` is the tool's
+        keyword-argument dict.
+
+        Returns the tool's own result (JSON-decoded), or ``{"error": ...}``
+        for an unknown/disallowed name. Note: bypassing the schema means
+        argument mistakes surface as the target tool's own error, not a
+        pre-validation message.
+        """
+        import json as _json
+
+        tools = await mcp.list_tools()
+        known = {t.name for t in tools}
+        if name not in known:
+            return {"error": f"unknown tool: {name}"}
+        # Prevent self-recursion; tool_catalog is fine to invoke.
+        if name == "tool_invoke":
+            return {"error": "tool_invoke cannot invoke itself"}
+        try:
+            result = await mcp.call_tool(name, arguments or {})
+        except Exception as e:  # noqa: BLE001 - surface as data, not a crash
+            return {"error": f"{name} failed: {e}", "tool": name}
+        # FastMCP returns a list of content items; unwrap the tool's dict.
+        content = result[0] if isinstance(result, tuple) else result
+        if isinstance(content, list) and content and hasattr(content[0], "text"):
+            try:
+                return {"tool": name, "result": _json.loads(content[0].text)}
+            except (ValueError, TypeError):
+                return {"tool": name, "result": content[0].text}
+        return {"tool": name, "result": content}
+
+    @mcp.tool()
     async def app_get_status() -> dict[str, Any]:
         """Check if Altium Designer is running and get status information.
 
@@ -130,6 +225,98 @@ def register_application_tools(mcp):
             "application.save_all", timeout=60.0
         )
         return result
+
+    async def _resolve_project_dir() -> tuple[Optional[str], Optional[str], Optional[dict]]:
+        """Return (project_dir, project_file, error_payload).
+
+        Fetches the focused project's path from the bridge. On failure the
+        third element is a ready-to-return error dict and the first two are
+        None.
+        """
+        bridge = get_bridge()
+        info = await bridge.send_command_async("project.get_project_path")
+        project_dir = (info or {}).get("project_dir")
+        if not project_dir:
+            return None, None, {
+                "error": "no focused project (open a project in Altium first)",
+                "checkpoint": None,
+            }
+        return project_dir, (info or {}).get("project_name", ""), None
+
+    def _checkpoint_store():
+        from ..config import get_config
+        from ..checkpoint import CheckpointStore
+        return CheckpointStore(get_config().workspace_dir / "checkpoints")
+
+    @mcp.tool()
+    async def app_checkpoint(label: str = "", save_first: bool = True) -> dict[str, Any]:
+        """Snapshot the focused project so the session is revertible.
+
+        Copies the project's design files into a content-addressed store under
+        the workspace (unchanged files are deduplicated, so repeat checkpoints
+        are cheap). Take one before any risky autonomous edit; restore with
+        `app_restore_checkpoint`. This is the undo the live bridge otherwise
+        lacks.
+
+        Args:
+            label: optional human note ("before routing pass").
+            save_first: flush dirty Altium docs to disk before snapshotting
+                so the checkpoint reflects in-editor changes (default True).
+
+        Returns:
+            The checkpoint manifest summary (id, created, file_count, ...).
+        """
+        if save_first:
+            try:
+                await get_bridge().send_command_async(
+                    "application.save_all", timeout=60.0
+                )
+            except Exception:
+                pass  # snapshot on-disk state regardless
+        project_dir, project_file, err = await _resolve_project_dir()
+        if err:
+            return err
+        from pathlib import Path
+        store = _checkpoint_store()
+        info = store.create(Path(project_dir), project_file=project_file or "", label=label)
+        return {"checkpoint": info.summary()}
+
+    @mcp.tool()
+    async def app_list_checkpoints() -> dict[str, Any]:
+        """List saved checkpoints for the current workspace, newest first."""
+        store = _checkpoint_store()
+        return {"checkpoints": [c.summary() for c in store.list()]}
+
+    @mcp.tool()
+    async def app_restore_checkpoint(
+        checkpoint_id: str, prune_added: bool = False
+    ) -> dict[str, Any]:
+        """Restore the focused project's files from a checkpoint.
+
+        Overwrites design files with the snapshot contents. Close the project
+        in Altium (or expect a reload prompt) before restoring, since Altium
+        holds documents open. With `prune_added=True` this is a true revert:
+        files created after the checkpoint are deleted; the default leaves
+        newer files untouched.
+
+        Args:
+            checkpoint_id: id from `app_list_checkpoints`.
+            prune_added: delete files absent at checkpoint time (default False).
+
+        Returns:
+            {restored, removed, missing_blobs}.
+        """
+        project_dir, _project_file, err = await _resolve_project_dir()
+        if err:
+            return err
+        from pathlib import Path
+        store = _checkpoint_store()
+        try:
+            return store.restore(
+                checkpoint_id, Path(project_dir), prune_added=prune_added
+            )
+        except FileNotFoundError as e:
+            return {"error": str(e)}
 
     @mcp.tool()
     async def app_detach() -> dict[str, Any]:

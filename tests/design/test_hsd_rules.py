@@ -6,7 +6,10 @@ from __future__ import annotations
 
 import pytest
 
-from eda_agent.design.hsd_rules import suggest_diff_pair_traces
+from eda_agent.design.hsd_rules import (
+    assess_diff_pair_skew,
+    suggest_diff_pair_traces,
+)
 from eda_agent.design.impedance_sizing import trace_width_for_impedance
 from eda_agent.design.plan import DesignPlan, Net, Part, PinRef, Sheet
 
@@ -66,3 +69,61 @@ def test_rejects_single_ended_geometry():
 def test_deterministic():
     p = _usb_plan()
     assert suggest_diff_pair_traces(p) == suggest_diff_pair_traces(p)
+
+
+# --------------------------------------------------------------------------- #
+# Intra-pair skew
+# --------------------------------------------------------------------------- #
+def _series_usb_plan():
+    """USB pair with a series resistor splitting each leg (DP_C/DP_U etc.)."""
+    return DesignPlan(
+        spec="usb", summary="usb diff pair w/ series R",
+        sheets=[Sheet(name="main")], zones=[],
+        parts=[Part(refdes="J1", lib_ref="USB"), Part(refdes="U1", lib_ref="PHY"),
+               Part(refdes="R1", lib_ref="RES"), Part(refdes="R2", lib_ref="RES")],
+        nets=[
+            _net("DP_C", [("J1", "1"), ("R1", "1")], role="differential"),
+            _net("DP_U", [("R1", "2"), ("U1", "10")], role="differential"),
+            _net("DM_C", [("J1", "2"), ("R2", "1")], role="differential"),
+            _net("DM_U", [("R2", "2"), ("U1", "11")], role="differential"),
+            _net("VBUS", [("J1", "8"), ("U1", "9")], is_power=True),
+            _net("GND", [("J1", "7"), ("U1", "6")], is_ground=True)])
+
+
+def test_assess_skew_for_simple_pair():
+    out = assess_diff_pair_skew(
+        _usb_plan(), {"DP": 1050.0, "DM": 1000.0}, skew_budget_ps=5.0)
+    assert len(out) == 1
+    s = out[0]
+    assert set(s.nets) == {"DP", "DM"}
+    assert s.endpoints == ("J1", "U1")
+    assert s.mismatch_mils == pytest.approx(50.0)
+    assert s.compensation_mils == pytest.approx(50.0)
+    assert not s.within_tolerance  # 50 mils > ~29-mil window for 5 ps
+
+
+def test_assess_skew_sums_split_legs():
+    out = assess_diff_pair_skew(
+        _series_usb_plan(),
+        {"DP_C": 300.0, "DP_U": 700.0, "DM_C": 320.0, "DM_U": 660.0})
+    assert len(out) == 1
+    s = out[0]
+    assert set(s.leg_lengths) == {1000.0, 980.0}
+    assert s.mismatch_mils == pytest.approx(20.0)
+
+
+def test_assess_skew_no_pairs_empty():
+    plan = DesignPlan(
+        spec="x", summary="x", sheets=[Sheet(name="main")], zones=[],
+        parts=[Part(refdes="U1", lib_ref="IC")],
+        nets=[_net("N", [("U1", "1"), ("U1", "2")])])
+    assert assess_diff_pair_skew(plan, {}) == []
+
+
+def test_assess_skew_microstrip_window_wider_than_stripline():
+    lengths = {"DP": 1030.0, "DM": 1000.0}
+    ms = assess_diff_pair_skew(_usb_plan(), lengths, geometry="microstrip",
+                               skew_budget_ps=5.0)[0]
+    sl = assess_diff_pair_skew(_usb_plan(), lengths, geometry="stripline",
+                               skew_budget_ps=5.0)[0]
+    assert ms.tolerance_mils > sl.tolerance_mils

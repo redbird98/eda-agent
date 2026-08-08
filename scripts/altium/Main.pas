@@ -13,7 +13,7 @@ Const
     // returns, mismatch means Altium is running a stale compiled script
     // (DelphiScript caches compiled units until the script project is
     // reopened or Altium is restarted).
-    SCRIPT_VERSION = '2026.06.15.3';
+    SCRIPT_VERSION = '2026.07.20.10';
 
     // Wire protocol version. Bumped whenever the request/response JSON shape
     // changes incompatibly. Python and Pascal must agree; mismatch returns
@@ -100,8 +100,8 @@ End;
 { unambiguous even when a single operation's property list contains '|'.       }
 {                                                                               }
 { Defined in Main.pas so Library.pas and Generic.pas can both use them,       }
-{ the Altium project compiles files in DesignN order (Main â†’ ... â†’ Library â†’  }
-{ ... â†’ Generic) and a callee must come earlier than its caller.               }
+{ the Altium project compiles files in DesignN order (Main a?¡¯ ... a?¡¯ Library a?¡¯  }
+{ ... a?¡¯ Generic) and a callee must come earlier than its caller.               }
 {..............................................................................}
 
 Function NextBatchOp(Var Remaining : String) : String;
@@ -300,48 +300,65 @@ Var
     ServerDoc : IServerDocument;
     PrevView : IServerDocumentView;
     Path : String;
-    I : Integer;
+    I, P : Integer;
 Begin
     Result := Nil;
 
-    { Fast path: PCB tab already focused. `PCBServer.GetCurrentPCBBoard` is }
-    { the documented entry point and on this build is declared at runtime, }
-    { the IDE flags it at compile time on some builds but the runtime      }
-    { resolves it. (`PCBServer.GetPCBBoardByPath` is genuinely undeclared  }
-    { on this build, so we cannot use the path-based lookup.)              }
-    Result := PCBServer.GetCurrentPCBBoard;
-    If Result <> Nil Then Exit;
-
-    { Fallback: no PCB tab is focused. Find the project's PCB doc, open it }
-    { (which moves focus to it), grab the board pointer, and restore the   }
-    { user's previous view so they don't blink away from where they were.  }
-    { The IPCB_Board pointer stays valid after focus moves back.            }
     Workspace := GetWorkspace;
     If Workspace = Nil Then Exit;
-    Project := Workspace.DM_FocusedProject;
-    If Project = Nil Then Exit;
 
+    { Fast path: a PCB tab is focused, so the PCB editor server is loaded    }
+    { and PCBServer.GetCurrentPCBBoard resolves. Gate on the focused doc's   }
+    { kind, read through the DM layer (which never loads a server). If no    }
+    { PcbDoc has been opened this session the PCB server module is not       }
+    { registered, and merely REFERENCING PCBServer.GetCurrentPCBBoard raises }
+    { an uncatchable "Undeclared identifier" modal (late-bound against the   }
+    { absent server) that Try/Except cannot swallow and that hangs the       }
+    { polling loop. So only touch PCBServer when a PCB is actually focused.  }
+    Doc := Workspace.DM_FocusedDocument;
+    If (Doc <> Nil) And (UpperCase(Doc.DM_DocumentKind) = 'PCB') Then
+    Begin
+        Result := PCBServer.GetCurrentPCBBoard;
+        If Result <> Nil Then Exit;
+    End;
+
+    { Fallback: no PCB tab is focused (the user is on a schematic, a library }
+    { or the script project). Walk EVERY project open in the workspace - not }
+    { just the focused one, which is often the script project with no PcbDoc }
+    { - find the first PcbDoc, and open it. Opening the document loads the   }
+    { PCB server and moves focus to it; a non-nil ServerDoc from            }
+    { OpenDocument('PCB', ...) proves the server is now registered, so the   }
+    { GetCurrentPCBBoard read below is safe. The IPCB_Board pointer stays    }
+    { valid after we restore the user's previous view.                       }
     PrevView := Nil;
     Try
         If (Client <> Nil) Then PrevView := Client.GetCurrentView;
     Except End;
 
-    For I := 0 To Project.DM_LogicalDocumentCount - 1 Do
+    For P := 0 To Workspace.DM_ProjectCount - 1 Do
     Begin
-        Doc := Project.DM_LogicalDocuments(I);
-        If Doc = Nil Then Continue;
-        Path := '';
-        Try Path := Doc.DM_FullPath; Except End;
-        If Path = '' Then Continue;
-        If (UpperCase(Doc.DM_DocumentKind) <> 'PCB') And
-           (Pos('.PCBDOC', UpperCase(Path)) <= 0) Then Continue;
+        Project := Workspace.DM_Projects(P);
+        If Project = Nil Then Continue;
 
-        ServerDoc := Nil;
-        Try ServerDoc := Client.OpenDocument('PCB', Path); Except End;
-        If ServerDoc = Nil Then Continue;
+        For I := 0 To Project.DM_LogicalDocumentCount - 1 Do
+        Begin
+            Doc := Project.DM_LogicalDocuments(I);
+            If Doc = Nil Then Continue;
+            Path := '';
+            Try Path := Doc.DM_FullPath; Except End;
+            If Path = '' Then Continue;
+            If (UpperCase(Doc.DM_DocumentKind) <> 'PCB') And
+               (Pos('.PCBDOC', UpperCase(Path)) <= 0) Then Continue;
 
-        Try Client.ShowDocument(ServerDoc); Except End;
-        Try Result := PCBServer.GetCurrentPCBBoard; Except End;
+            ServerDoc := Nil;
+            Try ServerDoc := Client.OpenDocument('PCB', Path); Except End;
+            If ServerDoc = Nil Then Continue;
+
+            Try Client.ShowDocument(ServerDoc); Except End;
+            Try Result := PCBServer.GetCurrentPCBBoard; Except End;
+            If Result <> Nil Then Break;
+        End;
+
         If Result <> Nil Then Break;
     End;
 
@@ -1051,22 +1068,62 @@ Begin
     WriteFileContent(FinalPath, JsonContent);
 End;
 
-{ Wipe leftover request_*.json files at session start so a previous run's   }
-{ orphan can't replay against this session. Per-request response files are  }
-{ left to Python's age-based sweep at attach time.                           }
-Procedure CleanupOrphanResponses;
+{ Wipe leftover request_*.json files at session start so a previous run's    }
+{ orphan can't replay against this session. A crashed loop, or a client that }
+{ abandoned a long sweep, leaves request files on disk; without this the     }
+{ next session would answer them all before serving anything new -- and each }
+{ answer would resolve against whatever document is focused NOW, not the one }
+{ the caller meant.                                                          }
+{                                                                              }
+{ The purged count is logged, so an operator can tell "the loop is slow" from }
+{ "the loop is draining a backlog".                                          }
+Procedure CleanupOrphanRequests;
 Var
     Files : TStringList;
-    I : Integer;
+    I, Purged : Integer;
 Begin
+    Purged := 0;
     Files := TStringList.Create;
     Try
         FindFiles(WorkspaceDir, 'request_*.json', 63, False, Files);
         For I := 0 To Files.Count - 1 Do
-            Try DeleteFile(Files[I]); Except End;
+            Try
+                DeleteFile(Files[I]);
+                Inc(Purged);
+            Except End;
     Finally
         Files.Free;
     End;
+    If Purged > 0 Then
+        AppendLog(FormatLogStamp + ',0,_purge_requests,count=' + IntToStr(Purged)
+            + ',0,');
+End;
+
+{ Wipe leftover response_*.json files at session start. Python deletes its   }
+{ own response file after reading it, but a client that timed out (or died)  }
+{ leaves the response it never collected. These accumulate forever otherwise.}
+{ Only safe at startup: no client can still be waiting on a response written }
+{ by a session that has already ended.                                       }
+Procedure CleanupOrphanResponses;
+Var
+    Files : TStringList;
+    I, Purged : Integer;
+Begin
+    Purged := 0;
+    Files := TStringList.Create;
+    Try
+        FindFiles(WorkspaceDir, 'response_*.json', 63, False, Files);
+        For I := 0 To Files.Count - 1 Do
+            Try
+                DeleteFile(Files[I]);
+                Inc(Purged);
+            Except End;
+    Finally
+        Files.Free;
+    End;
+    If Purged > 0 Then
+        AppendLog(FormatLogStamp + ',0,_purge_responses,count=' + IntToStr(Purged)
+            + ',0,');
 End;
 
 {..............................................................................}

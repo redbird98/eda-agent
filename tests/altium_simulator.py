@@ -71,6 +71,74 @@ class MockComponent:
         self.pins = pins or []
 
 
+class MockPcbComponent:
+    """Mirrors an IPCB_Component (placed footprint on the board)."""
+
+    def __init__(self, designator: str, x: int, y: int, rotation: float = 0.0,
+                 layer: str = "Top Layer", footprint: str = "", comment: str = "",
+                 width: int = 100, height: int = 60, height_mils: int = 0):
+        self.designator = designator
+        self.x = x
+        self.y = y
+        self.rotation = rotation
+        self.layer = layer
+        self.footprint = footprint
+        self.comment = comment
+        self.width = width
+        self.height = height
+        self.height_mils = height_mils
+
+
+class MockVia:
+    """Mirrors an IPCB_Via (x/y mils, net, pad + hole size, layer span)."""
+
+    def __init__(self, x: int, y: int, net: str = "", size: int = 50,
+                 hole_size: int = 28, low_layer: str = "Top Layer",
+                 high_layer: str = "Bottom Layer"):
+        self.x = x
+        self.y = y
+        self.net = net
+        self.size = size
+        self.hole_size = hole_size
+        self.low_layer = low_layer
+        self.high_layer = high_layer
+
+
+class MockBoard:
+    """Mirrors an IPCB_Board: placements, nets, outline, primitive counts."""
+
+    def __init__(self, name: str, components=None, nets=None, outline=None,
+                 track_count=0, via_count=0, pad_count=0, fill_count=0,
+                 text_count=0, polygon_count=0, layer_count=2,
+                 total_trace_length_mils=0, unrouted_connections=0,
+                 vias=None, unrouted=None, drc_violations=None):
+        self.name = name
+        self.components: list[MockPcbComponent] = components or []
+        self.nets: list[str] = nets or []
+        self.vias: list[MockVia] = vias or []
+        # Per-net unrouted connections: list of {"net", "unrouted_connections"}.
+        self.unrouted: list[dict] = unrouted or []
+        # DRC violations: list of dicts (echoed as-is by run_drc).
+        self.drc_violations: list[dict] = drc_violations or []
+        # Pad->net bindings from the SCH->PCB bridge: list of
+        # {"designator", "pin", "net"}.
+        self.pad_nets: list[dict] = []
+        # Placed track segments: list of
+        # {"x1","y1","x2","y2","width","layer","net"}.
+        self.tracks: list[dict] = []
+        # outline as a list of (x, y) mils vertices; default a rectangle.
+        self.outline = outline or [(0, 0), (2000, 0), (2000, 1500), (0, 1500)]
+        self.track_count = track_count
+        self.via_count = via_count
+        self.pad_count = pad_count
+        self.fill_count = fill_count
+        self.text_count = text_count
+        self.polygon_count = polygon_count
+        self.layer_count = layer_count
+        self.total_trace_length_mils = total_trace_length_mils
+        self.unrouted_connections = unrouted_connections
+
+
 class MockSchObject:
     """Mirrors an ISch_GraphicalObject with late-bound properties."""
 
@@ -311,6 +379,33 @@ class AltiumSimulator:
         ]
         self.lib_has_schlib = True  # Simulate having an active SchLib
 
+        # Active PCB board (for pcb.* commands). Positions in mils.
+        self.board = MockBoard(
+            name="Board.PcbDoc",
+            components=[
+                MockPcbComponent("R1", x=500, y=400, rotation=0.0,
+                                 layer="Top Layer", footprint="0402",
+                                 comment="10k", width=60, height=30),
+                MockPcbComponent("R2", x=700, y=400, rotation=90.0,
+                                 layer="Top Layer", footprint="0402",
+                                 comment="4.7k", width=60, height=30),
+                MockPcbComponent("U1", x=1000, y=800, rotation=0.0,
+                                 layer="Top Layer", footprint="LQFP-64",
+                                 comment="STM32F405RGT6", width=400, height=400),
+            ],
+            nets=["GND", "VCC", "NET1"],
+            track_count=12, via_count=4, pad_count=68, text_count=3,
+            layer_count=2, total_trace_length_mils=3200,
+            unrouted_connections=1,
+            unrouted=[{"net": "NET1", "unrouted_connections": 1}],
+            drc_violations=[],
+        )
+
+        # Audit results are SHAPE mirrors only (not Pascal detection logic --
+        # see the simulator caveat). Default clean; a test seeds a specific
+        # action's result to exercise design_lint_report's aggregation.
+        self.audit_results: dict[str, dict] = {}
+
         # Object type string -> integer mapping (mirrors Generic.pas)
         self._sch_type_map = {
             "eNetLabel": 25, "ePort": times_or_default(28),
@@ -501,6 +596,10 @@ class AltiumSimulator:
             return self._handle_library(action, params, request_id)
         elif category == "generic":
             return self._handle_generic(action, params, request_id)
+        elif category == "pcb":
+            return self._handle_pcb(action, params, request_id)
+        elif category == "audit":
+            return self._handle_audit(action, params, request_id)
         else:
             return _build_error_response(
                 request_id, "UNKNOWN_COMMAND",
@@ -1302,6 +1401,334 @@ class AltiumSimulator:
         else:
             data = '{"matched":' + str(count) + '}'
         return _build_success_response(rid, data)
+
+    # ------------------------------------------------------------------
+    # PCB commands (mirrors PCB.pas -- read handlers)
+    # ------------------------------------------------------------------
+
+    def _handle_pcb(self, action: str, params: dict, rid: str) -> str:
+        board = self.board
+        if board is None:
+            return _build_error_response(rid, "NO_PCB", "No PCB document is active")
+
+        if action == "get_components":
+            items = []
+            for c in board.components:
+                x1, y1 = c.x - c.width // 2, c.y - c.height // 2
+                x2, y2 = c.x + c.width // 2, c.y + c.height // 2
+                items.append(
+                    '{"designator":"' + _escape_json_string(c.designator) + '",'
+                    '"comment":"' + _escape_json_string(c.comment) + '",'
+                    '"x":' + str(c.x) + ',"y":' + str(c.y) + ','
+                    '"rotation":' + _num(c.rotation) + ','
+                    '"layer":"' + _escape_json_string(c.layer) + '",'
+                    '"footprint":"' + _escape_json_string(c.footprint) + '",'
+                    '"source_designator":"' + _escape_json_string(c.designator) + '",'
+                    '"height_mils":' + str(c.height_mils) + ','
+                    '"bbox":{"x1":' + str(x1) + ',"y1":' + str(y1) +
+                    ',"x2":' + str(x2) + ',"y2":' + str(y2) +
+                    ',"width":' + str(c.width) + ',"height":' + str(c.height) + '}}'
+                )
+            data = '{"components":[' + ",".join(items) + '],"count":' + str(len(items)) + '}'
+            return _build_success_response(rid, data)
+
+        elif action == "get_nets":
+            items = ['"' + _escape_json_string(n) + '"' for n in board.nets]
+            data = '{"nets":[' + ",".join(items) + '],"count":' + str(len(items)) + '}'
+            return _build_success_response(rid, data)
+
+        elif action == "get_board_outline":
+            verts = []
+            for i, (x, y) in enumerate(board.outline):
+                verts.append('{"index":' + str(i) + ',"kind":"line","x":' + str(x) +
+                             ',"y":' + str(y) + ',"cx":0,"cy":0}')
+            xs = [x for x, _ in board.outline]
+            ys = [y for _, y in board.outline]
+            left, right = (min(xs), max(xs)) if xs else (0, 0)
+            bottom, top = (min(ys), max(ys)) if ys else (0, 0)
+            data = ('{"point_count":' + str(len(board.outline)) +
+                    ',"vertices":[' + ",".join(verts) + '],'
+                    '"bounding_rect":{"left":' + str(left) + ',"bottom":' + str(bottom) +
+                    ',"right":' + str(right) + ',"top":' + str(top) + '}}')
+            return _build_success_response(rid, data)
+
+        elif action == "get_board_statistics":
+            xs = [x for x, _ in board.outline] or [0]
+            ys = [y for _, y in board.outline] or [0]
+            w = max(xs) - min(xs)
+            h = max(ys) - min(ys)
+            data = ('{"board_name":"' + _escape_json_string(board.name) + '",'
+                    '"track_count":' + str(board.track_count) + ','
+                    '"via_count":' + str(board.via_count) + ','
+                    '"pad_count":' + str(board.pad_count) + ','
+                    '"component_count":' + str(len(board.components)) + ','
+                    '"fill_count":' + str(board.fill_count) + ','
+                    '"text_count":' + str(board.text_count) + ','
+                    '"polygon_count":' + str(board.polygon_count) + ','
+                    '"layer_count":' + str(board.layer_count) + ','
+                    '"total_trace_length_mils":' + str(board.total_trace_length_mils) + ','
+                    '"unrouted_connections":' + str(board.unrouted_connections) + ','
+                    '"board_width_mils":' + str(w) + ','
+                    '"board_height_mils":' + str(h) + ','
+                    '"board_area_sq_mils":' + str(w * h) + '}')
+            return _build_success_response(rid, data)
+
+        elif action == "move_component":
+            desig = params.get("designator", "")
+            if not desig:
+                return _build_error_response(rid, "MISSING_PARAM",
+                                             'Missing "designator" parameter')
+            comp = next((c for c in board.components if c.designator == desig), None)
+            if comp is None:
+                return _build_error_response(rid, "NOT_FOUND",
+                                             "Component not found: " + desig)
+            if params.get("x", "") not in ("", None):
+                comp.x = int(float(params["x"]))
+            if params.get("y", "") not in ("", None):
+                comp.y = int(float(params["y"]))
+            if params.get("rotation", "") not in ("", None):
+                comp.rotation = float(params["rotation"])
+            data = ('{"designator":"' + _escape_json_string(desig) + '",'
+                    '"x":' + str(comp.x) + ',"y":' + str(comp.y) + ','
+                    '"rotation":' + _num(comp.rotation) + '}')
+            return _build_success_response(rid, data)
+
+        elif action == "place_tracks":
+            tracks = params.get("tracks", "")
+            if not tracks:
+                return _build_error_response(rid, "MISSING_PARAM",
+                                             "tracks parameter required")
+            placed, failed = 0, 0
+            for t in tracks.split("|"):
+                if not t:
+                    continue
+                f = t.split(",")
+                if len(f) < 4 or any(v == "" for v in f[:4]):
+                    failed += 1
+                    continue
+                try:
+                    seg = {
+                        "x1": int(float(f[0])), "y1": int(float(f[1])),
+                        "x2": int(float(f[2])), "y2": int(float(f[3])),
+                        "width": int(float(f[4])) if len(f) > 4 and f[4] else 10,
+                        "layer": f[5] if len(f) > 5 and f[5] else "TopLayer",
+                        "net": f[6] if len(f) > 6 else "",
+                    }
+                except ValueError:
+                    failed += 1
+                    continue
+                board.tracks.append(seg)
+                board.track_count += 1
+                placed += 1
+            data = '{"placed":' + str(placed) + ',"failed":' + str(failed) + '}'
+            return _build_success_response(rid, data)
+
+        elif action == "place_components":
+            placements = params.get("placements", "")
+            placed, failed = 0, 0
+            for rec in placements.split("~~"):
+                if not rec:
+                    continue
+                fields = {}
+                for f in rec.split(";;"):
+                    if "==" in f:
+                        k, v = f.split("==", 1)
+                        fields[k.strip()] = v.strip()
+                if not fields.get("footprint"):
+                    failed += 1
+                    continue
+                comp = MockPcbComponent(
+                    designator=fields.get("designator", ""),
+                    x=int(float(fields.get("x", 0))),
+                    y=int(float(fields.get("y", 0))),
+                    rotation=float(fields.get("rotation", 0) or 0),
+                    layer=fields.get("layer") or "Top Layer",
+                    footprint=fields.get("footprint", ""),
+                    comment=fields.get("comment", ""),
+                )
+                board.components.append(comp)
+                # Synced mode: pad_nets creates nets + pad bindings.
+                pn = fields.get("pad_nets", "")
+                if pn:
+                    for pair in pn.split("|"):
+                        if "=" not in pair:
+                            continue
+                        pad, net = pair.split("=", 1)
+                        pad, net = pad.strip(), net.strip()
+                        if net and net not in board.nets:
+                            board.nets.append(net)
+                        if comp.designator and pad and net:
+                            board.pad_nets.append(
+                                {"designator": comp.designator, "pin": pad, "net": net})
+                placed += 1
+            data = ('{"placed":' + str(placed) + ',"failed":' + str(failed) +
+                    ',"total":' + str(placed + failed) + '}')
+            return _build_success_response(rid, data)
+
+        elif action == "create_nets_from_list":
+            nets_param = params.get("nets", "")
+            created, existing = 0, 0
+            for name in nets_param.split("|"):
+                name = name.strip()
+                if not name:
+                    continue
+                if name in board.nets:
+                    existing += 1
+                else:
+                    board.nets.append(name)
+                    created += 1
+            data = '{"created":' + str(created) + ',"existing":' + str(existing) + '}'
+            return _build_success_response(rid, data)
+
+        elif action == "bind_pad_nets":
+            bindings = params.get("bindings", "")
+            if not bindings:
+                return _build_error_response(rid, "MISSING_PARAM",
+                                             "bindings parameter required")
+            bound, failed = 0, 0
+            missing_components, missing_nets = [], []
+            comp_names = {c.designator for c in board.components}
+            for op in bindings.split("~~"):
+                if not op:
+                    continue
+                fields = {}
+                for kv in op.split(";"):
+                    if "=" in kv:
+                        k, v = kv.split("=", 1)
+                        fields[k.strip()] = v.strip()
+                desig, pin, net = fields.get("designator"), fields.get("pin"), fields.get("net")
+                if not desig or not pin or not net:
+                    failed += 1
+                    continue
+                if desig not in comp_names:
+                    failed += 1
+                    if desig not in missing_components:
+                        missing_components.append(desig)
+                    continue
+                if net not in board.nets:
+                    failed += 1
+                    if net not in missing_nets:
+                        missing_nets.append(net)
+                    continue
+                board.pad_nets.append({"designator": desig, "pin": pin, "net": net})
+                bound += 1
+            data = ('{"bound":' + str(bound) + ',"failed":' + str(failed) +
+                    ',"missing_components":' + json.dumps(missing_components[:50]) +
+                    ',"missing_nets":' + json.dumps(missing_nets[:50]) +
+                    ',"missing_pads":[]}')
+            return _build_success_response(rid, data)
+
+        elif action == "get_unrouted_nets":
+            items = []
+            total = 0
+            for u in board.unrouted:
+                n = int(u.get("unrouted_connections", 0))
+                total += n
+                items.append('{"net":"' + _escape_json_string(u.get("net", "")) +
+                             '","unrouted_connections":' + str(n) + '}')
+            data = ('{"unrouted_nets":[' + ",".join(items) + '],'
+                    '"net_count":' + str(len(board.unrouted)) + ','
+                    '"total_unrouted":' + str(total) + '}')
+            return _build_success_response(rid, data)
+
+        elif action == "run_drc":
+            viols = json.dumps(board.drc_violations)
+            data = ('{"violation_count":' + str(len(board.drc_violations)) +
+                    ',"violations":' + viols + '}')
+            return _build_success_response(rid, data)
+
+        elif action == "get_vias":
+            items = []
+            for v in board.vias:
+                items.append(
+                    '{"x":' + str(v.x) + ',"y":' + str(v.y) + ','
+                    '"net":"' + _escape_json_string(v.net) + '",'
+                    '"size":' + str(v.size) + ',"hole_size":' + str(v.hole_size) + ','
+                    '"low_layer":"' + _escape_json_string(v.low_layer) + '",'
+                    '"high_layer":"' + _escape_json_string(v.high_layer) + '"}'
+                )
+            data = '{"vias":[' + ",".join(items) + '],"count":' + str(len(items)) + '}'
+            return _build_success_response(rid, data)
+
+        elif action == "place_via":
+            x = params.get("x", "")
+            y = params.get("y", "")
+            if x in ("", None) or y in ("", None):
+                return _build_error_response(rid, "MISSING_PARAM",
+                                             "place_via requires x and y")
+            via = MockVia(
+                x=int(float(x)), y=int(float(y)),
+                net=params.get("net", ""),
+                size=int(float(params["size"])) if params.get("size") not in ("", None) else 50,
+                hole_size=(int(float(params["hole_size"]))
+                           if params.get("hole_size") not in ("", None) else 28),
+                low_layer=params.get("low_layer") or "Top Layer",
+                high_layer=params.get("high_layer") or "Bottom Layer",
+            )
+            board.vias.append(via)
+            data = ('{"placed":true,"x":' + str(via.x) + ',"y":' + str(via.y) +
+                    ',"size":' + str(via.size) + ',"hole_size":' + str(via.hole_size) + '}')
+            return _build_success_response(rid, data)
+
+        elif action == "batch_move_components":
+            moves = params.get("moves", "")
+            if not moves:
+                return _build_error_response(rid, "MISSING_PARAM",
+                                             "moves parameter required")
+            applied, failed = 0, 0
+            for op in moves.split("|"):
+                if not op:
+                    continue
+                fields = op.split(",")
+                desig = fields[0].strip() if fields else ""
+                comp = next((c for c in board.components
+                             if c.designator == desig), None)
+                if comp is None:
+                    failed += 1
+                    continue
+                if len(fields) > 1 and fields[1] != "":
+                    comp.x = int(float(fields[1]))
+                if len(fields) > 2 and fields[2] != "":
+                    comp.y = int(float(fields[2]))
+                if len(fields) > 3 and fields[3] != "":
+                    comp.rotation = float(fields[3])
+                applied += 1
+            data = '{"moves_applied":' + str(applied) + ',"failed":' + str(failed) + '}'
+            return _build_success_response(rid, data)
+
+        else:
+            return _build_error_response(
+                rid, "UNKNOWN_ACTION", f"Unknown pcb action: {action}"
+            )
+
+
+    # ------------------------------------------------------------------
+    # Audit commands (SHAPE mirrors only -- canned {checked, violations,
+    # items}; the real detection logic lives in Audit.pas and is NOT
+    # reimplemented here. This exists so design_lint_report's orchestration
+    # can be integration-tested through the real bridge.)
+    # ------------------------------------------------------------------
+
+    def _handle_audit(self, action: str, params: dict, rid: str) -> str:
+        if not action:
+            return _build_error_response(rid, "UNKNOWN_ACTION",
+                                         "Empty audit action")
+        seeded = self.audit_results.get(action)
+        if seeded is not None:
+            checked = int(seeded.get("checked", 0))
+            violations = int(seeded.get("violations", 0))
+            items = seeded.get("items", [])
+        else:
+            checked, violations, items = 1, 0, []
+        data = ('{"checked":' + str(checked) +
+                ',"violations":' + str(violations) +
+                ',"items":' + json.dumps(items) + '}')
+        return _build_success_response(rid, data)
+
+
+def _num(v: float) -> str:
+    """Format a float without a trailing .0 for integers (JSON-friendly)."""
+    return str(int(v)) if float(v).is_integer() else repr(float(v))
 
 
 def times_or_default(val: int) -> int:

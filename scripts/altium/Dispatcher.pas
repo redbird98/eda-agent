@@ -198,7 +198,7 @@ End;
 
 Procedure CleanupMCPServer;
 Begin
-    CleanupOrphanResponses;
+    CleanupOrphanRequests;
     CleanupOrphanProgress;
     Application.ProcessMessages;
 End;
@@ -232,6 +232,10 @@ Begin
     InitDefaultConfig;
     EnsureWorkspaceDir;
     LoadMCPConfig;
+    { Startup purge: nothing on disk can belong to a live exchange, because no
+      loop was running to serve it. Responses are purged here but NOT in
+      CleanupMCPServer -- on shutdown a client may still be reading one. }
+    CleanupOrphanRequests;
     CleanupOrphanResponses;
     CleanupOrphanProgress;
     Running := True;
@@ -274,6 +278,18 @@ Begin
                 DeleteFile(StopPath);
                 Running := False;
                 Break;
+            End;
+
+            // Renew button: reset the real idle deadline once per click.
+            If RenewRequested Then
+            Begin
+                LastActivityMs := GetTickCount;
+                RenewRequested := False;
+                UpdateStatsLine(
+                    (GetTickCount - StatusStartTick) Div 1000,
+                    StatusRequestCount,
+                    StatusTotalAltiumMs,
+                    AutoShutdownMs Div 1000);
             End;
 
             // Auto-shutdown after prolonged inactivity. Paused sessions

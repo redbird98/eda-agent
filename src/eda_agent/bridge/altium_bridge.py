@@ -40,6 +40,13 @@ from .exceptions import (
     ScriptNotLoadedError,
     raise_for_code,
 )
+from .recovery import (
+    recovery_guidance,
+    recovery_message,
+    STUCK_HANDLER,
+    DEAD_LOOP,
+    CORRUPT_RESPONSE,
+)
 
 logger = logging.getLogger("eda_agent.bridge")
 
@@ -228,6 +235,35 @@ class AltiumBridge:
         # _publish_request added 1s+ of disk I/O per IPC call. This flag
         # gates it to a single run; per-request we only ensure the dir.
         self._workspace_prepared = False
+        # Set when a DelphiScript fault has been persisted to last_fault.json;
+        # lets the success path clear it without touching disk on healthy calls.
+        self._fault_recorded = False
+        # A fault persisted by a PREVIOUS process leaves last_fault.json on
+        # disk while this instance's flag starts False. Sweep it once on the
+        # first successful command so a server restart can't strand a stale
+        # recovery banner; steady-state healthy calls then touch no disk.
+        self._stale_fault_checked = False
+
+    def _note_fault(self, workspace_dir, guidance: dict) -> None:
+        """Persist a fault for the dashboard recovery banner (best-effort)."""
+        from .fault_state import record_fault
+        record_fault(workspace_dir, guidance)
+        self._fault_recorded = True
+
+    def _clear_fault_if_any(self, workspace_dir) -> None:
+        """A command succeeded — the loop is alive; drop any banner state.
+
+        Clears when THIS instance recorded a fault, and once at first success
+        to sweep a stale ``last_fault.json`` left by a previous process (the
+        recovery flow can involve restarting the server). After that first
+        sweep the in-memory flag alone gates it, so healthy steady-state calls
+        touch no disk.
+        """
+        if self._fault_recorded or not self._stale_fault_checked:
+            from .fault_state import clear_fault
+            clear_fault(workspace_dir)
+            self._fault_recorded = False
+        self._stale_fault_checked = True
 
     def ensure_workspace(self) -> None:
         self.config.ensure_workspace()
@@ -565,12 +601,17 @@ class AltiumBridge:
                             response_path.unlink()
                         except OSError:
                             pass
+                        self._note_fault(
+                            workspace_dir, recovery_guidance(CORRUPT_RESPONSE))
                         raise AltiumCommandError(
                             f"Response file for request {request_id[:8]} was "
                             f"present but unparseable after {parse_errors} "
                             f"attempts -- Altium likely crashed mid-write. "
-                            f"The corrupt file was removed; retry the call."
+                            f"The corrupt file was removed; retry the call. "
+                            + recovery_message(CORRUPT_RESPONSE),
+                            details={"recovery": recovery_guidance(CORRUPT_RESPONSE)},
                         )
+
                     # Fall through to the deadline check so a permanently
                     # corrupt file cannot wedge us in an infinite parse loop.
                 else:
@@ -630,17 +671,21 @@ class AltiumBridge:
             f"first_seen_ms={first_appearance*1000 if first_appearance else -1}",
         )
         if extensions >= _MAX_HEARTBEAT_EXTENSIONS:
+            self._note_fault(workspace_dir, recovery_guidance(STUCK_HANDLER))
             raise AltiumTimeoutError(
                 f"Handler exceeded {_MAX_HEARTBEAT_EXTENSIONS} heartbeat "
                 f"extensions ({_MAX_HEARTBEAT_EXTENSIONS * timeout:.0f}s "
                 f"total); Altium is responding to keepalives but the command "
                 f"never returned. The handler is likely stuck in an infinite "
-                f"loop."
+                f"loop. " + recovery_message(STUCK_HANDLER),
+                details={"recovery": recovery_guidance(STUCK_HANDLER)},
             )
+        self._note_fault(workspace_dir, recovery_guidance(DEAD_LOOP))
         raise AltiumTimeoutError(
             f"No response within {timeout}s and no progress heartbeat. The "
-            f"Altium polling loop is probably not running -- relaunch "
-            f"StartMCPServer."
+            f"Altium polling loop is probably not running. "
+            + recovery_message(DEAD_LOOP),
+            details={"recovery": recovery_guidance(DEAD_LOOP)},
         )
 
     def _execute_command(self, command: str, params: dict[str, Any], timeout: float) -> Any:
@@ -673,6 +718,7 @@ class AltiumBridge:
 
         if response.success:
             logger.info("Command %s succeeded", command)
+            self._clear_fault_if_any(workspace_dir)
             return self._maybe_attach_detach_hint(command, response.data)
 
         error = response.error or {}
