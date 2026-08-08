@@ -632,6 +632,70 @@ End;
 { Main Entry Point                                                             }
 {..............................................................................}
 
+{..............................................................................}
+{ TestIeeeSymbolConverters - the IEEE pin decoration vocabulary.               }
+{                                                                             }
+{ These converters are cross-validated against a real Pascal compiler by      }
+{ tests/cross_validate_pascal.pas, which carries them VERBATIM and is built   }
+{ by Free Pascal. That proves the token walk and the ordinals, and it cannot  }
+{ prove the one thing that matters most here: that DelphiScript itself        }
+{ compiles and runs them. FPC accepts identifiers Altium's engine rejects and }
+{ the reverse, and an undeclared identifier faults at RUNTIME where           }
+{ Try/Except cannot catch it.                                                 }
+{                                                                             }
+{ Running inside Altium is therefore the only check that closes the gap. It   }
+{ needs no document, so it belongs with the pure-logic tests above.           }
+{..............................................................................}
+
+Procedure TestIeeeSymbolConverters;
+Begin
+    { The two that carry schematic meaning. eDot draws the inversion    }
+    { bubble of an active-low pin, eClock the wedge of a clock pin.     }
+    { Ordinals verified against the schematic API types reference.      }
+    AssertEqual(IntToStr(StrToIeeeSymbol('dot')), '1', 'IEEE dot is 1');
+    AssertEqual(IntToStr(StrToIeeeSymbol('clock')), '3', 'IEEE clock is 3');
+
+    { Spread across the enum, so a shifted list cannot pass by getting  }
+    { only the first few right.                                          }
+    AssertEqual(IntToStr(StrToIeeeSymbol('no_symbol')), '0', 'IEEE no_symbol is 0');
+    AssertEqual(IntToStr(StrToIeeeSymbol('active_low_input')), '4', 'IEEE active_low_input is 4');
+    AssertEqual(IntToStr(StrToIeeeSymbol('open_collector')), '9', 'IEEE open_collector is 9');
+    AssertEqual(IntToStr(StrToIeeeSymbol('active_low_output')), '17', 'IEEE active_low_output is 17');
+    AssertEqual(IntToStr(StrToIeeeSymbol('bidirectional_signal_flow')), '34',
+                'IEEE bidirectional_signal_flow is 34');
+
+    { Aliases and Altium's own raw enum spelling. }
+    AssertEqual(IntToStr(StrToIeeeSymbol('inverted')), '1', 'IEEE alias inverted');
+    AssertEqual(IntToStr(StrToIeeeSymbol('  INVERTED  ')), '1', 'IEEE alias is trimmed and case-folded');
+    AssertEqual(IntToStr(StrToIeeeSymbol('active_low')), '1', 'IEEE alias active_low');
+    AssertEqual(IntToStr(StrToIeeeSymbol('clk')), '3', 'IEEE alias clk');
+    AssertEqual(IntToStr(StrToIeeeSymbol('eDot')), '1', 'IEEE raw enum eDot');
+    AssertEqual(IntToStr(StrToIeeeSymbol('eClock')), '3', 'IEEE raw enum eClock');
+
+    { A bare ordinal reaches members with no friendly name; anything    }
+    { unrecognised, out of range or negative becomes eNoSymbol rather   }
+    { than a wrong decoration.                                           }
+    AssertEqual(IntToStr(StrToIeeeSymbol('9')), '9', 'IEEE bare ordinal passes through');
+    AssertEqual(IntToStr(StrToIeeeSymbol('35')), '0', 'IEEE ordinal past the end is refused');
+    AssertEqual(IntToStr(StrToIeeeSymbol('-3')), '0', 'IEEE negative ordinal is refused');
+    AssertEqual(IntToStr(StrToIeeeSymbol('nonsense')), '0', 'IEEE unknown name is refused');
+    AssertEqual(IntToStr(StrToIeeeSymbol('')), '0', 'IEEE empty name is refused');
+    AssertEqual(IntToStr(StrToIeeeSymbol('e')), '0', 'IEEE lone e is refused');
+
+    { Naming an ordinal back, used when reporting a pin's decoration. }
+    AssertEqual(IeeeSymbolToStr(1), 'dot', 'IEEE name of 1');
+    AssertEqual(IeeeSymbolToStr(3), 'clock', 'IEEE name of 3');
+    AssertEqual(IeeeSymbolToStr(0), 'no_symbol', 'IEEE name of 0');
+    AssertEqual(IeeeSymbolToStr(99), 'no_symbol', 'IEEE name of an unknown ordinal');
+    AssertEqual(IeeeSymbolToStr(-1), 'no_symbol', 'IEEE name of a negative ordinal');
+
+    { StripChar is written out rather than calling StringReplace so the }
+    { same source compiles under both DelphiScript and Free Pascal.     }
+    AssertEqual(StripChar('a_b_c', '_'), 'abc', 'StripChar removes every occurrence');
+    AssertEqual(StripChar('abc', '_'), 'abc', 'StripChar leaves a clean string alone');
+    AssertEqual(StripChar('', '_'), '', 'StripChar handles an empty string');
+End;
+
 Procedure RunSelfTest;
 Var
     Summary : String;
@@ -652,6 +716,7 @@ Begin
     TestStringHelpers;
     TestObjectTypeMappings;
     TestLayerMappings;
+    TestIeeeSymbolConverters;
     TestFileIO;
     TestEdgeCases;
     TestRunProcessParsing;

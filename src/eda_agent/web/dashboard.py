@@ -493,7 +493,7 @@ def _aggregate(entries: Iterable[LogEntry]) -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 # Extensions we want to surface in the dashboard. Each tool that produces a
-# file uses one of these — SVG preview from design_preview_plan, PDF/STEP/DXF
+# file uses one of these: SVG preview from design_preview_plan, PDF/STEP/DXF
 # from the export_* tools, PNG screenshots from export_image, JSON snapshots
 # from design_review_snapshot, etc.
 _ARTIFACT_EXTS = {
@@ -798,7 +798,7 @@ def create_app(workspace_dir: Optional[Path] = None) -> Flask:
         """Audit the focused PcbLib for inconsistent footprint policies.
 
         Sweeps every footprint, infers the library's own conventions, and
-        returns the deviations — the read-only view of
+        returns the deviations: the read-only view of
         ``lib_audit_footprint_policies``. Geometry comes from the bulk
         ``library.get_library_geometry`` command, paged so a thousand-footprint
         library is a few round trips rather than a thousand. Returns

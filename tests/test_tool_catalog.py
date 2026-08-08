@@ -13,10 +13,15 @@ import pytest
 @pytest.fixture(scope="module")
 def mcp():
     from mcp.server.fastmcp import FastMCP
-    from eda_agent.tools import register_all_tools
+    from eda_agent.tools import register_backend
 
+    # register_backend, not register_all_tools: the latter is the
+    # ALTIUM-specific suite, and the backend-agnostic registrars
+    # (register_eda_tools, register_meta_tools) are layered on top of it
+    # by register_backend. Calling the inner one built a surface that no
+    # real server ever serves -- one without tool_catalog itself.
     m = FastMCP("test")
-    register_all_tools(m)
+    register_backend(m, "altium")
     return m
 
 

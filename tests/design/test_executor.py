@@ -843,7 +843,7 @@ def test_executor_cross_block_net_emits_label_per_pin(tmp_path: Path) -> None:
 
     Buck block has U1 (regulator); MCU block has U2 (MCU). The PGOOD
     signal between them is cross-block, so the executor emits a label
-    at U1.PGOOD and another at U2.IRQ — no inter-pin routing.
+    at U1.PGOOD and another at U2.IRQ, no inter-pin routing.
     """
     bridge = _FakeBridge(
         pin_layouts={

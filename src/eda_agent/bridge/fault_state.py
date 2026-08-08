@@ -4,7 +4,7 @@
 
 When the bridge detects an engine fault it records the diagnosis + recovery
 steps to ``last_fault.json`` in the workspace; the web dashboard reads it to
-show a recovery banner ("the loop is down — here's how to restart it"). The
+show a recovery banner ("the loop is down: here's how to restart it"). The
 bridge clears it once a command succeeds again, so the banner disappears the
 moment the loop recovers.
 

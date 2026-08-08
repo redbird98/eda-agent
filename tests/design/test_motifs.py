@@ -1063,7 +1063,7 @@ def test_ic_anchored_splat_uses_u_position_as_origin() -> None:
         find_motif_matches(build_circuit_graph(plan), FB_DIVIDER)
     )
     assert len(matches) == 1
-    # U1's "placed" position (say, (4000, 5000)) — splat puts Rtop at
+    # U1's "placed" position (say, (4000, 5000)): splat puts Rtop at
     # (4000 + 1500, 5000) = (5500, 5000) and Rbot at (5500, 4000).
     placement = splat_motif(matches[0], FB_DIVIDER, anchor=(4000, 5000))
     # The pattern is symmetric in R1/R2 -> Rtop/Rbot labeling; just

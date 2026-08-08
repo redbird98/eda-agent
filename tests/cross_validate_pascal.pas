@@ -303,6 +303,236 @@ end;
 { and returns the count of VALID operations (object_type != '' and        }
 { set != ''). Mirrors the iteration/counting portion of Gen_BatchModify.  }
 
+{ --------------------------------------------------------------------------
+  NextBatchOp / GetBatchField -- copied VERBATIM from Main.pas.
+
+  These parse the batch payload every bulk tool sends: operations split on
+  '~~', fields within an operation split on ';', and key/value split on the
+  FIRST '='. The Python emitters build that string, so their sanitiser has
+  to match this parser exactly -- and until now that match was asserted by
+  reading the Pascal, not by running it.
+
+  What the grammar actually permits, which is the part worth pinning:
+    * a value MAY contain '=' (only the first one splits)
+    * a value may NOT contain ';' (it ends the field early)
+    * a value may not contain '~~' (it ends the operation)
+    * keys are matched case-insensitively
+  -------------------------------------------------------------------------- }
+
+function NextBatchOp(var Remaining : String) : String;
+var
+  SepPos : Integer;
+begin
+  Result := '';
+  while Length(Remaining) > 0 do
+  begin
+    SepPos := Pos('~~', Remaining);
+    if SepPos = 0 then
+    begin
+      Result := Remaining;
+      Remaining := '';
+      Exit;
+    end;
+    Result := Copy(Remaining, 1, SepPos - 1);
+    Remaining := Copy(Remaining, SepPos + 2, Length(Remaining));
+    if Result <> '' then Exit;
+  end;
+end;
+
+function GetBatchField(Op : String; Key : String) : String;
+var
+  Remaining, Field, FKey, FVal : String;
+  SepPos, EqPos : Integer;
+begin
+  Result := '';
+  Remaining := Op;
+  while Length(Remaining) > 0 do
+  begin
+    SepPos := Pos(';', Remaining);
+    if SepPos = 0 then
+    begin
+      Field := Remaining;
+      Remaining := '';
+    end
+    else
+    begin
+      Field := Copy(Remaining, 1, SepPos - 1);
+      Remaining := Copy(Remaining, SepPos + 1, Length(Remaining));
+    end;
+    EqPos := Pos('=', Field);
+    if EqPos > 0 then
+    begin
+      FKey := Copy(Field, 1, EqPos - 1);
+      FVal := Copy(Field, EqPos + 1, Length(Field));
+      if UpperCase(FKey) = UpperCase(Key) then
+      begin
+        Result := FVal;
+        Exit;
+      end;
+    end;
+  end;
+end;
+
+{ ---------------------------------------------------------------------------
+  IEEE pin-symbol converters, copied VERBATIM from scripts/altium/Utils.pas.
+  These decide whether an active-low pin gets its inversion bubble and a clock
+  pin its wedge, and they run inside Altium where nothing can be stepped
+  through. Compiling the identical source here is the only way to check the
+  token-splitting logic against a real Pascal compiler.
+
+  StrToIeeeSymbol calls StrToIntDef, which DelphiScript provides as a builtin
+  and Free Pascal provides from SysUtils with the same "default on failure"
+  contract, so the copy needs no shim. IsIntStr comes along because Utils.pas
+  defines it and the harness did not have it.
+  --------------------------------------------------------------------------- }
+
+function IsIntStr(S : String) : Boolean;
+var
+  I, StartPos : Integer;
+begin
+  S := Trim(S);
+  Result := False;
+  if S = '' then Exit;
+  StartPos := 1;
+  if S[1] = '-' then StartPos := 2;
+  if StartPos > Length(S) then Exit;   { a lone '-' is not an integer }
+  for I := StartPos to Length(S) do
+    if (S[I] < '0') or (S[I] > '9') then Exit;
+  Result := True;
+end;
+
+function StripChar(S : String; C : Char) : String;
+var
+  I : Integer;
+begin
+  Result := '';
+  for I := 1 to Length(S) do
+    if S[I] <> C then Result := Result + S[I];
+end;
+
+function IeeeSymbolNames : String;
+begin
+  Result :=
+    'no_symbol|dot|right_left_signal_flow|clock|active_low_input|' +
+    'analog_signal_in|not_logic_connection|shift_right|postponed_output|' +
+    'open_collector|hiz|high_current|pulse|schmitt|delay|group_line|' +
+    'group_bin|active_low_output|pi_symbol|greater_equal|less_equal|' +
+    'sigma|open_collector_pullup|open_emitter|open_emitter_pullup|' +
+    'digital_signal_in|and|invertor|or|xor|shift_left|input_output|' +
+    'open_circuit_output|left_right_signal_flow|bidirectional_signal_flow';
+end;
+
+function IeeeSymbolToStr(V : Integer) : String;
+var
+  Names, Tok : String;
+  I, P : Integer;
+begin
+  Result := 'no_symbol';
+  if V <= 0 then Exit;
+  Names := IeeeSymbolNames + '|';
+  I := 0;
+  while Names <> '' do
+  begin
+    P := Pos('|', Names);
+    if P = 0 then Break;
+    Tok := Copy(Names, 1, P - 1);
+    Names := Copy(Names, P + 1, Length(Names));
+    if I = V then
+    begin
+      Result := Tok;
+      Exit;
+    end;
+    I := I + 1;
+  end;
+end;
+
+function StrToIeeeSymbol(S : String) : Integer;
+var
+  LS, Compact, Names, Tok : String;
+  I, P : Integer;
+begin
+  Result := 0;
+  LS := LowerCase(Trim(S));
+  if LS = '' then Exit;
+
+  if IsIntStr(LS) then
+  begin
+    Result := StrToIntDef(LS, 0);
+    if (Result < 0) or (Result > 34) then Result := 0;
+    Exit;
+  end;
+
+  Compact := StripChar(LS, '_');
+  if (Compact = 'inverted') or (Compact = 'inversion') or (Compact = 'bubble')
+      or (Compact = 'activelow') or (Compact = 'negated') then
+  begin
+    Result := 1;    { eDot }
+    Exit;
+  end;
+  if Compact = 'clk' then
+  begin
+    Result := 3;    { eClock }
+    Exit;
+  end;
+
+  Names := IeeeSymbolNames + '|';
+  I := 0;
+  while Names <> '' do
+  begin
+    P := Pos('|', Names);
+    if P = 0 then Break;
+    Tok := StripChar(Copy(Names, 1, P - 1), '_');
+    Names := Copy(Names, P + 1, Length(Names));
+    if Compact = Tok then
+    begin
+      Result := I;
+      Exit;
+    end;
+    if (Length(Compact) > 1) and (Compact[1] = 'e') then
+      if Copy(Compact, 2, Length(Compact)) = Tok then
+      begin
+        Result := I;
+        Exit;
+      end;
+    I := I + 1;
+  end;
+end;
+
+{ Name every ordinal 0..34 and parse the name straight back. Any disagreement
+  between the two converters, or an off-by-one in the token walk, shows up as
+  an ordinal that fails to survive the trip. }
+function IeeeRoundTripSweep : String;
+var
+  I : Integer;
+begin
+  Result := '';
+  for I := 0 to 34 do
+  begin
+    if I > 0 then Result := Result + '|';
+    Result := Result + IntToStr(StrToIeeeSymbol(IeeeSymbolToStr(I)));
+  end;
+end;
+
+{ Split a whole payload and report every op's value for one key, so a test
+  can check the two parsers together rather than one at a time. }
+function BatchFieldSweep(Payload : String; Key : String) : String;
+var
+  Remaining, Op, Value : String;
+  First : Boolean;
+begin
+  Result := '';
+  Remaining := Payload;
+  First := True;
+  repeat
+    Op := NextBatchOp(Remaining);
+    if Op = '' then Break;
+    Value := GetBatchField(Op, Key);
+    if not First then Result := Result + '|';
+    Result := Result + Value;
+    First := False;
+  until Length(Remaining) = 0;
+end;
+
 function CountBatchOperations(Operations : String) : Integer;
 var
   Remaining, OpStr, Scope, ObjTypeStr, FilterStr, SetStr : String;
@@ -558,6 +788,36 @@ begin
     else if FnName = 'ExtractJsonArray' then
     begin
       ResultStr := ExtractJsonArray(B64Decode(Parts[1]), B64Decode(Parts[2]));
+    end
+
+    { --- GetBatchField: args = op, key --- }
+    else if FnName = 'GetBatchField' then
+    begin
+      ResultStr := GetBatchField(B64Decode(Parts[1]), B64Decode(Parts[2]));
+    end
+
+    { --- BatchFieldSweep: args = payload, key --- }
+    else if FnName = 'BatchFieldSweep' then
+    begin
+      ResultStr := BatchFieldSweep(B64Decode(Parts[1]), B64Decode(Parts[2]));
+    end
+
+    { --- StrToIeeeSymbol: args = s --- }
+    else if FnName = 'StrToIeeeSymbol' then
+    begin
+      ResultStr := IntToStr(StrToIeeeSymbol(B64Decode(Parts[1])));
+    end
+
+    { --- IeeeSymbolToStr: args = ordinal (int) --- }
+    else if FnName = 'IeeeSymbolToStr' then
+    begin
+      ResultStr := IeeeSymbolToStr(StrToInt(B64Decode(Parts[1])));
+    end
+
+    { --- IeeeRoundTripSweep: no args --- }
+    else if FnName = 'IeeeRoundTripSweep' then
+    begin
+      ResultStr := IeeeRoundTripSweep;
     end
 
     { --- EscapeJsonString: args = s --- }

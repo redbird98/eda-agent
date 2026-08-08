@@ -3,10 +3,24 @@
 """Pytest fixtures for real-Altium integration tests.
 
 Unlike the simulator-based tests in the parent ``tests/`` directory, these
-fixtures wire to a live Altium Designer process. Each test is skipped if
-Altium isn't running and the fixture project isn't loaded, except when
-``EDA_AGENT_INTEGRATION=1`` is set, in which case missing preconditions are
-hard failures (CI mode).
+fixtures wire to a live Altium Designer process. Setting
+``EDA_AGENT_INTEGRATION=1`` opts in; without it every test here is skipped
+at collection, before any fixture runs. In CI mode the env var is set and
+missing preconditions become hard failures rather than skips.
+
+**Why the gate is at collection and not inside the fixtures.** It used to
+be inside them: ``real_bridge`` constructed a bridge, called
+``is_altium_running()``, then pinged, and only skipped once the ping came
+back empty. So a plain ``pytest tests/`` on a machine with Altium open
+sent real requests into the user's live session. Worse, ``project.open``
+in ``fixture_project_loaded`` runs before anything can skip, so a run with
+the polling loop up would have opened the fixture project in whatever
+Altium the user was working in and taken the focus.
+
+Skipping is what these tests do by default, so the cheapest correct
+version of that is to skip without touching the bridge at all. A test
+that must reach a live Altium to discover it should not have is not
+isolated, whatever its result says.
 """
 
 import os
@@ -22,6 +36,29 @@ FIXTURES_DIR = Path(__file__).parent / "fixtures"
 FIXTURE_PROJECT = FIXTURES_DIR / "EDAAgentTest.PrjPcb"
 
 REQUIRED_ENV = "EDA_AGENT_INTEGRATION"
+
+_HERE = Path(__file__).resolve().parent
+
+
+def pytest_collection_modifyitems(config, items):
+    """Skip every live-Altium test unless the opt-in env var is set.
+
+    Marking at collection means no fixture in this directory is ever
+    entered, so no bridge is constructed and no request file is written.
+    """
+    if os.environ.get(REQUIRED_ENV) == "1":
+        return
+    skip = pytest.mark.skip(
+        reason=(f"live-Altium test: set {REQUIRED_ENV}=1 to run. Skipped "
+                "without contacting the bridge, so a running Altium "
+                "session is left untouched."))
+    for item in items:
+        try:
+            path = Path(str(item.fspath)).resolve()
+        except (OSError, ValueError):
+            continue
+        if path == _HERE or _HERE in path.parents:
+            item.add_marker(skip)
 
 
 def _enforce_or_skip(reason: str) -> None:

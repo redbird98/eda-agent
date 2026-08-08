@@ -160,7 +160,7 @@ def test_learn_records_rotation_change(tmp_path: Path):
 
 def test_learn_anchor_via_signal_net(tmp_path: Path):
     """When a moved passive shares a signal net with an IC, the IC is the
-    anchor — not whatever GND-mate happens to be spatially close."""
+    anchor, not whatever GND-mate happens to be spatially close."""
     snapshot = {
         "plan": {
             "spec": "x", "summary": "x",

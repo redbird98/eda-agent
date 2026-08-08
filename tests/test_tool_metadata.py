@@ -25,10 +25,15 @@ from eda_agent.tools import metadata as M
 @pytest.fixture(scope="module")
 def tool_names() -> list[str]:
     from mcp.server.fastmcp import FastMCP
-    from eda_agent.tools import register_all_tools
+    from eda_agent.tools import register_backend
 
+    # register_backend, NOT register_all_tools: the latter is only the
+    # Altium-specific suite. The backend-agnostic registrars
+    # (register_eda_tools, register_meta_tools, register_parts_tools)
+    # are layered on top of it, so the inner call builds a surface no
+    # real server serves and makes their overrides look stale.
     mcp = FastMCP("test")
-    register_all_tools(mcp)
+    register_backend(mcp, "altium")
     tools = asyncio.run(mcp.list_tools())
     return sorted(t.name for t in tools)
 

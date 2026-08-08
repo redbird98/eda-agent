@@ -144,7 +144,7 @@ class Net(BaseModel):
         default=False,
         description="Override for the block-local-wires default: when True, "
         "the executor emits a net label at every pin even if all pins share "
-        "one functional block (zone). Use sparingly — only when a wire would "
+        "one functional block (zone). Use sparingly, only when a wire would "
         "genuinely tangle the block (e.g. a high-fanout intra-block rail with "
         "10+ pins, a control line that would weave between five other "
         "components). Has no effect on power/ground nets, which always use "
@@ -153,7 +153,7 @@ class Net(BaseModel):
     force_wires: bool = Field(
         default=False,
         description="Hard override: route this net with WIRES regardless of "
-        "every other rule — the power/ground flags, the conventional-rail "
+        "every other rule: the power/ground flags, the conventional-rail "
         "name heuristic (a net named 'VCC' is otherwise treated as a power "
         "rail even with is_power=False), and the cross-zone label default. "
         "The explicit escape hatch when the planner wants a drawn wire on a "
@@ -199,7 +199,7 @@ class Zone(BaseModel):
 
     Coordinates here are MILLIMETRES (the ``_mm`` suffixes), while the
     layout/canvas engines work in MILS. Zones are advisory grouping hints
-    only — no engine reads ``origin_mm``/``size_mm`` for geometry today.
+    only; no engine reads ``origin_mm``/``size_mm`` for geometry today.
     If that ever changes, convert at the boundary (1 mm = 39.37 mils);
     feeding these values into mils math silently lands 25.4x off.
     """

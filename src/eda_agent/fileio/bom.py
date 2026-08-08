@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
-"""Headless BOM consolidation (roadmap V1 — hardware CI companion).
+"""Headless BOM consolidation (roadmap V1: hardware CI companion).
 
 The ``.SchDoc`` reader already extracts every placed component with its
 normalized ``mpn`` / ``manufacturer`` / ``value`` / ``datasheet``. This turns
-that flat list into a purchasable Bill of Materials — one line per distinct
-part, designators grouped and naturally sorted, quantity summed — with no
+that flat list into a purchasable Bill of Materials, one line per distinct
+part, designators grouped and naturally sorted, quantity summed, with no
 running Altium and no license. It is the read-only complement to the live
 ``proj_get_bom`` / ``proj_export_bom_html`` tools, for a file on disk or a CI
 artifact.
@@ -38,7 +38,7 @@ def consolidate_bom(components: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Group a parsed component list into consolidated BOM line items.
 
     Returns a list of ``{quantity, designators, mpn, manufacturer, value,
-    lib_reference, datasheet}`` — one entry per distinct orderable part,
+    lib_reference, datasheet}``, one entry per distinct orderable part,
     ordered by the first (naturally-sorted) designator on each line. A
     component with no designator is skipped.
     """
@@ -74,7 +74,7 @@ def bom_from_file(path: str | Path) -> list[dict[str, Any]]:
     """Read a ``.SchDoc`` or ``.PrjPcb`` and return its consolidated BOM.
 
     A ``.SchDoc`` is read directly; a ``.PrjPcb`` aggregates every sheet
-    (a designator that repeats across sheets — e.g. a multi-part component —
+    (a designator that repeats across sheets, e.g. a multi-part component,
     is de-duplicated so it counts once). Pure Python; no Altium.
     """
     path = Path(path)

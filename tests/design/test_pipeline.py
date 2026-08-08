@@ -316,17 +316,21 @@ def test_pipeline_power_net_produces_port_glyph():
     assert any("gnd" in p.style.lower() for p in gnd_ports)
 
 
-def test_cluster_radius_is_the_shared_constant():
-    """The pipeline's rail-cluster radius is the shared 1-inch constant for
-    every net size (no special-case giant cluster for small nets), so the
-    preview matches the executor's apply path."""
+def test_cluster_radius_is_asymmetric_by_kind():
+    """Rail-glyph clustering radius is per-KIND, not per-net-size, and the
+    preview matches the executor's apply path. Ground glyphs are narrow,
+    so a decap row gets per-cap drops (tight radius); power bars carry
+    the net NAME, wider than a decap column pitch, so nearby rail pins
+    share one bar (wide radius)."""
     from eda_agent.design.pipeline import _cluster_radius_for_net
     from eda_agent.design.canvas import POWER_RAIL_CLUSTER_RADIUS_MILS
 
-    assert POWER_RAIL_CLUSTER_RADIUS_MILS == 1000
+    assert POWER_RAIL_CLUSTER_RADIUS_MILS == 300
     for n in (2, 5, 6, 12, 40):
         actions = [(None, (i * 100, 0), 0) for i in range(n)]
-        assert _cluster_radius_for_net(actions) == POWER_RAIL_CLUSTER_RADIUS_MILS
+        assert _cluster_radius_for_net(actions, is_ground=True) \
+            == POWER_RAIL_CLUSTER_RADIUS_MILS
+        assert _cluster_radius_for_net(actions, is_ground=False) == 1000
 
 
 def test_spread_ground_pins_get_per_pin_symbols_not_one_cluster():
@@ -1343,3 +1347,509 @@ def test_pin_aware_fd_places_parts_on_their_ic_pin_side(monkeypatch):
     # And it is the chosen layout because it scores better than the side-blind
     # Sugiyama base, not in spite of the scorer.
     assert "pin_aware_fd" in " || ".join(n.text for n in result.notes)
+
+
+def test_corner_origin_symbol_placed_by_body_center():
+    """Real library symbols anchor at a CORNER, not the body centre (a
+    QFN28 bridge IC spans local x 300..1500, y 0..-1900 from its origin).
+    Placement passes reason in body-centre frame; the canvas build must
+    convert so a corner-origin symbol's BODY lands where the placement
+    said, instead of hanging its body diagonally off the target point
+    (which put IC-anchored satellites inside the pin field on the first
+    live-project run)."""
+    from eda_agent.design.layout import PlacedPart
+    from eda_agent.design.pipeline import build_canvas_from_plan
+
+    # Corner-origin IC: body entirely in +x / -y relative to the origin.
+    corner_ic = SymbolModel(
+        lib_path=_LIB, lib_ref="CORNER_IC",
+        pins=(
+            SymbolPin(designator="1", name="IN", x=300, y=-300,
+                      orientation=2, length=300, electrical_type="input"),
+            SymbolPin(designator="2", name="OUT", x=1500, y=-300,
+                      orientation=0, length=300, electrical_type="output"),
+            SymbolPin(designator="3", name="GND", x=300, y=-1700,
+                      orientation=2, length=300, electrical_type="power"),
+            SymbolPin(designator="4", name="VCC", x=300, y=-100,
+                      orientation=2, length=300, electrical_type="power"),
+        ),
+        body_bbox=SymbolBBox(x_min=300, y_min=-1900, x_max=1500, y_max=0),
+    )
+    syms = {(_LIB, "CORNER_IC"): corner_ic, (_LIB, "RES"): _passive("RES")}
+    plan = DesignPlan.model_validate({
+        "spec": "x", "summary": "x",
+        "sheets": [{"name": "main"}],
+        "parts": [
+            {"refdes": "U1", "lib_ref": "CORNER_IC", "lib_path": _LIB,
+             "status": "existing", "sheet": "main"},
+            {"refdes": "R1", "lib_ref": "RES", "lib_path": _LIB,
+             "status": "existing", "sheet": "main"},
+        ],
+        "nets": [
+            {"name": "SIG", "pins": [{"refdes": "U1", "pin": "2"},
+                                     {"refdes": "R1", "pin": "1"}]},
+            {"name": "GND", "is_ground": True,
+             "pins": [{"refdes": "U1", "pin": "3"},
+                      {"refdes": "R1", "pin": "2"}]},
+        ],
+    })
+    target = PlacedPart(refdes="U1", sheet="main", x_mils=5000, y_mils=4000,
+                        rotation=0)
+    r_target = PlacedPart(refdes="R1", sheet="main", x_mils=8000, y_mils=4000,
+                          rotation=270)
+    result = build_canvas_from_plan(
+        plan, MockExtractor(syms),
+        layout_overrides={"U1": target, "R1": r_target},
+    )
+    inst = next(i for i in result.canvas.instances if i.refdes == "U1")
+    bb = inst.world_bbox()
+    cx = (bb.x_min + bb.x_max) / 2
+    cy = (bb.y_min + bb.y_max) / 2
+    # Body centre must land on the placement point (within grid snap +
+    # the small post-passes' nudges), NOT offset by half the body.
+    assert abs(cx - 5000) <= 300, f"body centre x {cx} far from 5000"
+    assert abs(cy - 4000) <= 300, f"body centre y {cy} far from 4000"
+
+
+def test_offgrid_symbol_pins_snap_to_wiring_grid():
+    """A symbol whose local pin coordinates sit OFF the 100-mil grid must
+    still end up with on-grid world pins (snapped by pin residual, not by
+    origin) -- an off-grid pin never bonds to a wire in Altium."""
+    from eda_agent.design.layout import PlacedPart
+    from eda_agent.design.pipeline import build_canvas_from_plan
+
+    odd_part = SymbolModel(
+        lib_path=_LIB, lib_ref="ODD50",
+        pins=(
+            SymbolPin(designator="1", name="A", x=-250, y=50,
+                      orientation=2, length=100, electrical_type="passive"),
+            SymbolPin(designator="2", name="B", x=250, y=50,
+                      orientation=0, length=100, electrical_type="passive"),
+        ),
+        body_bbox=SymbolBBox(x_min=-250, y_min=-100, x_max=250, y_max=200),
+    )
+    syms = {(_LIB, "ODD50"): odd_part, (_LIB, "RES"): _passive("RES")}
+    plan = DesignPlan.model_validate({
+        "spec": "x", "summary": "x",
+        "sheets": [{"name": "main"}],
+        "parts": [
+            {"refdes": "X1", "lib_ref": "ODD50", "lib_path": _LIB,
+             "status": "existing", "sheet": "main"},
+            {"refdes": "R1", "lib_ref": "RES", "lib_path": _LIB,
+             "status": "existing", "sheet": "main"},
+        ],
+        "nets": [
+            {"name": "N1", "pins": [{"refdes": "X1", "pin": "2"},
+                                    {"refdes": "R1", "pin": "1"}]},
+            {"name": "N2", "pins": [{"refdes": "X1", "pin": "1"},
+                                    {"refdes": "R1", "pin": "2"}]},
+        ],
+    })
+    result = build_canvas_from_plan(
+        plan, MockExtractor(syms),
+        layout_overrides={
+            "X1": PlacedPart(refdes="X1", sheet="main", x_mils=5000,
+                             y_mils=4000, rotation=0),
+            "R1": PlacedPart(refdes="R1", sheet="main", x_mils=7000,
+                             y_mils=4000, rotation=0),
+        },
+    )
+    inst = next(i for i in result.canvas.instances if i.refdes == "X1")
+    for ep in inst.all_pin_endpoints():
+        assert ep.x % 100 == 0, f"pin {ep.pin_id} x {ep.x} off-grid"
+        assert ep.y % 100 == 0, f"pin {ep.pin_id} y {ep.y} off-grid"
+
+
+# --------------- repair-port stub upgrade (cosmetic pass) -------------
+#
+# NOTE for anyone extending these: do NOT reach for monkeypatch.undo()
+# to build "the same board without the pass". The monkeypatch fixture is
+# shared with conftest's autouse fixtures, so undo() also reverts the
+# FD-sweep shrink they install for speed, and the next build silently
+# runs the full 100-value production sweep. mock.patch is used below so
+# only the one symbol is affected.
+
+def _build_board(name: str, *, upgrade: bool = True):
+    """Build a benchmark board, optionally with the stub pass disabled."""
+    import json
+    from pathlib import Path
+    from unittest import mock
+
+    from eda_agent.design.benchmark import SyntheticSymbolExtractor
+    from eda_agent.design.pipeline import build_best_canvas_from_plan
+    from eda_agent.design.plan import DesignPlan
+    from eda_agent.design.schematic_neatness import neatness_report
+
+    plans = Path(__file__).resolve().parents[1] / "benchmarks" / "plans"
+    plan = DesignPlan.model_validate(
+        json.loads((plans / f"{name}.json").read_text()))
+    extractor = SyntheticSymbolExtractor(plan)
+
+    if upgrade:
+        canvas = build_best_canvas_from_plan(plan, extractor).canvas
+    else:
+        with mock.patch(
+                "eda_agent.design.pipeline.upgrade_repair_ports_to_stubs",
+                return_value=0):
+            canvas = build_best_canvas_from_plan(plan, extractor).canvas
+    return canvas, plan, neatness_report(canvas, plan)
+
+
+def test_stub_upgrade_does_not_move_a_single_part():
+    """The whole reason this is a separate post-selection pass.
+
+    An earlier version drew the stubs inside the per-candidate repair.
+    That wire entered the scored objective, best-of picked a different
+    layout, and a part landed on the wrong side of its IC. Placement must
+    come out identical with the pass on and off.
+    """
+    on_canvas, _, on = _build_board("mcu")
+    off_canvas, _, off = _build_board("mcu", upgrade=False)
+
+    def placement(canvas):
+        return {i.refdes: (i.x, i.y, i.rotation, i.flipped)
+                for i in canvas.instances}
+
+    assert placement(on_canvas) == placement(off_canvas)
+    assert (on.spread_w_mils, on.spread_h_mils) == \
+           (off.spread_w_mils, off.spread_h_mils)
+    # Signal routing is likewise untouched: the pass only ever adds a
+    # stub to a power/ground repair glyph.
+    assert on.signal_wire_mils == off.signal_wire_mils
+    assert on.bends_per_signal_net == off.bends_per_signal_net
+
+
+def _glyph_clearance(canvas, x, y):
+    """Distance from a glyph to the nearest symbol body."""
+    best = None
+    for inst in canvas.instances:
+        bb = inst.world_bbox()
+        dx = max(bb.x_min - x, 0, x - bb.x_max)
+        dy = max(bb.y_min - y, 0, y - bb.y_max)
+        d = (dx * dx + dy * dy) ** 0.5
+        best = d if best is None else min(best, d)
+    return best
+
+
+def _moved_glyphs(off_canvas, on_canvas):
+    """Glyphs the pass relocated, as (before_xy, after_xy) pairs.
+
+    Paired through the STUB WIRE rather than by sorting the two position
+    lists against each other. Sorting looks equivalent and is not: with
+    several glyphs moving, it happily pairs one glyph's old position with
+    another's new one and reports moves that never happened (a 200x800
+    diagonal, when every stub is axis-aligned and at most 200 mils).
+    A stub has the old position at one end and the new one at the other,
+    which identifies the pair exactly.
+    """
+    before = {(p.x, p.y) for p in off_canvas.power_ports}
+    after = {(p.x, p.y) for p in on_canvas.power_ports}
+    pairs = []
+    for w in on_canvas.wires:
+        ends = ((w.x1, w.y1), (w.x2, w.y2))
+        for src, dst in (ends, ends[::-1]):
+            if src in before and src not in after and dst in after:
+                pairs.append((src, dst))
+    return pairs
+
+
+def test_stub_upgrade_gives_crowded_glyphs_room():
+    """The gain it actually delivers, measured the honest way.
+
+    NOT bends_per_power_net. That number does fall, but only because
+    straight 0-bend stubs dilute an average over the rail's wires: no
+    existing wire is straightened, so citing it would be measuring the
+    metric rather than the drawing.
+
+    What genuinely changes is clearance. A repair glyph sits on the pin's
+    electrical end -- outside the body already, so it never overlapped
+    anything -- but it can sit tight against a NEIGHBOURING part with its
+    bar and text in the gap. The stub pushes it clear.
+    """
+    on_canvas, _, _ = _build_board("mcu")
+    off_canvas, _, _ = _build_board("mcu", upgrade=False)
+    moved = _moved_glyphs(off_canvas, on_canvas)
+    assert moved, "the pass moved nothing on this board"
+
+    deltas = [_glyph_clearance(on_canvas, *after)
+              - _glyph_clearance(off_canvas, *before)
+              for before, after in moved]
+    assert sum(deltas) / len(deltas) > 0, (
+        f"moved glyphs are no less crowded than before: {deltas[:6]}")
+
+
+def test_stub_upgrade_never_crowds_a_glyph_it_moves():
+    """The condition that makes a cosmetic pass safe to run at all.
+
+    _adaptive_stub_length only steers around obstacles in the pin's own
+    path, so nothing else prevents a stub carrying a glyph TOWARD a
+    different body, and a cosmetic pass that makes the drawing worse has
+    no business running there.
+
+    No benchmark board violates this today, with or without the guard in
+    the pass. It is pinned anyway because "currently true" and
+    "guaranteed" are different claims, and this one is cheap to
+    guarantee.
+
+    Pairing note: an earlier version of this test matched the two glyph
+    lists by sorting, which paired one glyph's old position with
+    another's new one and reported a 200x800 "move" on a pass that only
+    ever draws axis-aligned 200-mil stubs. That fabricated a regression
+    that did not exist. _moved_glyphs pairs through the stub wire.
+    """
+    for board in ("mcu", "blinker555", "buck"):
+        on_canvas, _, _ = _build_board(board)
+        off_canvas, _, _ = _build_board(board, upgrade=False)
+        for before, after in _moved_glyphs(off_canvas, on_canvas):
+            was = _glyph_clearance(off_canvas, *before)
+            now = _glyph_clearance(on_canvas, *after)
+            assert now >= was, (
+                f"{board}: glyph moved {before} -> {after} and ended "
+                f"CLOSER to a body ({was:.0f} -> {now:.0f} mils)")
+
+
+def _cross_net_contacts(canvas, plan):
+    """Every place two DIFFERENT nets' geometry touches, as Altium bonds.
+
+    Used as a set so a pass can be checked for not ADDING contacts.
+    Asserting "no contacts at all" would fail on pre-existing geometry
+    and say nothing about the pass under test.
+    """
+    from eda_agent.design.pipeline import _point_on_segment
+
+    net_of_pin = {}
+    for net in plan.nets:
+        for pr in net.pins:
+            net_of_pin[(pr.refdes, pr.pin)] = net.name
+    owned = {}
+    for inst in canvas.instances:
+        for ep in inst.all_pin_endpoints():
+            name = net_of_pin.get((inst.refdes, ep.pin_id))
+            if name:
+                owned[(ep.x, ep.y)] = name
+    for port in canvas.power_ports:
+        owned.setdefault((port.x, port.y), port.text)
+
+    contacts = set()
+    wires = [w for w in canvas.wires if w.net]
+    for w in wires:
+        seg = (w.x1, w.y1, w.x2, w.y2)
+        # A pin or port anywhere along a wire of another net.
+        for (px, py), owner in owned.items():
+            if owner != w.net and _point_on_segment(px, py, *seg):
+                contacts.add((px, py, *sorted((owner, w.net))))
+        # A wire ENDING on another net's wire (a T-intersection). A plain
+        # crossing does not bond in Altium and is deliberately not here.
+        for other in wires:
+            if other.net == w.net:
+                continue
+            for (ex, ey) in ((w.x1, w.y1), (w.x2, w.y2)):
+                if _point_on_segment(ex, ey, other.x1, other.y1,
+                                     other.x2, other.y2):
+                    contacts.add((ex, ey, *sorted((w.net, other.net))))
+    return contacts
+
+
+def test_stub_upgrade_never_bonds_two_nets():
+    """The safety property, and the reason the gate exists.
+
+    These glyphs are floating precisely because the cross-net cull
+    decided wiring them would short, so every stub drawn here is a wire
+    in hostile territory. Checked as "adds no cross-net contact" rather
+    than "has none": the boards carry pre-existing contacts that say
+    nothing about this pass.
+    """
+    for board in ("mcu", "blinker555", "buck"):
+        on_canvas, plan, _ = _build_board(board)
+        off_canvas, _, _ = _build_board(board, upgrade=False)
+        added = _cross_net_contacts(on_canvas, plan) - \
+            _cross_net_contacts(off_canvas, plan)
+        assert not added, (
+            f"{board}: the stub upgrade bonded nets that were separate: "
+            f"{sorted(added)[:4]}")
+
+
+# The gate itself, unit tested. The boards above reject only 2 stubs
+# between them, so relying on them to cover the gate leaves most of it
+# unexercised -- an earlier version of this file passed with the gate
+# deleted entirely. Each case below is one way Altium bonds.
+
+def test_gate_rejects_a_foreign_pin_on_the_stub():
+    from eda_agent.design.pipeline import _repair_stub_is_safe
+
+    assert not _repair_stub_is_safe(
+        0, 0, 200, 0, foreign_points={(100, 0)}, foreign_wires=[])
+
+
+def test_gate_rejects_landing_on_a_foreign_wire():
+    """Our endpoint on their wire is a T-intersection, which connects."""
+    from eda_agent.design.pipeline import _repair_stub_is_safe
+
+    assert not _repair_stub_is_safe(
+        0, 0, 200, 0, foreign_points=set(),
+        foreign_wires=[(200, -100, 200, 100)])
+
+
+def test_gate_rejects_a_foreign_wire_ending_on_the_stub():
+    """The same thing mirrored, and just as much a short."""
+    from eda_agent.design.pipeline import _repair_stub_is_safe
+
+    assert not _repair_stub_is_safe(
+        0, 0, 200, 0, foreign_points=set(),
+        foreign_wires=[(100, 0, 100, 500)])
+
+
+def test_gate_allows_a_plain_crossing():
+    """Two wires crossing do NOT connect in Altium without a junction.
+
+    This is the case that decides whether the feature is usable at all:
+    vetoing crossings would reject nearly every stub on a dense sheet and
+    collapse the pass back to doing nothing.
+    """
+    from eda_agent.design.pipeline import _repair_stub_is_safe
+
+    assert _repair_stub_is_safe(
+        0, 0, 200, 0, foreign_points=set(),
+        foreign_wires=[(100, -100, 100, 100)])
+
+
+def test_gate_ignores_the_source_pin_itself():
+    """The stub starts on its own pin; that is not foreign traffic."""
+    from eda_agent.design.pipeline import _repair_stub_is_safe
+
+    assert _repair_stub_is_safe(
+        0, 0, 200, 0, foreign_points={(0, 0)}, foreign_wires=[])
+
+
+# ------------- glyph-vs-text gate for the stub upgrade ---------------
+
+def _fake_canvas(labels=(), ports=()):
+    """Minimal stand-in: the gate reads only labels and power_ports."""
+    from types import SimpleNamespace
+
+    from eda_agent.design.canvas import NetLabel, PowerPort
+
+    return SimpleNamespace(
+        labels=[NetLabel(text=t, x=x, y=y, orientation=0, sheet=sh)
+                for (t, x, y, sh) in labels],
+        power_ports=[PowerPort(text=t, x=x, y=y, style="bar", sheet="main")
+                     for (t, x, y) in ports],
+    )
+
+
+def test_gate_does_not_reject_a_glyph_against_its_own_old_position():
+    """Regression: every VERTICAL stub was silently rejected.
+
+    While a move is being evaluated the glyph is still recorded at its
+    old position, so excluding it by COORDINATE does not exclude it. Its
+    own box is 2*LINE_H = 220 tall, which overlaps itself across a
+    200-mil stub -- so horizontal moves squeaked through on a boundary
+    and vertical ones never happened at all. It has to be skipped by
+    index.
+    """
+    from eda_agent.design.pipeline import _glyph_would_hit_text
+
+    canvas = _fake_canvas(ports=[("VCC", 1000, 1000)])
+    # The same glyph, proposed 200 mils UP: must be allowed.
+    assert not _glyph_would_hit_text(
+        1000, 1200, "VCC", canvas, "main", skip_index=0)
+
+
+def test_gate_rejects_a_glyph_landing_on_a_net_label():
+    """Net labels are never moved, so a glyph dropped on one stays."""
+    from eda_agent.design.pipeline import _glyph_would_hit_text
+
+    canvas = _fake_canvas(labels=[("THR", 1000, 1200, "main")],
+                          ports=[("VCC", 1000, 1000)])
+    assert _glyph_would_hit_text(
+        1000, 1200, "VCC", canvas, "main", skip_index=0)
+
+
+def test_gate_rejects_stacking_two_glyphs():
+    from eda_agent.design.pipeline import _glyph_would_hit_text
+
+    canvas = _fake_canvas(ports=[("VCC", 1000, 1000), ("GND", 1000, 1200)])
+    assert _glyph_would_hit_text(
+        1000, 1200, "VCC", canvas, "main", skip_index=0)
+
+
+def test_gate_ignores_another_sheet():
+    from eda_agent.design.pipeline import _glyph_would_hit_text
+
+    canvas = _fake_canvas(labels=[("THR", 1000, 1200, "other")])
+    assert not _glyph_would_hit_text(
+        1000, 1200, "VCC", canvas, "main", skip_index=-1)
+
+
+def test_stub_upgrade_drops_no_glyph_onto_a_net_label():
+    """Covers the gate's CALL SITE, not just its logic.
+
+    The unit tests above prove _glyph_would_hit_text decides correctly.
+    They do not prove anything calls it: deleting the call left every one
+    of them passing. It matters here because the gate is not idle -- it
+    rejects 13 of 49 candidate moves on the mcu board, and each of those
+    would otherwise park a rail glyph on top of a net label, which the
+    text placer never cleans up because it does not move net labels.
+
+    Phrased as "adds none" rather than "has none": the boards carry
+    pre-existing glyph/label overlaps (6 on mcu) that this pass neither
+    caused nor can fix.
+    """
+    from eda_agent.design.text_placement import CHAR_W, LINE_H
+
+    def overlaps(canvas):
+        glyphs = []
+        for p in canvas.power_ports:
+            h = max(100, (CHAR_W * max(1, len(p.text))) // 2)
+            glyphs.append((p.x - h, p.y - LINE_H, p.x + h, p.y + LINE_H))
+        n = 0
+        for lab in canvas.labels:
+            w = CHAR_W * max(1, len(lab.text))
+            x1 = lab.x - w if getattr(lab, "justification", 0) == 2 else lab.x
+            box = (x1, lab.y, x1 + w, lab.y + LINE_H)
+            n += sum(1 for g in glyphs
+                     if not (box[2] <= g[0] or g[2] <= box[0]
+                             or box[3] <= g[1] or g[3] <= box[1]))
+        return n
+
+    for board in ("mcu", "blinker555", "buck"):
+        on_canvas, _, _ = _build_board(board)
+        off_canvas, _, _ = _build_board(board, upgrade=False)
+        assert overlaps(on_canvas) <= overlaps(off_canvas), (
+            f"{board}: the stub upgrade parked glyphs on net labels "
+            f"({overlaps(off_canvas)} -> {overlaps(on_canvas)})")
+
+
+def test_text_is_settled_against_the_final_glyph_positions():
+    """Designator/value text must account for where the glyphs ENDED UP.
+
+    Text is placed inside each candidate build, against the glyph
+    positions of that moment; the stub upgrade then moves glyphs
+    afterwards. Without a re-place, text stays routed around where a
+    glyph used to be.
+
+    Asserted as a FIXED POINT: running the placer once more on the
+    finished canvas must move nothing. place_instance_text is
+    deterministic and depends only on canvas state, so a canvas already
+    settled is unchanged by another pass, while one still holding
+    stale positions is not. On blinker555 exactly one item (J1's
+    designator, (960,4910) -> (1350,5000)) is out of place if the
+    re-place is skipped.
+
+    Note on its return value: it counts instances placed on a
+    non-default side, NOT positions changed, so it stays non-zero on a
+    settled canvas and cannot be used as the check here.
+    """
+    from eda_agent.design.text_placement import place_instance_text
+
+    canvas, _, _ = _build_board("blinker555")
+    before = {i.refdes: (i.designator_pos, i.value_pos)
+              for i in canvas.instances}
+    place_instance_text(canvas)
+    after = {i.refdes: (i.designator_pos, i.value_pos)
+             for i in canvas.instances}
+
+    stale = [k for k in before if before[k] != after[k]]
+    assert not stale, (
+        f"text was left positioned against superseded glyph locations: "
+        f"{ {k: (before[k][0], after[k][0]) for k in stale} }")

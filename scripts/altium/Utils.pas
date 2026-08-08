@@ -325,6 +325,133 @@ Begin
     Result := True;
 End;
 
+{..............................................................................}
+{ IEEE pin-symbol (TIeeeSymbol) converters, used for the decoration drawn on  }
+{ a pin's inner or outer edge: the inversion bubble on an active-low pin      }
+{ (outer edge, 'dot') and the wedge on a clock pin (inner edge, 'clock').     }
+{                                                                             }
+{ These deliberately traffic in Integer, never in TIeeeSymbol. That type name }
+{ appears nowhere else in this codebase, so whether DelphiScript declares it  }
+{ is unverified, and an undeclared identifier in a signature faults at        }
+{ runtime where Try/Except cannot catch it. Assigning a plain Integer to an   }
+{ enum-typed property is already established here: Lib_AddPins sets           }
+{ Pin.Orientation (a TRotationBy90) from Rotation Div 90.                     }
+{                                                                             }
+{ Position in IeeeSymbolNames IS the enum ordinal, so the two converters      }
+{ below cannot disagree. Order verified against the schematic API types       }
+{ reference (TIeeeSymbol, 35 members, eNoSymbol = 0).                         }
+{..............................................................................}
+
+{ Delete every occurrence of one character. Written out rather than calling  }
+{ StringReplace because DelphiScript spells the replace-all flag as the      }
+{ integer -1 while Free Pascal wants a TReplaceFlags set, and these routines }
+{ are compiled by BOTH: tests/cross_validate_pascal.pas carries them         }
+{ verbatim so a real Pascal compiler can check them without Altium.          }
+Function StripChar(S : String; C : Char) : String;
+Var
+    I : Integer;
+Begin
+    Result := '';
+    For I := 1 To Length(S) Do
+        If S[I] <> C Then Result := Result + S[I];
+End;
+
+Function IeeeSymbolNames : String;
+Begin
+    Result :=
+        'no_symbol|dot|right_left_signal_flow|clock|active_low_input|' +
+        'analog_signal_in|not_logic_connection|shift_right|postponed_output|' +
+        'open_collector|hiz|high_current|pulse|schmitt|delay|group_line|' +
+        'group_bin|active_low_output|pi_symbol|greater_equal|less_equal|' +
+        'sigma|open_collector_pullup|open_emitter|open_emitter_pullup|' +
+        'digital_signal_in|and|invertor|or|xor|shift_left|input_output|' +
+        'open_circuit_output|left_right_signal_flow|bidirectional_signal_flow';
+End;
+
+Function IeeeSymbolToStr(V : Integer) : String;
+Var
+    Names, Tok : String;
+    I, P : Integer;
+Begin
+    { Unknown ordinals report as 'no_symbol' rather than raising: this feeds }
+    { JSON output, where a bad read must not abort the whole response.       }
+    Result := 'no_symbol';
+    If V <= 0 Then Exit;
+    Names := IeeeSymbolNames + '|';
+    I := 0;
+    While Names <> '' Do
+    Begin
+        P := Pos('|', Names);
+        If P = 0 Then Break;
+        Tok := Copy(Names, 1, P - 1);
+        Names := Copy(Names, P + 1, Length(Names));
+        If I = V Then
+        Begin
+            Result := Tok;
+            Exit;
+        End;
+        I := I + 1;
+    End;
+End;
+
+Function StrToIeeeSymbol(S : String) : Integer;
+Var
+    LS, Compact, Names, Tok : String;
+    I, P : Integer;
+Begin
+    Result := 0;
+    LS := LowerCase(Trim(S));
+    If LS = '' Then Exit;
+
+    { A bare ordinal is accepted so a caller can reach any TIeeeSymbol member, }
+    { including the ones with no friendly alias spelled out below.             }
+    If IsIntStr(LS) Then
+    Begin
+        Result := StrToIntDef(LS, 0);
+        If (Result < 0) Or (Result > 34) Then Result := 0;
+        Exit;
+    End;
+
+    { Friendly aliases for the two that carry real schematic meaning. KiCad   }
+    { and most part libraries describe these as "inverted" and "clock".       }
+    Compact := StripChar(LS, '_');
+    If (Compact = 'inverted') Or (Compact = 'inversion') Or (Compact = 'bubble')
+        Or (Compact = 'activelow') Or (Compact = 'negated') Then
+    Begin
+        Result := 1;    { eDot }
+        Exit;
+    End;
+    If Compact = 'clk' Then
+    Begin
+        Result := 3;    { eClock }
+        Exit;
+    End;
+
+    { Altium's raw enum spelling ('eActiveLowInput') differs from the         }
+    { canonical name only by a leading 'e', so retry once with it stripped.   }
+    Names := IeeeSymbolNames + '|';
+    I := 0;
+    While Names <> '' Do
+    Begin
+        P := Pos('|', Names);
+        If P = 0 Then Break;
+        Tok := StripChar(Copy(Names, 1, P - 1), '_');
+        Names := Copy(Names, P + 1, Length(Names));
+        If Compact = Tok Then
+        Begin
+            Result := I;
+            Exit;
+        End;
+        If (Length(Compact) > 1) And (Compact[1] = 'e') Then
+            If Copy(Compact, 2, Length(Compact)) = Tok Then
+            Begin
+                Result := I;
+                Exit;
+            End;
+        I := I + 1;
+    End;
+End;
+
 Function StrToFloatDef(S : String; Default : Double) : Double;
 Var
     OldSep : Char;

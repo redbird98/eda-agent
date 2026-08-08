@@ -354,15 +354,20 @@ def register_review_tools(mcp):
         # Force a fresh compile up-front if requested. Subsequent
         # SmartCompile calls inside each section will hit the newly
         # refreshed cache.
+        recompile_error = ""
         if force_recompile:
             try:
                 await bridge.send_command_async(
                     "project.force_recompile", {}, timeout=120.0
                 )
-            except Exception:
-                # Non-fatal, individual sections still run; they'll
-                # just use whatever compile state is current.
-                pass
+            except Exception as exc:  # noqa: BLE001 - reported, not raised
+                # Non-fatal: the sections still run against whatever
+                # compile state is current. But the caller ASKED for
+                # fresh connectivity, and a review drawn from stale
+                # netlist data while believing it is fresh is the same
+                # defect this release fixed in the force_recompile flag
+                # itself. Report it instead of swallowing it.
+                recompile_error = str(exc)
 
         requested = list(sections) if sections else list(DEFAULT_SECTIONS)
         if include_bom and "bom" not in requested:
@@ -411,6 +416,13 @@ def register_review_tools(mcp):
         result["_review_guidance"] = _guidance_block(unique_parts)
         if failed:
             result["_sections_failed"] = failed
+        if recompile_error:
+            result["_recompile_failed"] = recompile_error
+            result["_recompile_note"] = (
+                "force_recompile was requested but did not run, so these "
+                "sections reflect whatever compile state was already "
+                "current. Connectivity may be stale."
+            )
         result["_sections_fetched"] = [
             s for s in ordered if s in result and not s.startswith("_")
         ]
@@ -512,7 +524,7 @@ def register_review_tools(mcp):
             else:
                 await _run(name, command)
 
-        # Python-side BOM checks (no Pascal handler — run off the
+        # Python-side BOM checks (no Pascal handler: run off the
         # project.get_bom snapshot the bridge already cached). Fetch
         # the BOM ONCE and feed all three helpers from it. Kept separate
         # from LINT_AUDIT_LIST because the call shape differs. Skip the

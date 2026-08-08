@@ -1,15 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
-"""Headless schematic review (roadmap V1 — hardware CI).
+"""Headless schematic review (roadmap V1: hardware CI).
 
-Runs the component-level review checks that need no netlist — the ones a
-reviewer flags first — directly on a parsed ``.SchDoc``, with no Altium and
+Runs the component-level review checks that need no netlist: the ones a
+reviewer flags first: directly on a parsed ``.SchDoc``, with no Altium and
 no license.
 
 **This is an opt-in fallback, not the preferred review path.** It parses
 Altium's on-disk binaries without the application, so it only sees the
 netlist-free subset (missing MPN / datasheet / manufacturer, placeholder
-values, designator collisions, missing designators) — it cannot compile a
+values, designator collisions, missing designators): it cannot compile a
 netlist, run ERC, or judge connectivity. The live-Altium tools
 (``design_lint_report``, ``proj_run_erc``, ``design_review_snapshot``, the
 ``audit_*`` family) run Altium's own engines and are always the right
@@ -18,7 +18,7 @@ case where Altium genuinely can't be opened (a CI runner, a file on disk).
 
 Because a parser reading undocumented binary framing can silently
 misread a file, this surface is **disabled by default** and must be
-explicitly enabled per use — see ``headless_review_enabled`` and the
+explicitly enabled per use: see ``headless_review_enabled`` and the
 ``--offline`` CLI flag. Do not present it as the default way to review a
 design.
 """
@@ -50,7 +50,7 @@ _PLACEHOLDERS = {
 # R/C/L are the IPC-standard reference designator prefixes for the passive
 # families (resistor / capacitor / inductor). A real passive value always
 # carries a numeric magnitude (10k, 100n, 4u7, 0R), so a digitless value on
-# one of these is a defect — typically a library reference or description
+# one of these is a defect, typically a library reference or description
 # ("RES", "Capacitor") that leaked into the Value field. This is deliberately
 # conservative: annotated values like "10k 1%" or "100n 0603" keep a digit
 # and are NOT flagged, so it stays low-noise on real, messy schematics.
@@ -73,8 +73,8 @@ _TRUTHY = {"1", "true", "yes", "on"}
 HEADLESS_DISABLED_MESSAGE = (
     "Headless file-reader review is disabled by default and is NOT the "
     "preferred way to review a design. It parses Altium's binaries with no "
-    "running Altium and no license, so it only covers component-level checks "
-    "— it cannot compile a netlist or run ERC, and an offline parser can "
+    "running Altium and no license, so it only covers component-level checks: "
+    "it cannot compile a netlist or run ERC, and an offline parser can "
     "misread a file. Prefer the live-Altium tools (design_lint_report, "
     "proj_run_erc, design_review_snapshot, the audit_* family). To use the "
     "offline fallback anyway, pass --offline on the CLI or set "
@@ -119,7 +119,7 @@ def review_components(components: list[dict[str, Any]]) -> list[dict]:
                 "missing_designator", ERROR, "",
                 f"component {c.get('lib_reference', '?')!r} has no designator"))
             continue
-        # Altium leaves "R?" / "C?" before annotation — an unannotated part
+        # Altium leaves "R?" / "C?" before annotation: an unannotated part
         # has no stable identity for the BOM or the netlist.
         if "?" in d:
             findings.append(_finding(
@@ -134,7 +134,7 @@ def review_components(components: list[dict[str, Any]]) -> list[dict]:
 
     # Duplicate UniqueID: a copy-paste artifact that breaks ECO / variant
     # tracking (each placed part must have a distinct UniqueID). Empty IDs
-    # are ignored here — that's a different (and rarer) concern.
+    # are ignored here: that's a different (and rarer) concern.
     uid_owners: dict[str, list[str]] = {}
     for c in components:
         uid = (c.get("unique_id") or "").strip()
@@ -146,7 +146,7 @@ def review_components(components: list[dict[str, Any]]) -> list[dict]:
             findings.append(_finding(
                 "duplicate_unique_id", ERROR, ",".join(sorted(owners)),
                 f"UniqueID {uid} shared by {len(owners)} components "
-                f"({', '.join(sorted(owners))}) — breaks ECO/variant tracking"))
+                f"({', '.join(sorted(owners))}): breaks ECO/variant tracking"))
 
     # Per-component BOM / hygiene checks.
     for c in components:
@@ -206,12 +206,12 @@ def review_connectivity(solved: dict[str, Any]) -> list[dict]:
     ``solve_schematic_nets`` (``{nets, pin_nets, name_conflicts}``) and
     returns findings:
 
-    - ``single_pin_net`` (WARNING): a net with exactly one pin — the pin
+    - ``single_pin_net`` (WARNING): a net with exactly one pin, so the pin
       connects to nothing. May be intentional (a no-connect, a test point,
       an unused gate input tied off elsewhere), so it is a warning, not an
       error.
     - ``net_short`` (ERROR): one physical net carries two different declared
-      names (net labels / power ports) — the named nets are shorted together.
+      names (net labels / power ports): the named nets are shorted together.
 
     NOTE: soundness depends entirely on the netlist being correct. The
     geometric solver is validated against live Altium for wire/port/junction
@@ -225,13 +225,13 @@ def review_connectivity(solved: dict[str, Any]) -> list[dict]:
             desig = f"{m['component']}.{m['pin']}"
             findings.append(_finding(
                 "single_pin_net", WARNING, desig,
-                f"{desig} is the only pin on net {name!r} — it connects to "
+                f"{desig} is the only pin on net {name!r}: it connects to "
                 f"nothing (verify it is an intentional no-connect / test point)"))
     for conf in solved.get("name_conflicts", []):
         names = ", ".join(conf.get("names", []))
         findings.append(_finding(
             "net_short", ERROR, "",
-            f"one net carries conflicting names ({names}) — these nets are "
+            f"one net carries conflicting names ({names}): these nets are "
             f"shorted together"))
     return findings
 
@@ -278,7 +278,7 @@ def review_cross_sheet(components_by_sheet: dict[str, list[dict]]) -> list[dict]
     designator names two or more DIFFERENT physical parts on different
     sheets. This is distinct from a legitimate multi-part component (a relay
     or dual op-amp placed as U1A / U1B across sheets), which shares ONE
-    UniqueID — so the collision is only reported when the occurrences carry
+    UniqueID, so the collision is only reported when the occurrences carry
     two or more distinct UniqueIDs. When UniqueIDs are absent a collision
     cannot be proven, so nothing is reported (kept conservative on purpose).
     """
@@ -306,7 +306,7 @@ def review_cross_sheet(components_by_sheet: dict[str, list[dict]]) -> list[dict]
                 "message": (
                     f"designator {d} names {len(distinct_uids)} different "
                     f"physical parts across sheets {', '.join(involved)} "
-                    f"(distinct UniqueIDs) — breaks ECO / the BOM"),
+                    f"(distinct UniqueIDs): breaks ECO / the BOM"),
                 "sheet": involved[0],
             })
     return findings
@@ -360,7 +360,7 @@ def to_sarif(report: dict[str, Any], *, tool_version: str = "") -> dict[str, Any
     """Convert a review report to SARIF 2.1.0 (GitHub code-scanning format).
 
     Emitting SARIF lets the review post inline annotations on a pull
-    request via GitHub's ``upload-sarif`` action — the adoption path for
+    request via GitHub's ``upload-sarif`` action: the adoption path for
     "every commit gets a design review".
     """
     findings = report.get("findings", [])
@@ -409,7 +409,7 @@ def review_schematic_file(
     and add connectivity findings (``single_pin_net``, ``net_short``). It is
     OPT-IN because the solver is validated against live Altium for wire /
     port / junction / by-name topology but not yet for every net-label edge
-    case — enabling it on an unvalidated board could add false findings. A
+    case: enabling it on an unvalidated board could add false findings. A
     solver error degrades gracefully (component checks still return).
     """
     components = read_schematic_components(path)
@@ -429,7 +429,7 @@ def review_schematic_file(
         "file": str(path),
         "document": doc_info,
         "component_count": len(components),
-        # Declared net names (labels + power ports) — informational inventory,
+        # Declared net names (labels + power ports): informational inventory,
         # not the compiled netlist. No single-use "typo" heuristic here: on a
         # single sheet a once-used label legitimately names a local net.
         "net_names": [n["name"] for n in nets],

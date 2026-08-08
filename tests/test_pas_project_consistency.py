@@ -170,6 +170,134 @@ def test_wheel_force_include_has_statusform_dfm():
     )
 
 
+def test_wheel_force_include_covers_everything_the_prjscr_loads():
+    """The PrjScr's list, not build.py's, is what Altium actually opens.
+
+    The check above compares against build.py FILES, which is the BUNDLE
+    list and is a strict subset: SelfTest.pas is PRJSCR_ONLY, so nothing
+    asserted it reaches the wheel. Dropping it from force-include left
+    every test in this file green while shipping a script project whose
+    members are not all present.
+
+    Altium refuses to open a project with a missing member, so this is
+    not a degraded feature, it is the whole bridge failing to load for
+    anyone who installed from a wheel rather than the repo.
+    """
+    referenced = set(_prjscr_document_paths())
+    wheel_files = _wheel_force_include_filenames()
+    missing = sorted(referenced - wheel_files)
+    assert not missing, (
+        f"Altium_API.PrjScr loads these but they are not in pyproject's "
+        f"wheel force-include: {missing}. A pip-installed user gets a "
+        f"script project referencing files the package does not contain."
+    )
+
+
+def test_the_project_file_itself_ships():
+    """Without the .PrjScr there is nothing for the user to install.
+
+    Every other check here is about the project's MEMBERS, so all of
+    them pass while the project file itself is absent and
+    ``eda-agent install-scripts`` deploys a directory of orphaned
+    sources with no entry point.
+    """
+    assert "Altium_API.PrjScr" in _wheel_force_include_filenames(), (
+        "Altium_API.PrjScr is not force-included, so install-scripts has "
+        "no script project for the user to add to Altium."
+    )
+
+
+def test_force_include_has_no_entries_for_missing_files():
+    """A stale entry aborts the wheel build rather than shipping wrong.
+
+    Loud rather than silent, but it fails at release time on whoever is
+    packaging, which is the worst moment to discover it. Cheap to catch
+    here instead.
+    """
+    text = PYPROJECT.read_text(encoding="utf-8")
+    missing = sorted(
+        name for name in _wheel_force_include_filenames()
+        if not (SCRIPTS_DIR / name).exists()
+    )
+    assert not missing, (
+        f"pyproject force-include names files that do not exist: "
+        f"{missing}. hatchling errors on these, so the wheel cannot be "
+        f"built at all."
+    )
+
+
+#: Form controls referenced by StatusForm.pas that the .dfm does not
+#: declare, with why each is tolerated. An entry is a known hole, not a
+#: licence to add more.
+UNDECLARED_CONTROLS = {
+    "btn_ResetPerf":
+        "Unfinished feature, not a typo. btn_ResetPerfClick calls "
+        "ResetPerfStats and clears mmo_Perf, and hover styling was "
+        "written for it, but the button was never added to the .dfm. "
+        "Nothing wires the handlers, so they never run and the missing "
+        "control is never touched; the counters still reset at form "
+        "init (StatusForm.pas, the SetCheckCaption block). Either add "
+        "the button to the .dfm or delete the three handlers. Left as "
+        "is because both are UI decisions that want a look at the "
+        "running form.",
+}
+
+
+def _declared_controls() -> set[str]:
+    """Every ``object name: TType`` the form definition declares."""
+    dfm = (SCRIPTS_DIR / "StatusForm.dfm").read_text(encoding="utf-8",
+                                                     errors="replace")
+    return set(re.findall(r"^\s*object\s+(\w+)\s*:", dfm, flags=re.MULTILINE))
+
+
+def test_statusform_only_touches_controls_the_dfm_declares():
+    """A handler reaching for a control the form lacks faults at runtime.
+
+    The .dfm is what declares the controls, so a name that is not in it
+    is an undeclared identifier. DelphiScript resolves late, so this
+    does not fail to compile: it raises the moment that handler runs,
+    inside the UI of the polling loop, which is a poor place to find
+    out. Nothing else catches it, since the form is the one Pascal file
+    no test can execute.
+
+    Scoped to names matching the form's own control-naming prefixes so
+    ordinary locals and API objects are not dragged in.
+    """
+    declared = _declared_controls()
+    assert len(declared) > 30, (
+        f"only {len(declared)} controls parsed from the .dfm; the parse "
+        f"broke and this check has gone blind")
+
+    source = (SCRIPTS_DIR / "StatusForm.pas").read_text(encoding="utf-8",
+                                                        errors="replace")
+    source = re.sub(r"\{[^{}]*\}", " ", source)
+    source = re.sub(r"//[^\n]*", " ", source)
+
+    prefixes = tuple(sorted({name.split("_")[0] + "_"
+                             for name in declared if "_" in name}))
+    assert prefixes, "no prefixed control names found in the .dfm"
+
+    referenced = {m for m in re.findall(r"\b([A-Za-z_]\w*)\s*\.\s*[A-Z]\w*",
+                                        source)
+                  if m.startswith(prefixes)}
+    unknown = sorted(referenced - declared - set(UNDECLARED_CONTROLS))
+    assert not unknown, (
+        f"StatusForm.pas uses these control names but StatusForm.dfm "
+        f"does not declare them: {unknown}. Add the control to the .dfm, "
+        f"fix the spelling, or record it in UNDECLARED_CONTROLS with the "
+        f"reason.")
+
+
+def test_the_undeclared_control_list_does_not_go_stale():
+    """An entry that is now declared hides the next real one."""
+    declared = _declared_controls()
+    resolved = sorted(name for name in UNDECLARED_CONTROLS
+                      if name in declared)
+    assert not resolved, (
+        f"these are now declared in the .dfm and should leave "
+        f"UNDECLARED_CONTROLS: {resolved}")
+
+
 def test_disk_pas_files_are_in_build_or_excluded():
     """Every .pas file on disk is either in build.py FILES or in the
     known exception sets (PRJSCR_ONLY for IDE-only, EXCLUDED for

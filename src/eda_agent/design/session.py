@@ -1,17 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
-"""Design session journal — the autonomy-harness backbone (roadmap 1.4).
+"""Design session journal: the autonomy-harness backbone (roadmap 1.4).
 
 An autonomous spec-to-board run spans many tool calls and often outlives a
 single MCP client context. The journal is the durable memory that lets any
-client — after a context compaction, a restart, or a model switch — pick up
+client, after a context compaction, a restart, or a model switch, pick up
 exactly where the last one stopped, and lets the (forthcoming) state machine
 decide the next action from recorded fact rather than chat history.
 
 Design: an append-only JSONL file per session. Every event is one line, so a
 crash mid-write loses at most the last record and never corrupts earlier
 history. Current state is *derived* by replaying events, never stored
-mutably — the log is the single source of truth. This module is pure Python
+mutably: the log is the single source of truth. This module is pure Python
 and Altium-agnostic; the MCP tool layer wraps it as
 ``design_session_*`` tools.
 

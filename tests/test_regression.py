@@ -28,6 +28,7 @@ from tests.altium_simulator import (
     MockComponent,
     _escape_json_string,
 )
+from tests.conftest import wait_until
 from eda_agent.bridge.altium_bridge import (
     AltiumBridge,
     CommandRequest,
@@ -47,11 +48,23 @@ from eda_agent.config import AltiumConfig, configure
 
 @pytest.fixture(autouse=True)
 def _event_loop():
-    """Ensure there is an event loop for async tests."""
-    try:
-        asyncio.get_event_loop()
-    except RuntimeError:
-        asyncio.set_event_loop(asyncio.new_event_loop())
+    """Give each test a fresh event loop, and close it afterwards.
+
+    Do NOT probe with ``asyncio.get_event_loop()``: since 3.12 that
+    CREATES a loop when none is set (with a DeprecationWarning) instead
+    of raising, so a try/except RuntimeError around it never fires and
+    the loop it just made is never closed. That loop is then collected
+    at interpreter shutdown, where __del__ closes its self-pipe socket
+    after Windows has already run WSACleanup, printing an ignored
+    "OSError: [WinError 10093]" at the end of every full-suite run.
+
+    Owning the loop outright is both deterministic and quieter.
+    """
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    yield
+    loop.close()
+    asyncio.set_event_loop(None)
 
 
 # =========================================================================
@@ -236,8 +249,8 @@ class TestEmptyRequestCleanup:
     def test_empty_request_removed(self, altium_sim):
         request_path = altium_sim.workspace_dir / "request_emptytestone.json"
         request_path.write_text("", encoding="utf-8")
-        time.sleep(0.1)
-        assert not request_path.exists(), "Empty request file must be deleted"
+        wait_until(lambda: not request_path.exists(),
+                   message="Empty request file must be deleted")
 
 
 # =========================================================================
@@ -351,8 +364,8 @@ class TestRequestDeletedBeforeValidation:
             "params": {},
         }
         request_path.write_text(json.dumps(bad_request), encoding="utf-8")
-        time.sleep(0.15)
-        assert not request_path.exists()
+        wait_until(lambda: not request_path.exists(),
+                   message="an invalid request must still be removed")
 
 
 # =========================================================================
@@ -545,6 +558,26 @@ class TestConcurrentCallsBothComplete:
         results = {}
         errors = {}
 
+        # This failed intermittently for a long time -- one thread of
+        # four, roughly twice in ten full-suite runs -- and was blamed
+        # in turn on leaked threads, CPU starvation, neighbouring tests
+        # and host I/O latency. All four were wrong, and raising the
+        # timeout to ride it out did not help because it was never a
+        # latency problem.
+        #
+        # The cause: this simulator wrote responses via a .tmp file and
+        # a rename, while the bridge swept "response_*.json.tmp"
+        # unconditionally. A concurrent caller's sweep could unlink
+        # another's temp file between the write and the rename, and that
+        # caller then polled a response that no longer existed. Real
+        # Altium writes responses directly (Main.pas WriteResponseFile),
+        # so the simulator was more atomic than the thing it simulates
+        # and invented the race by itself.
+        #
+        # Reproduced at 5 failures in 60 runs, then 0 in 60 after the
+        # simulator was made to match Pascal and the sweep was
+        # age-filtered. The original 5s bound is kept: it was never the
+        # problem, and a short bound surfaces a real hang quickly.
         def call(tag):
             try:
                 results[tag] = e2e_bridge.send_command(
@@ -559,7 +592,17 @@ class TestConcurrentCallsBothComplete:
         for t in threads:
             t.join(timeout=15)
 
-        assert not errors, f"Concurrent send_command failed for some threads: {errors}"
+        # Report what the SIMULATOR hit, not just what the caller saw.
+        # A timeout on its own says nothing: the dispatcher thread dying
+        # on an unhandled exception and the machine being slow look
+        # identical from here, and this failed twice without either
+        # being distinguishable. altium_sim.errors makes the difference
+        # visible the next time it happens.
+        assert not errors, (
+            f"Concurrent send_command failed for some threads: {errors}\n"
+            f"simulator errors: {altium_sim.errors or 'none recorded'}\n"
+            f"simulator thread alive: "
+            f"{altium_sim._thread.is_alive() if altium_sim._thread else None}")
         assert len(results) == 4, "All four concurrent callers should receive a response"
         for tag, result in results.items():
             assert result is not None, f"Thread {tag} got None"
@@ -571,3 +614,105 @@ class TestConcurrentCallsBothComplete:
             "AltiumBridge should not expose _ipc_lock, per-request files "
             "make the lock unnecessary."
         )
+
+
+class TestIpcWriteAtomicityIsDeliberatelyAsymmetric:
+    """The two directions of the IPC use DIFFERENT write strategies.
+
+    Requests are written atomically (stage to ``.json.tmp``, rename);
+    responses are written directly. That looks like an inconsistency
+    worth tidying, and tidying it either way reintroduces a real bug:
+
+      * Make responses atomic and the bridge's sweep of stale
+        ``response_*.json.tmp`` can unlink one mid-flight, destroying a
+        concurrent caller's reply. The simulator did exactly this and
+        produced an intermittent failure that took five wrong diagnoses
+        to pin down.
+      * Make requests direct and Pascal's Reset() collides with Python's
+        still-open write handle, which surfaces as a sharing-violation
+        modal in Altium -- an uncatchable dialog, not an exception.
+
+    The asymmetry exists because each side is constrained by the tool at
+    the other end: Python can rename reliably, DelphiScript's RenameFile
+    could not (see Main.pas WriteResponseFile), and DelphiScript's reader
+    cannot tolerate a half-written file while Python's poller can retry.
+    """
+
+    def test_requests_are_staged_then_renamed(self, tmp_path, monkeypatch):
+        """A request must never be visible under its final name partial.
+
+        Checked by OBSERVING the write, not by reading the source: this
+        module drops substring assertions on principle, since a passing
+        grep proves nothing about runtime behaviour and any comment
+        defeats it. Here the promotion itself is recorded -- if the
+        implementation ever writes the final path directly, no rename
+        happens and this fails.
+        """
+        from pathlib import Path as _Path
+
+        from eda_agent.bridge.altium_bridge import CommandRequest
+
+        renames: list[tuple[str, str]] = []
+        real_replace = _Path.replace
+
+        def spy(self, target):
+            renames.append((self.name, _Path(target).name))
+            return real_replace(self, target)
+
+        monkeypatch.setattr(_Path, "replace", spy)
+
+        bridge = _bare_bridge_for(tmp_path)
+        request = CommandRequest(command="application.ping", params={})
+        bridge._publish_request(request)
+
+        final = f"request_{request.id}.json"
+        assert any(dst == final for _, dst in renames), (
+            f"the request was not promoted by rename ({renames}); Pascal's "
+            f"Reset() will collide with Python's open write handle and "
+            f"raise an uncatchable modal in Altium")
+        staged = [src for src, dst in renames if dst == final]
+        assert all(s.endswith(".tmp") for s in staged), (
+            f"the request was staged under {staged}, which Pascal's "
+            f"request_*.json glob would pick up half-written")
+        assert (tmp_path / final).exists()
+        assert not list(tmp_path.glob("request_*.json.tmp"))
+
+    def test_the_response_sweep_never_deletes_a_fresh_temp_file(self,
+                                                               tmp_path):
+        """Age-filtered, so an in-flight temp file is left alone.
+
+        Deleting one between a writer's write and its rename destroys
+        that caller's response and leaves it polling until timeout.
+        """
+        from eda_agent.bridge.altium_bridge import AltiumBridge
+
+        bridge = _bare_bridge_for(tmp_path)
+        fresh = tmp_path / "response_deadbeef.json.tmp"
+        fresh.write_text("{}", encoding="utf-8")
+        stale = tmp_path / "response_00000000.json.tmp"
+        stale.write_text("{}", encoding="utf-8")
+        import os
+        import time as _time
+        old = _time.time() - 3600
+        os.utime(stale, (old, old))
+
+        AltiumBridge._sweep_orphan_responses(bridge)
+
+        assert fresh.exists(), "the sweep deleted an in-flight temp file"
+        assert not stale.exists(), "the sweep left genuine debris behind"
+
+
+def _bare_bridge_for(workspace):
+    """A bridge whose config points at ``workspace``, nothing started."""
+    from unittest.mock import patch
+
+    from eda_agent.bridge.altium_bridge import AltiumBridge
+    from eda_agent.config import AltiumConfig, MCPRuntimeConfig
+
+    cfg = AltiumConfig(
+        workspace_dir=workspace,
+        runtime=MCPRuntimeConfig(py_poll_interval_seconds=0.01,
+                                 py_poll_timeout_seconds=5.0),
+    )
+    with patch("eda_agent.bridge.altium_bridge.get_config", return_value=cfg):
+        return AltiumBridge()

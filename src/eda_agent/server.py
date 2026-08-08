@@ -11,7 +11,9 @@ from pathlib import Path
 from typing import Optional
 from mcp.server.fastmcp import FastMCP
 
-from .tools import register_backend, DEFAULT_BACKEND
+from .tools import (
+    DEFAULT_BACKEND, DEFAULT_TOOLSET, TOOLSETS, register_backend,
+)
 from .config import get_config
 
 logger = logging.getLogger("eda_agent")
@@ -106,13 +108,19 @@ def setup_logging() -> None:
 # are unaffected.
 ACTIVE_BACKEND = os.environ.get("EDA_AGENT_BACKEND", DEFAULT_BACKEND)
 
+# Some MCP clients cap tool count or stall serializing hundreds of schemas
+# at startup. EDA_AGENT_TOOLSET=minimal advertises only tool_catalog and
+# tool_invoke while keeping every other tool reachable through them. The
+# default stays "full" so existing installs are unaffected.
+ACTIVE_TOOLSET = os.environ.get("EDA_AGENT_TOOLSET", DEFAULT_TOOLSET)
+
 # Create global FastMCP instance, named for the backend so a client that
 # lists several eda-agent servers can tell them apart.
 mcp = FastMCP(f"eda-agent-{ACTIVE_BACKEND.strip().lower() or DEFAULT_BACKEND}")
 
 # Register only the selected backend's tools. Returns the normalised name
 # (an unrecognised value falls back to the default).
-ACTIVE_BACKEND = register_backend(mcp, ACTIVE_BACKEND)
+ACTIVE_BACKEND = register_backend(mcp, ACTIVE_BACKEND, ACTIVE_TOOLSET)
 
 
 def _probe_port_owner(host: str, port: int) -> Optional[int]:
@@ -447,6 +455,14 @@ def main() -> int:
             "Run with no arguments to start the MCP server on stdio."
         ),
     )
+    # The bug-report template and CONTRIBUTING both ask reporters for
+    # `eda-agent --version`. Without this the flag was an argparse error,
+    # so the first thing a bug reporter was told to run did not work.
+    from . import __version__ as _pkg_version
+    parser.add_argument(
+        "--version", action="version",
+        version=f"eda-agent {_pkg_version}",
+    )
     # Top-level flag so `eda-agent --no-dashboard` works without the
     # `serve` subcommand. Important: most MCP clients invoke the binary
     # with NO arguments, so this needs to attach at the top level.
@@ -471,6 +487,14 @@ def main() -> int:
               "surface: 'altium' is the full Altium suite, 'kicad' the "
               "KiCad-native tools, 'both' the union. Equivalent to setting "
               "EDA_AGENT_BACKEND."),
+    )
+    parser.add_argument(
+        "--toolset", choices=TOOLSETS, default=None,
+        help=("How many tools to advertise (default: full). 'minimal' "
+              "exposes only tool_catalog and tool_invoke, keeping every "
+              "other tool reachable through them, for MCP clients that "
+              "limit tool count or are slow to load hundreds of schemas. "
+              "Equivalent to setting EDA_AGENT_TOOLSET."),
     )
     subparsers = parser.add_subparsers(dest="command", metavar="COMMAND")
 
@@ -651,10 +675,19 @@ def main() -> int:
     # reload registers the right tool surface. MCP clients pass the backend via
     # env, not this flag, so their startup never re-execs. A sentinel prevents
     # an exec loop if the child somehow disagrees.
+    # --toolset needs the same treatment for the same reason: the surface
+    # is chosen at import, so changing it after parsing is too late.
     requested = getattr(args, "backend", None)
-    if (requested and requested != ACTIVE_BACKEND
+    requested_toolset = getattr(args, "toolset", None)
+    needs_backend = bool(requested) and requested != ACTIVE_BACKEND
+    needs_toolset = (bool(requested_toolset)
+                     and requested_toolset != ACTIVE_TOOLSET)
+    if ((needs_backend or needs_toolset)
             and not os.environ.get("_EDA_AGENT_BACKEND_REEXEC")):
-        os.environ["EDA_AGENT_BACKEND"] = requested
+        if needs_backend:
+            os.environ["EDA_AGENT_BACKEND"] = requested
+        if needs_toolset:
+            os.environ["EDA_AGENT_TOOLSET"] = requested_toolset
         os.environ["_EDA_AGENT_BACKEND_REEXEC"] = "1"
         os.execv(sys.executable,
                  [sys.executable, "-m", "eda_agent.server", *sys.argv[1:]])

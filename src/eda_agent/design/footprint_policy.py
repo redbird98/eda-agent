@@ -9,17 +9,17 @@ creeps in as a library grows across authors and years, and it is exactly the
 kind of thing a machine should catch.
 
 This module is the pure-Python analysis core. It takes a list of parsed
-footprints (geometry already extracted from Altium — see the schema below)
+footprints (geometry already extracted from Altium: see the schema below)
 and, for each **policy dimension**, does one of two things:
 
 - **Inferred mode (default):** learns the library's OWN dominant convention
   by majority vote across footprints, then flags every footprint that
-  deviates. This is deliberately library-agnostic — it never hard-codes
+  deviates. This is deliberately library-agnostic: it never hard-codes
   "silk must be on Top Overlay" or "assembly is Mechanical 13", because those
   differ per house style. It reports *inconsistency*, which is the real
   defect in a mature library.
 - **Explicit mode:** when a ``policy`` dict pins a dimension to a required
-  value, footprints are checked against that instead of the inferred norm —
+  value, footprints are checked against that instead of the inferred norm,
   for enforcing a documented standard.
 
 The live bridge / tool layer supplies the footprint geometry; this module is
@@ -52,7 +52,7 @@ INFO = "info"
 
 # Layer-name substrings that classify a primitive's role, case-folded. These
 # only *classify* a primitive by the layer it sits on; they never assert which
-# layer is "correct" — that is inferred per library.
+# layer is "correct": that is inferred per library.
 _SILK_HINTS = ("overlay", "silk")
 _ASSEMBLY_HINTS = ("assembly", "assy", "fab")
 _COURTYARD_HINTS = ("courtyard", "court", "place bound", "placement")
@@ -148,7 +148,7 @@ def _check_duplicate_designators(footprints, policy):
         if n > 1:
             findings.append(_finding(
                 fp.get("name", "?"), "duplicate_designator", ERROR,
-                f"{n} .Designator strings — a footprint must have exactly one; "
+                f"{n} .Designator strings: a footprint must have exactly one; "
                 f"the extras render on top of each other",
                 expected=1, actual=n))
     return None, findings
@@ -159,7 +159,7 @@ def _role_layers(fp: dict, role_name: str, hints) -> set:
 
     Considers primitives and FREE texts only (the designator/comment labels
     have their own dimension). An item is attributed to the role if it carries
-    an explicit ``role`` (from Altium's mechanical-layer kind — the reliable
+    an explicit ``role`` (from Altium's mechanical-layer kind: the reliable
     signal, since a layer named "Mechanical 13" gives no hint), else by a
     name-substring fallback.
     """
@@ -214,9 +214,9 @@ def _check_layer_role(footprints, role_name, hints, policy):
 
     Two distinct defects share this dimension, and they need different fixes:
 
-    * MISPLACED — the role's graphics are only on the wrong layer. Moving them
+    * MISPLACED: the role's graphics are only on the wrong layer. Moving them
       to the convention layer is a safe, mechanical correction.
-    * STRAY — the footprint already has graphics on the convention layer AND
+    * STRAY: the footprint already has graphics on the convention layer AND
       extra graphics elsewhere. Moving the strays would stack duplicate
       geometry on top of the good graphics, so this needs a human. It is
       tagged ``stray=True`` and the fix planner keeps it manual.
@@ -237,7 +237,7 @@ def _check_layer_role(footprints, role_name, hints, policy):
         stray = inferred in layers
         if stray:
             message = (f"{role_name} is on {inferred!r} but ALSO on "
-                       f"{sorted(outliers)} — stray graphics, review before "
+                       f"{sorted(outliers)}: stray graphics, review before "
                        f"moving (a move would duplicate the existing "
                        f"{role_name})")
         else:
@@ -265,7 +265,7 @@ def _check_presence(footprints, dimension, predicate, policy):
             if not ok:
                 findings.append(_finding(
                     name, dimension, WARNING,
-                    f"missing {dimension.replace('_', ' ')} — the library "
+                    f"missing {dimension.replace('_', ' ')}: the library "
                     f"applies it to most footprints",
                     expected=True, actual=False))
     return require, findings
@@ -290,7 +290,7 @@ def _pad_scheme(name: str) -> str:
 # A ball array dominates its footprint: a BGA's pads are essentially all grid
 # cells, spread over several row letters. Below these thresholds, grid-SHAPED
 # pads among numeric ones are mounting/shield/test hardware (M1, S2, D3), not a
-# numbering scheme — treating them as one produced false "mixed scheme" reports
+# numbering scheme: treating them as one produced false "mixed scheme" reports
 # on ordinary module and connector footprints.
 _GRID_MIN_ROWS = 2
 
@@ -317,7 +317,7 @@ def _pad_schemes_of(fp: dict) -> set:
 def _check_pad_naming(footprints, policy):
     """A footprint's electrical pads should use ONE numbering scheme; a mix of
     numeric (1,2) and grid (A1,B2) inside one part is almost always an error.
-    'named' pads (mounting holes, shields, standoffs) are exempt — they
+    'named' pads (mounting holes, shields, standoffs) are exempt: they
     legitimately mix, and a grid-SHAPED name like ``M2`` on an otherwise
     numeric part is mounting hardware, not a ball array.
     """
@@ -327,7 +327,7 @@ def _check_pad_naming(footprints, policy):
         if len(electrical) > 1:
             findings.append(_finding(
                 fp.get("name", "?"), "pad_naming", WARNING,
-                f"pads mix numbering schemes {sorted(electrical)} — a single "
+                f"pads mix numbering schemes {sorted(electrical)}: a single "
                 f"footprint should use one",
                 expected="one scheme", actual=sorted(electrical)))
     return None, findings
@@ -346,7 +346,7 @@ def _check_pad_drill(footprints, policy):
                 findings.append(_finding(
                     fp.get("name", "?"), "pad_drill", WARNING,
                     f"pad {p.get('name')!r} has a {hole} drill but sits on "
-                    f"layer {p.get('layer')!r} — a drilled pad must be "
+                    f"layer {p.get('layer')!r}: a drilled pad must be "
                     f"multi-layer (through-hole)",
                     expected="multi", actual=p.get("layer"),
                     target=p.get("name")))
@@ -389,7 +389,7 @@ def _check_mechanical_consistency(footprints, policy):
         for miss in sorted(expected - layers):
             findings.append(_finding(
                 name, "mechanical_layer", WARNING,
-                f"missing mechanical layer {miss!r} — {usage[miss]}/{n} "
+                f"missing mechanical layer {miss!r}: {usage[miss]}/{n} "
                 f"footprints use it (likely the assembly / fab layer)",
                 expected=miss, actual=None, target=miss))
         for lyr in sorted(layers):
@@ -397,7 +397,7 @@ def _check_mechanical_consistency(footprints, policy):
                 findings.append(_finding(
                     name, "mechanical_layer", WARNING,
                     f"uses mechanical layer {lyr!r} that no other footprint "
-                    f"uses — likely graphics on the wrong layer",
+                    f"uses: likely graphics on the wrong layer",
                     expected=None, actual=lyr, target=lyr))
     return sorted(expected), findings
 
@@ -431,7 +431,7 @@ def _designator_offsets(footprints) -> list:
 
 def _check_designator_centered(footprints, policy):
     """Designators should sit where THIS library habitually puts them relative
-    to the footprint's average PAD CENTRE — not at the library origin, which is
+    to the footprint's average PAD CENTRE, not at the library origin, which is
     arbitrary and often far from the body.
 
     The tolerance is not a hard-coded number. It is inferred from the library's
@@ -445,7 +445,7 @@ def _check_designator_centered(footprints, policy):
     the convention and only genuine strays are flagged. Both are correct
     behaviour for "what does the majority of this library do".
 
-    ``policy["designator_center_tol"]`` (mils) overrides the inference — user
+    ``policy["designator_center_tol"]`` (mils) overrides the inference: user
     input shapes the policy, it does not have to accept it.
 
     Footprints that expose no designator location or no pad centre are skipped,
@@ -490,7 +490,7 @@ def _anchor_for_center(designator: dict, target: tuple) -> tuple:
     ``target``.
 
     ``XLocation`` is a corner of the text, not its middle, so assigning the pad
-    centre to it leaves the string hanging half its width off the part — right
+    centre to it leaves the string hanging half its width off the part: right
     outside the body on a small passive. The script reports both the anchor and
     the bbox centre; the difference between them is the constant offset:
 
@@ -575,7 +575,7 @@ def plan_designator_repairs(
 
         if _designator_count(fp) > 1:
             skipped.append({"footprint": name,
-                            "reason": "has duplicate .Designator strings — "
+                            "reason": "has duplicate .Designator strings: "
                                       "remove the extras before repairing"})
             continue
 
@@ -721,7 +721,7 @@ def audit_footprint_library(
 
     # Per-footprint rollup so a caller can scan the whole library at a glance
     # (which footprints are clean vs. how many issues each has), most-flagged
-    # first — the "go easily through every footprint" view.
+    # first: the "go easily through every footprint" view.
     counts: dict[str, int] = {}
     for f in findings:
         fp_name = f.get("footprint") or "?"
@@ -770,9 +770,9 @@ def plan_footprint_fixes(report: dict[str, Any]) -> list[dict[str, Any]]:
     """Turn an audit report's findings into concrete, ordered fix actions.
 
     Each action is ``{footprint, dimension, action, auto, params,
-    description}``. ``auto=True`` actions are mechanical — move the graphics
+    description}``. ``auto=True`` actions are mechanical: move the graphics
     to the convention layer, set the designator height, make a drilled pad
-    multi-layer — and can be applied without judgment. ``auto=False`` actions
+    multi-layer, and can be applied without judgment. ``auto=False`` actions
     need new geometry or a decision (add a courtyard/3D body/pin-1 marker,
     pick a pad-numbering scheme) and are surfaced for a human / the LLM to
     resolve. Auto fixes are ordered first so a caller can apply the safe batch

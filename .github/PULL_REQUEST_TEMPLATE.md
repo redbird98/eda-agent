@@ -26,7 +26,7 @@ Closes #
 
 - [ ] `pytest` passes locally
 - [ ] Pascal cross-validation passes (if Pascal touched)
-- [ ] Manually exercised in Altium (if behaviour requires it) — describe
+- [ ] Manually exercised in Altium (if behaviour requires it): describe
       what you ran below
 
 Notes:

@@ -245,7 +245,7 @@ def register_design_tools(mcp) -> None:
             return {"error": "no design sessions found; start one with design_session_start"}
         state = journal.state()
         if state.open_question:
-            guidance = f"BLOCKED — ask the user: {state.open_question}"
+            guidance = f"BLOCKED: ask the user: {state.open_question}"
         elif state.complete:
             guidance = "All 13 pipeline stages complete."
         else:
@@ -267,7 +267,7 @@ def register_design_tools(mcp) -> None:
 
         Returns a dict with ``status`` (proceed | retry | blocked | complete),
         the ``stage``, its ``goal``, ``suggested_tools`` (exact tool names),
-        the ``exit_gate`` that marks it done, and — on ``blocked`` — the
+        the ``exit_gate`` that marks it done, and, on ``blocked``, the
         ``open_question`` to put to the user. Bounded retries: a stage that
         fails repeatedly escalates to ``blocked`` instead of looping forever.
         """
@@ -1164,40 +1164,40 @@ def register_design_tools(mcp) -> None:
 
         Args:
             kind: Which calculation:
-              - ``"nearest"`` — snap ``value`` to the nearest preferred value.
-              - ``"feedback_divider"`` — regulator FB divider
+              - ``"nearest"``: snap ``value`` to the nearest preferred value.
+              - ``"feedback_divider"``: regulator FB divider
                 ``v_out = v_ref*(1+Rtop/Rbot)``; needs ``v_out``, ``v_ref``;
                 optional ``r_bottom_ohms`` to fix the low side.
-              - ``"resistor_divider"`` — unloaded divider
+              - ``"resistor_divider"``: unloaded divider
                 ``v_out = v_in*Rb/(Rt+Rb)``; needs ``v_in``, ``v_out``.
-              - ``"led_resistor"`` — series resistor; needs ``v_supply``,
+              - ``"led_resistor"``: series resistor; needs ``v_supply``,
                 ``v_forward``, ``i_led_ma``.
-              - ``"rc_lowpass"`` — first-order RC; needs ``f_cutoff_hz`` and
+              - ``"rc_lowpass"``: first-order RC; needs ``f_cutoff_hz`` and
                 exactly one of ``r_ohms`` / ``c_farads``.
-              - ``"crystal_load_caps"`` — symmetric crystal load caps; needs
+              - ``"crystal_load_caps"``: symmetric crystal load caps; needs
                 ``c_load_pf`` (datasheet CL), optional ``c_stray_pf`` (default
                 5 pF per leg).
-              - ``"i2c_pullup"`` — bus pull-up window (NXP UM10204); needs
+              - ``"i2c_pullup"``: bus pull-up window (NXP UM10204); needs
                 ``v_bus``, ``c_bus_pf``, ``t_rise_ns`` (1000 standard / 300
                 fast / 120 fast-plus).
-              - ``"divider_tolerance"`` — worst-case output window of an
+              - ``"divider_tolerance"``: worst-case output window of an
                 unloaded divider; needs ``v_in``, ``r_top_ohms``,
                 ``r_bottom_ohms``, optional ``tol_pct`` (default 1).
-              - ``"opamp_gain"`` — Rf/Rin (or Rg) for a gain stage; needs
+              - ``"opamp_gain"``: Rf/Rin (or Rg) for a gain stage; needs
                 ``gain`` and ``config`` (``inverting`` / ``non_inverting``).
-              - ``"buck_inductor"`` — buck inductor; needs ``v_in``, ``v_out``,
+              - ``"buck_inductor"``: buck inductor; needs ``v_in``, ``v_out``,
                 ``i_out_a``, ``f_sw_khz``, optional ``ripple_pct`` (default 30).
-              - ``"capacitor_energy"`` — stored energy; needs ``c_farads``,
+              - ``"capacitor_energy"``: stored energy; needs ``c_farads``,
                 ``voltage``.
-              - ``"holdup_cap"`` — bulk hold-up capacitance; needs ``i_load_a``,
+              - ``"holdup_cap"``: bulk hold-up capacitance; needs ``i_load_a``,
                 ``t_s`` (hold-up time), ``v_drop`` (allowed sag).
-              - ``"discharge_resistor"`` — bleeder; needs ``c_farads``,
+              - ``"discharge_resistor"``: bleeder; needs ``c_farads``,
                 ``v_initial``, ``v_final``, ``t_s`` (discharge time).
-              - ``"junction_temp"`` — Tj = Ta + P*theta_JA; needs ``power_w``,
+              - ``"junction_temp"``: Tj = Ta + P*theta_JA; needs ``power_w``,
                 ``theta_ja``, optional ``t_ambient`` (default 25).
-              - ``"max_power"`` — thermal derating; needs ``tj_max``,
+              - ``"max_power"``: thermal derating; needs ``tj_max``,
                 ``theta_ja``, optional ``t_ambient``.
-              - ``"required_theta_ja"`` — package/heatsink sizing; needs
+              - ``"required_theta_ja"``: package/heatsink sizing; needs
                 ``power_w``, ``tj_max``, optional ``t_ambient``.
             series: E-series name (E6/E12/E24/E48/E96). Default E96 for
                 dividers/precision, pass E24 for jellybean R/C.
@@ -1493,7 +1493,7 @@ def register_design_tools(mcp) -> None:
 
     @mcp.tool()
     async def design_review_file(path: str) -> dict[str, Any]:
-        """Offline FALLBACK review of a .SchDoc/.PrjPcb — OFF by default.
+        """Offline FALLBACK review of a .SchDoc/.PrjPcb: OFF by default.
 
         This is NOT the preferred way to review a design. It parses the
         Altium file directly (OLE reader) with no running Altium and no
@@ -1518,7 +1518,7 @@ def register_design_tools(mcp) -> None:
                 its sheets).
 
         Returns the review report ``{file, component_count, findings,
-        summary, ...}`` — or ``{"error": ...}`` if disabled or unreadable.
+        summary, ...}``: or ``{"error": ...}`` if disabled or unreadable.
         """
         from ..fileio.review import (
             HEADLESS_DISABLED_MESSAGE,
@@ -1534,7 +1534,7 @@ def register_design_tools(mcp) -> None:
 
     @mcp.tool()
     async def design_solve_netlist_file(path: str) -> dict[str, Any]:
-        """Reconstruct a .SchDoc's netlist geometrically — OFF by default.
+        """Reconstruct a .SchDoc's netlist geometrically: OFF by default.
 
         Offline FALLBACK, same opt-in as ``design_review_file``. Parses the
         file (no Altium, no license) and rebuilds the compiled netlist from
@@ -1543,7 +1543,7 @@ def register_design_tools(mcp) -> None:
         pins, ``net_short`` rail shorts).
 
         Prefer the live-Altium path (``proj_get_nets`` / ``proj_run_erc``)
-        whenever a session is available — Altium's own compiler is ground
+        whenever a session is available: Altium's own compiler is ground
         truth. Use this only when Altium can't be opened.
 
         Validated envelope: wire + power port + junction + net-label
@@ -1553,7 +1553,7 @@ def register_design_tools(mcp) -> None:
 
         Enable with ``EDA_AGENT_HEADLESS_REVIEW=1``.
 
-        Returns ``{file, net_count, nets, pin_count, findings}`` — or
+        Returns ``{file, net_count, nets, pin_count, findings}``: or
         ``{"error": ...}`` if disabled or unreadable.
         """
         from ..fileio.review import (
@@ -1579,11 +1579,11 @@ def register_design_tools(mcp) -> None:
 
     @mcp.tool()
     async def design_bom_file(path: str) -> dict[str, Any]:
-        """Consolidated BOM from a .SchDoc/.PrjPcb on disk — OFF by default.
+        """Consolidated BOM from a .SchDoc/.PrjPcb on disk: OFF by default.
 
         Offline FALLBACK, same opt-in as ``design_review_file``. Parses the
         Altium file directly (no Altium, no license) and groups components
-        into purchasable BOM lines — one per distinct ``(mpn, value,
+        into purchasable BOM lines, one per distinct ``(mpn, value,
         lib_reference)``, designators grouped and naturally sorted, quantity
         summed. A ``.PrjPcb`` aggregates all its sheets.
 
@@ -1595,7 +1595,7 @@ def register_design_tools(mcp) -> None:
 
         Returns ``{file, line_count, part_count, lines}`` where each line is
         ``{quantity, designators, mpn, manufacturer, value, lib_reference,
-        datasheet}`` — or ``{"error": ...}`` if disabled or unreadable.
+        datasheet}``: or ``{"error": ...}`` if disabled or unreadable.
         """
         from ..fileio.review import (
             HEADLESS_DISABLED_MESSAGE,
@@ -2000,7 +2000,7 @@ def register_design_tools(mcp) -> None:
         """Capture your placement edits as training data.
 
         Workflow:
-        1. Run ``design_execute_plan`` (canvas path) — it writes a
+        1. Run ``design_execute_plan`` (canvas path): it writes a
            ``<project>.canvas.json`` snapshot alongside the .PrjPcb.
         2. Open the schematic in Altium, drag components to taste, save.
         3. Call this tool. It reads the snapshot + current Altium
@@ -2048,7 +2048,7 @@ def register_design_tools(mcp) -> None:
             output_svg_path: Where to write the SVG. Default:
                 ``<repo>/.symbol_cache/preview.svg``.
             placement_hints: Optional ``{refdes: {"x", "y", "rotation"}}``
-                partial anchors, same as ``design_execute_plan`` — hinted
+                partial anchors, same as ``design_execute_plan``: hinted
                 refdes pin to the supplied position, the rest run through
                 algorithmic placement. Iterate preview→hints→preview to
                 refine a layout before a full emit.

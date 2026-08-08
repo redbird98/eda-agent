@@ -3,7 +3,7 @@
 """Tests for the headless .SchDoc reader (roadmap V1).
 
 Runs against the real buck-converter fixture (tests/integration/fixtures/
-main.SchDoc) — no Altium, no license — so this parser is a CI-gated,
+main.SchDoc), no Altium, no license, so this parser is a CI-gated,
 license-free way to read an Altium schematic.
 """
 
@@ -49,7 +49,7 @@ def test_extracts_all_components(components):
 def test_designator_to_part_mapping_is_correct(components):
     by_desig = {c["designator"]: c for c in components}
     # Verified against the actual board: U1 is the buck controller, D1 the
-    # catch diode, R1 a resistor, J1 a connector — NOT swapped.
+    # catch diode, R1 a resistor, J1 a connector, NOT swapped.
     assert by_desig["U1"]["lib_reference"] == "TPS54331D"
     assert by_desig["D1"]["lib_reference"] == "SS14"
     assert by_desig["R1"]["lib_reference"].startswith("RES ")
@@ -83,7 +83,7 @@ def test_altium_value_reference_resolved(components):
 
 
 def test_every_component_has_an_mpn(components):
-    # This fixture is a fully-specified board — a headless BOM check would
+    # This fixture is a fully-specified board: a headless BOM check would
     # expect every part to carry a manufacturer part number.
     missing = [c["designator"] for c in components if not c["mpn"]]
     assert not missing, f"components missing MPN: {missing}"

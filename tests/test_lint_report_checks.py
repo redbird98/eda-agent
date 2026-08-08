@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
-"""design_lint_report(checks=[...]) filter — folds the audit singletons (2.2)."""
+"""design_lint_report(checks=[...]) filter: folds the audit singletons (2.2)."""
 
 from __future__ import annotations
 

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
-"""Project checkpoint / restore — the session safety net (roadmap 1.1).
+"""Project checkpoint / restore: the session safety net (roadmap 1.1).
 
 An AI session can issue rapid, irreversible edits to a live Altium design.
 This module snapshots the project directory so any session is revertible in
@@ -29,6 +29,7 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
+import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -63,7 +64,7 @@ class CheckpointInfo:
     files: dict = field(default_factory=dict)  # relpath -> {hash,size}
     # Files present at checkpoint time but too large to snapshot (over
     # max_file_bytes). Recorded so a prune_added restore treats them as
-    # "known, intentionally not stored" and does NOT delete them — otherwise
+    # "known, intentionally not stored" and does NOT delete them, otherwise
     # an oversize .PcbLib / 3D model would be silently lost on revert.
     skipped_large: list = field(default_factory=list)  # relpaths
 
@@ -243,16 +244,38 @@ class CheckpointStore:
         self._gc_blobs()
         return removed_ids
 
+    #: A blob younger than this is never collected. ``create`` promotes
+    #: each blob to its final name BEFORE writing the manifest that
+    #: references it, so between those two steps the blob is a real file
+    #: that no manifest mentions -- indistinguishable from garbage. A
+    #: collector running in that window deletes it and the manifest then
+    #: points at nothing, which surfaces only later as a failed restore.
+    #:
+    #: ``prune`` has no caller in the tool surface today, so the window
+    #: is not currently reachable; this is here so wiring one up later
+    #: does not quietly introduce data loss. The same shape of bug was
+    #: live in the bridge's response sweep, where it destroyed a
+    #: concurrent caller's reply.
+    _GC_MIN_AGE_SECONDS = 60.0
+
     def _gc_blobs(self) -> int:
         """Delete blobs no surviving manifest references. Returns count."""
         referenced: set[str] = set()
         for c in self.list():
             referenced.update(m["hash"] for m in c.files.values())
+        cutoff = time.time() - self._GC_MIN_AGE_SECONDS
         removed = 0
         if self.blobs.is_dir():
             for blob in self.blobs.iterdir():
-                if blob.is_file() and not blob.name.endswith(".tmp") \
-                        and blob.name not in referenced:
+                if not blob.is_file() or blob.name.endswith(".tmp"):
+                    continue
+                if blob.name in referenced:
+                    continue
+                try:
+                    if blob.stat().st_mtime >= cutoff:
+                        continue  # may be mid-create; see _GC_MIN_AGE_SECONDS
                     blob.unlink()
-                    removed += 1
+                except OSError:
+                    continue
+                removed += 1
         return removed

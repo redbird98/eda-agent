@@ -50,13 +50,13 @@ these rules before producing a plan; they bound your choices.
 
    **(a) Power and ground = port glyphs.** Set `is_power=true` or
    `is_ground=true` (see rule 4). The executor places a power-port glyph
-   at every pin on the net — no wires, no labels.
+   at every pin on the net, no wires, no labels.
 
    **(b) Block-local nets = WIRES (default).** When every pin on a Net
    lives in the same functional block (regulator + its passives, amp +
    its gain network, RF front-end + matching, MCU + its decoupling,
    sensor + its filter, etc.), the executor draws actual wires from pin
-   to pin. Local sub-circuit topology MUST be visually traceable — a
+   to pin. Local sub-circuit topology MUST be visually traceable: a
    reader looking at the buck block should see the FB divider,
    compensation, bootstrap and LC output as ONE connected drawing, not
    a maze of name-matched label stubs. This is the default for any net
@@ -71,7 +71,7 @@ these rules before producing a plan; they bound your choices.
 
    **Common-sense override:** the priority order is (a) > (b) > (c).
    Within tier (b), a particular intra-block net MAY be promoted to a
-   label IF a wire would genuinely tangle the block — e.g. a
+   label IF a wire would genuinely tangle the block, e.g. a
    high-fanout local rail that touches every part in a 10-cap
    decoupling stack, or a control line that would have to weave between
    five other components to stay block-local. This is a deviation from
@@ -84,7 +84,7 @@ these rules before producing a plan; they bound your choices.
    (a)→(b)→(c) automatically; the planner's job is to assign each Part
    to a block and let the executor pick the representation.
 
-   Buses are just named nets, one per signal — the same tier rule
+   Buses are just named nets, one per signal: the same tier rule
    applies to each.
 
 4. **Power and ground are explicit Nets** with `is_power=true` or
@@ -166,7 +166,7 @@ these rules before producing a plan; they bound your choices.
     - component name / alias
 
     Allowed: USING parts from those libraries in placements, BOM,
-    emitted schematics — read-only consumption is fine. Forbidden: any
+    emitted schematics: read-only consumption is fine. Forbidden: any
     write that lands in the user's `.SchLib` file.
 
     Agent-owned libraries (created this session via
@@ -216,7 +216,7 @@ these rules before producing a plan; they bound your choices.
     `lib_add_symbol_rectangle`, `lib_add_symbol_lines`,
     `lib_add_symbol_arc`, `lib_add_symbol_polygon`) round every coord
     to the nearest 100 before sending to the bridge, so callers can
-    pass approximate values and trust the snap — but never deliberately
+    pass approximate values and trust the snap, but never deliberately
     pass off-grid values expecting them to land off-grid.
 
 16. **Hide non-essential parameters on agent-authored symbols.**
@@ -228,63 +228,74 @@ these rules before producing a plan; they bound your choices.
     new symbol the agent should set `IsHidden = true` on those
     parameters immediately after creation.
 
-17. **Symbol body fill: Altium default yellow.** New symbol bodies
-    (the bounding `eRectangle`) should use `AreaColor = 8454143`
-    (Altium's standard light-yellow body) with `IsSolid = true`.
-    Bare-outline bodies look like first-draft work and don't match
-    the rest of the user's library.
+17. **Symbol body fill: fill the block, not the glyph.** A FUNCTIONAL
+    BLOCK body (the bounding `eRectangle` of an IC or any multi-function
+    part) should use `AreaColor = 8454143` (Altium's standard
+    light-yellow body) with `IsSolid = true`. A bare outline there looks
+    like first-draft work and does not match the rest of the library.
+
+    A two-pin PASSIVE is the exception and stays UNFILLED
+    (`fill_color = -1`). Its rectangle is not a body enclosing pins, it
+    is the device glyph itself: the IEC resistor mark. Filling it draws
+    a different symbol, not a tidier one.
+
+    The split is measured, not assumed. Across the 222 KiCad libraries
+    installed on this machine, taking each symbol's largest rectangle as
+    its body: 94% of 6+ pin symbols fill it (n=7997), as do 91% of
+    3-to-5 pin symbols, while the canonical `Device` passives (R, C, L,
+    D, Fuse, and the _Small variants) are unfilled without exception.
 
 18. **IC schematic symbols: functional pin layout, NOT package order.**
     When authoring a schematic symbol for an IC via
     `lib_create_symbol` + `lib_add_pins`, NEVER lay the pins out in
     physical package order. Pins go ONLY on the LEFT and RIGHT sides
-    of the body — never top or bottom. Group by function:
+    of the body, never top or bottom. Group by function:
     - Inputs on the LEFT (pins pointing left):
       power inputs (VIN / VCC / V+), signal inputs (IN+ / IN- /
       VSENSE / FB), control inputs (EN / SS / SHDN / RESET).
     - Outputs on the RIGHT (pins pointing right):
       power outputs (PH / SW / VREG / VREF), signal outputs (OUT /
       COMP / drive), status outputs (PG / FAULT / NIRQ).
-    - Ground (GND / V-) on the LEFT or RIGHT — conventionally
+    - Ground (GND / V-) on the LEFT or RIGHT: conventionally
       bottom-LEFT (below the inputs) or bottom-RIGHT, never
       bottom-edge of the body.
     - Bidirectional / paired pins (BOOT-PH, OSC, REF, BST) on
       whichever side keeps the wiring natural for the typical
-      application — BOOT next to PH on the right makes the
+      application: BOOT next to PH on the right makes the
       bootstrap cap obvious; OSC pair on one side.
 
     The pin's package number goes into the `designator` field; the
     package pinout is for the PCB footprint, not the schematic. A
     sequential package-order symbol forces every reader to mentally
     re-route the schematic. For passives (2-3 pin parts), the rule
-    relaxes — there's only one or two sensible layouts. The rule
+    relaxes: there's only one or two sensible layouts. The rule
     applies to anything with 4+ pins.
 
-19. **Match the EXISTING schematic's styles — INSPECT first, never impose
+19. **Match the EXISTING schematic's styles: INSPECT first, never impose
     defaults.** Before adding ANY object (wire, net label, port, power
     port, text/note, junction, parameter, or a placed symbol) to a sheet
     that ALREADY has content, you MUST read the styles in use on that
     sheet and conform to them. A new object in a different font, colour,
     text size, or line width than its neighbours reads as bolted-on and
     is the #1 tell of machine-generated work. Concretely, read and match:
-    - **Fonts** — text height, face, bold/italic of existing designators,
+    - **Fonts**: text height, face, bold/italic of existing designators,
       net labels, and notes via `obj_get_font_spec` / `obj_get_font_id`
       (resolve the FontID an existing label uses; reuse THAT id, do not
       mint a new font).
-    - **Colours** — wire colour, net-label colour, text colour, and
+    - **Colours**: wire colour, net-label colour, text colour, and
       symbol body fill, read from existing objects with `obj_query`
       (don't hardcode a colour; sample what the sheet already uses).
-    - **Line widths / styles** — wire and bus width, junction size.
-    - **Parameter presentation** — visibility, justification, and offset
+    - **Line widths / styles**: wire and bus width, junction size.
+    - **Parameter presentation**: visibility, justification, and offset
       of Designator/Comment on already-placed components (match rule 16's
       defaults ONLY on a blank sheet; otherwise match what's there).
-    - **Sheet** — size, border/title-block template, and units via
+    - **Sheet**: size, border/title-block template, and units via
       `sch_get_sheet_parameters` + `obj_get_document_info`; new content
       stays on the same grid and within the same template.
     Use `lib_audit_styles` to surface the dominant style across a library
     or sheet when in doubt. Defaults (rule 16/17, Altium yellow body,
     standard font) apply ONLY to a genuinely BLANK new sheet with no
-    existing style to match — and then pick ONE consistent style and
+    existing style to match, and then pick ONE consistent style and
     reuse it for every object you add. When extending or editing a
     user's existing schematic, the existing style ALWAYS wins over the
     agent's defaults.
@@ -298,28 +309,28 @@ one design. They apply in every session.
    (rule 5), NEVER state a pin function, number, rating, package, polarity,
    or behaviour from symbol metadata / a distributor page / memory. Fetch
    and cite the manufacturer datasheet first, for any device, in any
-   context. Tool responses carry a `_datasheet_guidance` block — treat it
+   context. Tool responses carry a `_datasheet_guidance` block: treat it
    as a checklist, not an FYI.
 
 2. **SPICE models are vendor-only.** When setting up simulation, fetch the
    manufacturer-published `.mdl` / `.ckt` / `.lib` model. NEVER hand-write
-   or LLM-generate a SPICE model from datasheet reasoning — the poles/zeros
+   or LLM-generate a SPICE model from datasheet reasoning: the poles/zeros
    and process corners won't match silicon.
 
 3. **Inventory lookup is naming-agnostic.** Read the `design_snapshot_inventory`
    result semantically and pick parts by parametric match (value, package,
    rating). NEVER hard-code or regex against one library's `lib_ref` naming
-   layout — the planner is the matcher, not a string template.
+   layout: the planner is the matcher, not a string template.
 
 4. **Prefer bulk tools over looping.** `obj_batch_modify`, `pcb_move_components`,
    `sch_place_components`, `sch_place_wires`, `sch_set_components_parameters`,
    etc. do N operations in one IPC round-trip. Looping the singular variant
-   costs one LLM turn each — 10–100× slower wall-clock. Plan the whole set,
+   costs one LLM turn each: 10-100× slower wall-clock. Plan the whole set,
    then issue one batch.
 
 5. **Target the document explicitly.** Schematic placement and most
    mutations act on the ACTIVE document, and a freshly `app_create_document`'d
-   sheet is NOT auto-focused — parts can silently land on the wrong open
+   sheet is NOT auto-focused: parts can silently land on the wrong open
    sheet. Pass `document_path` to `sch_place_components` (it
    focuses the sheet first and aborts if focus fails), or
    `app_set_active_document` before any active-doc mutation. For deterministic
@@ -328,22 +339,22 @@ one design. They apply in every session.
 
 6. **ECO (schematic → PCB) is not headless.** `proj_sync_pcb` fires the real
    Engineering Change Order, but Altium's change-review dialog is
-   non-suppressible by design — a human must click **Execute Changes**.
+   non-suppressible by design: a human must click **Execute Changes**.
    Don't call `proj_sync_pcb` in an unattended run; it blocks until someone
    interacts. After an attended ECO, the rest of the PCB tools work
    normally.
 
 7. **`pcb_place_components` has two modes.** *Geometry only* (footprint +
-   designator) leaves the board UNSYNCED — no link, no pad nets; pads are
+   designator) leaves the board UNSYNCED, no link, no pad nets; pads are
    unconnected (DRC flags them) and a later ECO treats the parts as "extra
-   in PCB". Fine for artwork, panelization, or testing. *Synced* — also
+   in PCB". Fine for artwork, panelization, or testing. *Synced*: also
    pass `unique_id` (the schematic component's UniqueId, from
    `obj_query(object_type="eSchComponent",
    properties="Designator.Text,UniqueId")`) and
    `pad_nets` `{pad: net}` (from the compiled netlist via
    `proj_get_connectivity_many`). That stamps the sch↔PCB link AND creates +
    assigns each pad's net, giving real connectivity (ratsnest + DRC) with
-   NO ECO dialog — the headless way to populate a board from a compiled
+   NO ECO dialog: the headless way to populate a board from a compiled
    schematic. (`proj_sync_pcb` / a real attended ECO remains the canonical
    path when a human can click the dialog.)
 
@@ -455,7 +466,7 @@ closed-form solver per converter family, and no curated parts pool. For
 each new spec the agent reads the manufacturer datasheet, transcribes
 the typical-application circuit and computes values from the
 datasheet's own formulas, then assembles a DesignPlan. The system
-primitives below are deliberately generic — they apply equally to a
+primitives below are deliberately generic: they apply equally to a
 buck, an LDO, an MCU board, an audio amp, or a sensor frontend.
 
 1. **Read the spec carefully.** Extract Vin/Vout/Iout/freq/ripple
@@ -479,17 +490,17 @@ buck, an LDO, an MCU board, an audio amp, or a sensor frontend.
 
 5. **Fetch the datasheet** via WebFetch. Cite the datasheet URL on the
    Part (`datasheet_url`). Extract from the datasheet:
-   - The **Typical Application Circuit** figure — the canonical
+   - The **Typical Application Circuit** figure: the canonical
      topology the manufacturer recommends. Transcribe its parts list
      and connectivity literally; do not invent variations.
-   - The **Pin Functions** table — exact pin numbers, names, and
+   - The **Pin Functions** table: exact pin numbers, names, and
      functional roles.
-   - The **Application / Design Procedure** section — formulas for
+   - The **Application / Design Procedure** section: formulas for
      external component values (L, Cin, Cout, feedback divider,
      compensation, etc.). Compute the values yourself from those
      formulas; do not import a Python solver. Round to E12 / E96 /
      E6 standard values from the result.
-   - The **Layout Guidelines** section — which nets are sensitive
+   - The **Layout Guidelines** section: which nets are sensitive
      (feedback, compensation), which are noisy (switch node), which
      carry high current (input loop, output current). These map
      directly to `Net.role` tags (see step 7).
@@ -509,29 +520,29 @@ buck, an LDO, an MCU board, an audio amp, or a sensor frontend.
    the downstream PCB pass applies the right rule per net WITHOUT
    the agent or the layout code knowing what topology was generated.
    Common tags and the rule a generic PCB pass should infer from each:
-   - `switch` — short and wide; small loop area; keep away from
+   - `switch`: short and wide; small loop area; keep away from
      `feedback` / `analog_sensitive`. (SMPS SW node, gate-drive
      traces, MOSFET drain on a Class-D amp.)
-   - `feedback` — sensitive; route on a quiet layer; keep away from
+   - `feedback`: sensitive; route on a quiet layer; keep away from
      `switch`. (FB pin trace, error-amp inputs.)
-   - `high_current` — wide trace or copper pour. (VIN rail to bulk
+   - `high_current`: wide trace or copper pour. (VIN rail to bulk
      cap, VOUT rail to load, motor-drive output.)
-   - `analog_sensitive` — quiet layer, far from digital / SMPS.
+   - `analog_sensitive`: quiet layer, far from digital / SMPS.
      (Op-amp inputs, ADC analog inputs, sensor signals.)
-   - `control` — moderate width, no special handling. (Enable pins,
+   - `control`: moderate width, no special handling. (Enable pins,
      GPIO, mode-select.)
-   - `differential` — matched pair, length-controlled. (USB D+/D-,
+   - `differential`: matched pair, length-controlled. (USB D+/D-,
      LVDS, Ethernet, CAN.)
-   - `clock` — length-matched, shielded if high speed. (Crystal,
+   - `clock`: length-matched, shielded if high speed. (Crystal,
      SPI clock, DDR clock.)
    - Role is free-form; if a datasheet calls out a net category that
      doesn't fit one of these, invent a clear new tag and document
      it on the net in `open_questions`.
 
-8. **`design_validate_plan(plan_json=...)`** — schema + cross-check.
+8. **`design_validate_plan(plan_json=...)`**: schema + cross-check.
    Cheap, no Altium round-trip.
 
-9. **`design_execute_plan(plan_json=..., project_path=...)`** — opens
+9. **`design_execute_plan(plan_json=..., project_path=...)`**: opens
    / creates the project, places parts, drops labels / power ports
    at each pin endpoint, stamps Manufacturer / MPN / Value / Footprint
    on every placed symbol, saves.
@@ -541,7 +552,7 @@ buck, an LDO, an MCU board, an audio amp, or a sensor frontend.
     mismatches (wrong pin number on the symbol, missing part). Fix
     those before validating.
 
-11. **`design_audit_schematic(project_path=...)`** — visual / layout
+11. **`design_audit_schematic(project_path=...)`**: visual / layout
     audit BEFORE ERC. Three violation classes, each with enough geometry
     to compute a corrective move:
     - `overlaps`: pairs of components whose bboxes intersect → push apart.
@@ -552,7 +563,7 @@ buck, an LDO, an MCU board, an audio amp, or a sensor frontend.
     Feed violations back into layout adjustments before ERC; messy layout
     manufactures spurious ERC noise downstream.
 
-12. **`design_validate(project_path=...)`** — ERC + unconnected pins +
+12. **`design_validate(project_path=...)`**: ERC + unconnected pins +
     atomic-parts warnings, structured ValidationReport.
 
 13. **Iterate.** If `passed: false`, read the report's errors

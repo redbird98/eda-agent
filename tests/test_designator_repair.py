@@ -16,7 +16,7 @@ from eda_agent.design.footprint_policy import (
 )
 from eda_agent.tools import register_all_tools
 
-# The house layer is named, not "MechanicalN", and carries a large ordinal —
+# The house layer is named, not "MechanicalN", and carries a large ordinal,
 # the shape a modern Altium build actually reports.
 LAYER = "Assembly Designator"
 LAYER_ID = 67108882
@@ -131,7 +131,7 @@ def test_no_target_layer_ordinal_is_skipped_not_guessed():
 
 # --- duplicate designators (the bug that corrupted real libraries) ----------
 def test_duplicate_designators_are_never_repaired_only_reported():
-    """A footprint with two .Designator strings must not be 'fixed' — moving or
+    """A footprint with two .Designator strings must not be 'fixed': moving or
     creating on top of it compounds the damage. It is skipped and reported."""
     fp = _fp("DUPE")
     fp["texts"].append({"text": ".Designator", "kind": "designator",

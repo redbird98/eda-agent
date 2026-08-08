@@ -76,7 +76,26 @@ Begin
     // Remove the request file regardless of read outcome so we never reprocess
     DeleteFile(RequestPath);
 
-    If RequestContent = '' Then Exit;
+    If RequestContent = '' Then
+    Begin
+        { ReadFileContent already retried 12 times over ~180ms for a       }
+        { transient sharing violation, so an empty result here means the   }
+        { file was genuinely empty or still locked. Deleting it and        }
+        { exiting SILENTLY left the caller to wait out its entire deadline }
+        { and report a plain timeout, which reads exactly like a wedged    }
+        { polling loop and sends the user hunting the wrong fault.          }
+        {                                                                   }
+        { The id came from the FILENAME via ScanForRequestFile and has not  }
+        { been overwritten by the body's id yet, so the call can still be   }
+        { answered with the actual reason.                                  }
+        If IsValidRequestId(RequestId) Then
+            WriteResponseFile(RequestId,
+                BuildErrorResponse(RequestId, 'REQUEST_UNREADABLE',
+                    'Request file was empty or unreadable after 12 retries '
+                    + 'and has been discarded. The polling loop is healthy; '
+                    + 'retry the call.'));
+        Exit;
+    End;
 
     // ID arrives in the JSON body. Per-request response files use it for
     // the filename so concurrent callers each get an isolated response file.
