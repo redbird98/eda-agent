@@ -191,7 +191,7 @@ def test_layout_pullup_resistor_clusters_near_ic() -> None:
 
 
 def test_layout_unconnected_parts_separate() -> None:
-    """Two parts with no shared net should NOT cluster — repulsion
+    """Two parts with no shared net should NOT cluster: repulsion
     pushes them apart well beyond their bboxes."""
     plan = DesignPlan(
         spec="x",
@@ -435,7 +435,7 @@ def test_shove_buck_plan_has_zero_overlaps() -> None:
 
 
 def test_shove_power_in_connector_stays_near_left_edge() -> None:
-    """``power_in`` connectors are edge-biased — the shove must NOT
+    """``power_in`` connectors are edge-biased: the shove must NOT
     yank one back into the interior to resolve an overlap. The other
     part absorbs the push instead."""
     plan = DesignPlan(
@@ -567,7 +567,7 @@ def test_shove_wall_redirects_push_to_other_part() -> None:
     # Both still inside the sheet.
     assert SHEET_ORIGIN_X_MILS + half_r1 <= by["R1"].x_mils <= SHEET_MAX_X_MILS - half_r1
     assert SHEET_ORIGIN_X_MILS + half_r2 <= by["R2"].x_mils <= SHEET_MAX_X_MILS - half_r2
-    # R1 should have moved LEFT (away from the wall) — the wall
+    # R1 should have moved LEFT (away from the wall): the wall
     # redirected the push back into it.
     assert by["R1"].x_mils < r2_x_at_wall - 100
 
@@ -1094,7 +1094,7 @@ def test_shove_single_and_empty_plan_trivially_returns() -> None:
     placed = compute_layout(one_part)
     assert len(placed) == 1
     assert audit_overlaps(one_part, placed) == []
-    # Empty placement list — exercise the early-return branch directly.
+    # Empty placement list: exercise the early-return branch directly.
     cleaned, residual = _hard_shove_pass(one_part, [])
     assert cleaned == []
     assert residual == 0

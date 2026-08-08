@@ -2,7 +2,7 @@
 # Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """Async job runner for long engine runs (roadmap 1.5).
 
-Some offline engines — routing a dense board, a big placement solve — take
+Some offline engines (routing a dense board, a big placement solve) take
 longer than an MCP tool's default 10 s timeout. Rather than block the client
 or raise a spurious timeout, submit the work as a job: ``design_job_start``
 returns an id immediately, and the client polls ``design_job_status`` /
@@ -162,7 +162,7 @@ def _run_route(params: dict) -> dict:
 # Only geometry-dict-driven engines are registered here. Placement
 # (pcb_plan_placement) builds structured PlaceComp/PlaceNet/BoardRegion inputs
 # via the construct engine rather than taking a raw geometry dict, so wiring
-# it as a job kind needs that adapter first — a follow-up.
+# it as a job kind needs that adapter first: a follow-up.
 JOB_KINDS: dict[str, Callable[[dict], dict]] = {
     "route": _run_route,
 }

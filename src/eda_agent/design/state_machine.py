@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
-"""Autonomy state machine — ``design_next_action`` core (roadmap 1.4).
+"""Autonomy state machine: ``design_next_action`` core (roadmap 1.4).
 
 The journal (``session.py``) records what happened; this module decides what
 to do next. Given a replayed ``SessionState`` it returns a single
 ``NextAction``: the next pipeline stage to work on, its goal, the exact tools
-to reach for, the exit gate that marks it done, and — when a stage has failed
-too many times or the run is waiting on a human — a ``blocked`` verdict with
+to reach for, the exit gate that marks it done, and, when a stage has failed
+too many times or the run is waiting on a human, a ``blocked`` verdict with
 the question to ask.
 
 This is what lets ANY MCP client drive the full spec-to-board pipeline
@@ -146,14 +146,14 @@ def next_action(state: SessionState) -> NextAction:
     """Decide the single next action for a design session."""
     sid = state.session_id
 
-    # 1. A human question outranks everything — stop and surface it.
+    # 1. A human question outranks everything: stop and surface it.
     if state.open_question:
         return NextAction(
             session_id=sid,
             status=BLOCKED,
             stage=state.current_stage or state.next_stage,
             goal="Waiting on a human decision.",
-            guidance=f"BLOCKED — ask the user: {state.open_question}",
+            guidance=f"BLOCKED: ask the user: {state.open_question}",
             open_question=state.open_question,
         )
 
@@ -180,12 +180,12 @@ def next_action(state: SessionState) -> NextAction:
             stage=stage,
             goal=play.get("goal", ""),
             guidance=(
-                f"BLOCKED — stage '{stage}' failed {attempts} times "
+                f"BLOCKED: stage '{stage}' failed {attempts} times "
                 f"(limit {MAX_STAGE_ATTEMPTS}). Ask the user how to proceed or "
                 f"relax the requirement."
             ),
             attempt=attempts,
-            open_question=f"Stage '{stage}' keeps failing — how should I proceed?",
+            open_question=f"Stage '{stage}' keeps failing: how should I proceed?",
         )
 
     # 4. Normal path: proceed (or retry if this stage has a prior failure).
@@ -201,7 +201,7 @@ def next_action(state: SessionState) -> NextAction:
         guidance=(
             f"{prefix}{play.get('goal', stage)} "
             f"When done, log design_session_log(event='stage_result', "
-            f"stage='{stage}', status='ok') — or status='blocked' with a "
+            f"stage='{stage}', status='ok'): or status='blocked' with a "
             f"question if you need the user."
         ),
         attempt=attempts,

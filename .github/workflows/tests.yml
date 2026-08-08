@@ -12,7 +12,15 @@ jobs:
     # but there is no reason to certify a platform we never run on.
     runs-on: windows-latest
     steps:
+      # fetch-depth: 0 brings the tags along. The default shallow fetch
+      # brings none, and tests/test_version_is_unreleased.py compares the
+      # declared version against the tags: with no tags it has nothing to
+      # compare and passes vacuously. That would leave the one check that
+      # catches a release number which has already shipped inert in CI,
+      # which is the only place it runs unattended.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:

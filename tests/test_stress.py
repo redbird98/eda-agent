@@ -22,6 +22,7 @@ from tests.altium_simulator import (
     MockSchObject,
     _build_success_response,
 )
+from tests.conftest import wait_until
 from eda_agent.bridge.altium_bridge import AltiumBridge, CommandRequest
 from eda_agent.bridge.exceptions import (
     AltiumCommandError,
@@ -231,7 +232,9 @@ class TestEncodingEdgeCases:
         assert result["value"] == cjk
 
     def test_null_byte_causes_timeout(self, e2e_bridge):
-        """Null bytes still crash JSON encoders, bridge times out cleanly."""
+        """Null bytes still crash JSON encoders, bridge times out cleanly.
+
+"""
         with pytest.raises((AltiumTimeoutError, ValueError)):
             e2e_bridge.send_command("project.set_parameter", {
                 "name": "NullTest",
@@ -366,9 +369,22 @@ class TestConcurrency:
     """Race conditions and concurrent access to IPC files."""
 
     def test_partial_write_then_complete(self, tmp_path):
-        """Simulate a partial response followed by the full one (atomic-rename
-        contract: partial files exist only as ``.json.tmp``; the final
-        ``response_<id>.json`` only ever appears whole)."""
+        """A half-written response_<id>.json must be retried, not failed.
+
+        This is the contract production actually runs under. Main.pas
+        WriteResponseFile writes the FINAL path directly -- its comment
+        records that an earlier tmp+RenameFile was abandoned because
+        DelphiScript's RenameFile silently failed -- so the bridge does
+        see partial files, and _poll_response counts on retrying them
+        ("a handful of parse errors is normal while Pascal is
+        mid-write").
+
+        An earlier version of this test asserted the opposite: that
+        partial content exists only as .json.tmp and the final file
+        "only ever appears whole". That was the simulator's behaviour,
+        not Altium's, and writing the partial bytes to a suffix the
+        bridge ignores meant the retry path was never exercised at all.
+        """
         workspace = Path(tmp_path)
         workspace.mkdir(exist_ok=True)
 
@@ -379,15 +395,14 @@ class TestConcurrency:
 
         def delayed_write():
             time.sleep(0.05)
-            # Partial, but written to a tmp suffix that the bridge ignores.
-            tmp = final_path.with_suffix(".json.tmp")
-            tmp.write_text(
+            # Truncated, at the FINAL filename, exactly as a Pascal
+            # write caught mid-flight would look.
+            final_path.write_text(
                 '{"protocol_version":2,"id":"' + request_id + '","succ',
                 encoding="utf-8",
             )
-            time.sleep(0.05)
-            # Final atomic write, visible to the bridge as one complete file.
-            tmp.write_text(
+            time.sleep(0.1)
+            final_path.write_text(
                 json.dumps({
                     "protocol_version": 2,
                     "id": request_id,
@@ -397,7 +412,6 @@ class TestConcurrency:
                 }),
                 encoding="utf-8",
             )
-            tmp.replace(final_path)
 
         writer = threading.Thread(target=delayed_write, daemon=True)
         writer.start()
@@ -414,8 +428,16 @@ class TestConcurrency:
         try:
             request_path = sim.workspace_dir / "request_corrupttest.json"
             request_path.write_text('{"id":"abc","comma', encoding="utf-8")
-            time.sleep(0.1)
 
+            # The cleanup is half of what this test is named for and was
+            # never asserted: the old version slept and then checked only
+            # that a later ping worked, which the ping's own 5s timeout
+            # already covers. A simulator that left the corrupt file on
+            # disk forever passed.
+            wait_until(lambda: not request_path.exists(),
+                       message="the corrupt request file was never removed")
+
+            # And the loop must still be serving afterwards.
             bridge = make_bridge(sim)
             result = bridge.send_command("application.ping", timeout=5.0)
             assert result == "pong"
@@ -431,7 +453,9 @@ class TestBoundary:
     """Boundary conditions for bridge parameters."""
 
     def test_zero_timeout_raises_immediately(self, e2e_bridge):
-        """Zero timeout -- AltiumTimeoutError without waiting."""
+        """Zero timeout -- AltiumTimeoutError without waiting.
+
+"""
         with pytest.raises(AltiumTimeoutError):
             e2e_bridge.send_command("application.ping", timeout=0.0)
 

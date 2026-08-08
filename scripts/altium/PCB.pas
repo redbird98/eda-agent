@@ -7942,6 +7942,162 @@ Begin
         ));
 End;
 
+{..............................................................................}
+{ PCB_ApplyDnpPasteExclusion - suppress stencil paste on Not-Fitted parts.    }
+{ Params: designators (pipe-separated), restore (true/false)                  }
+{                                                                             }
+{ A Not-Fitted component is on the BOM as a placeholder and must NOT receive  }
+{ paste: the SMT line would otherwise deposit paste on empty pads, and the    }
+{ bridging shows up as rework. This is the remediation half of                }
+{ audit.variant_not_fitted, which is the identify half. The designator list   }
+{ is passed IN rather than re-detected here, so the mutation is reviewable    }
+{ and a caller can override the selection; detection stays in one place.      }
+{                                                                             }
+{ Mechanism: per-pad PasteMaskExpansion set manual and negative, which is     }
+{ what PCB_MakePasteGrid already does to clear a pad before laying its grid.  }
+{ An expansion of minus the larger pad dimension collapses the aperture       }
+{ whatever the shape.                                                         }
+{                                                                             }
+{ restore=true puts PasteMaskExpansionValid back to eCacheInvalid, which      }
+{ discards the manual override and makes Altium recompute from the design     }
+{ rules. TCacheState is (eCacheInvalid, eCacheValid, eCacheManual); there is  }
+{ no "use the rule" member, and eCacheValid would assert that a rule-derived  }
+{ value already sits in the field, which after an override it does not.       }
+{                                                                             }
+{ Only surface pads are touched. A multi-layer (through-hole) pad gets no     }
+{ stencil aperture anyway, so overriding it would be a no-op recorded as a    }
+{ change; those are counted and reported separately instead.                  }
+{..............................................................................}
+
+Function PCB_ApplyDnpPasteExclusion(Params : String; RequestId : String) : String;
+Var
+    Board : IPCB_Board;
+    Iterator : IPCB_BoardIterator;
+    GrpIter : IPCB_GroupIterator;
+    Comp : IPCB_Component;
+    Pad : IPCB_Pad;
+    Cache : TPadCache;
+    DesigList, RestoreStr, CompDesig, Matched, ItemsJson, EntryJson : String;
+    Restore, First : Boolean;
+    PadsChanged, PadsSkippedTht, CompsMatched, CompsRequested : Integer;
+    PadW, PadH, Expansion, CompPads : Integer;
+Begin
+    DesigList := ExtractJsonValue(Params, 'designators');
+    If DesigList = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAM',
+            'designators is required (pipe-separated); run '
+            + 'audit.variant_not_fitted first to get the Not-Fitted list');
+        Exit;
+    End;
+    RestoreStr := LowerCase(ExtractJsonValue(Params, 'restore'));
+    Restore := (RestoreStr = 'true') Or (RestoreStr = '1');
+
+    Board := GetPCBBoardAnywhere;
+    If Board = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCB',
+            'No PCB document is active');
+        Exit;
+    End;
+
+    { Count what was asked for, so the caller can see whether every named }
+    { component was actually found on this board.                          }
+    CompsRequested := 1;
+    Matched := DesigList;
+    While Pos('|', Matched) > 0 Do
+    Begin
+        CompsRequested := CompsRequested + 1;
+        Matched := Copy(Matched, Pos('|', Matched) + 1, Length(Matched));
+    End;
+
+    PadsChanged := 0;
+    PadsSkippedTht := 0;
+    CompsMatched := 0;
+    ItemsJson := '';
+    First := True;
+
+    PCBServer.PreProcess;
+    Try
+        Iterator := Board.BoardIterator_Create;
+        Try
+            Iterator.AddFilter_ObjectSet(MkSet(eComponentObject));
+            Iterator.AddFilter_LayerSet(AllLayers);
+            Iterator.AddFilter_Method(eProcessAll);
+            Comp := Iterator.FirstPCBObject;
+            While Comp <> Nil Do
+            Begin
+                CompDesig := '';
+                Try CompDesig := Comp.Name.Text; Except End;
+                { Pipe-delimited membership, anchored so R1 does not match }
+                { R10. }
+                If (CompDesig <> '')
+                    And (Pos('|' + CompDesig + '|', '|' + DesigList + '|') > 0) Then
+                Begin
+                    Inc(CompsMatched);
+                    CompPads := 0;
+                    GrpIter := Comp.GroupIterator_Create;
+                    Try
+                        GrpIter.AddFilter_ObjectSet(MkSet(ePadObject));
+                        Pad := GrpIter.FirstPCBObject;
+                        While Pad <> Nil Do
+                        Begin
+                            { Surface pads only; a through-hole pad has no  }
+                            { stencil aperture to suppress.                  }
+                            If (Pad.Layer = eTopLayer) Or (Pad.Layer = eBottomLayer) Then
+                            Begin
+                                Try
+                                    Cache := Pad.GetState_Cache;
+                                    If Restore Then
+                                        Cache.PasteMaskExpansionValid := eCacheInvalid
+                                    Else
+                                    Begin
+                                        PadW := Pad.TopXSize;
+                                        PadH := Pad.TopYSize;
+                                        If PadW > PadH Then Expansion := -PadW
+                                        Else Expansion := -PadH;
+                                        Cache.PasteMaskExpansionValid := eCacheManual;
+                                        Cache.PasteMaskExpansion := Expansion;
+                                    End;
+                                    Pad.SetState_Cache := Cache;
+                                    Inc(PadsChanged);
+                                    CompPads := CompPads + 1;
+                                Except End;
+                            End
+                            Else
+                                Inc(PadsSkippedTht);
+                            Pad := GrpIter.NextPCBObject;
+                        End;
+                    Finally
+                        Comp.GroupIterator_Destroy(GrpIter);
+                    End;
+                    If Not First Then ItemsJson := ItemsJson + ',';
+                    First := False;
+                    EntryJson := JsonStr('designator', CompDesig) + ','
+                        + JsonInt('pads_changed', CompPads);
+                    ItemsJson := ItemsJson + JsonObj(EntryJson);
+                End;
+                Comp := Iterator.NextPCBObject;
+            End;
+        Finally
+            Board.BoardIterator_Destroy(Iterator);
+        End;
+    Finally
+        PCBServer.PostProcess;
+    End;
+
+    Try Board.GraphicallyInvalidate; Except End;
+
+    Result := BuildSuccessResponse(RequestId, JsonObj(
+        JsonBool('restored', Restore) + ','
+        + JsonInt('components_requested', CompsRequested) + ','
+        + JsonInt('components_matched', CompsMatched) + ','
+        + JsonInt('pads_changed', PadsChanged) + ','
+        + JsonInt('pads_skipped_through_hole', PadsSkippedTht) + ','
+        + JsonRaw('items', JsonArr(ItemsJson))));
+End;
+
+
 
 { PCB_GetDifferentialPairs                                                     }
 {                                                                              }
@@ -11077,6 +11233,7 @@ Begin
         'clear_source_footprint_library': Result := PCB_ClearSourceFootprintLibrary(Params, RequestId);
         'get_differential_pairs':  Result := PCB_GetDifferentialPairs(Params, RequestId);
         'make_paste_grid':         Result := PCB_MakePasteGrid(Params, RequestId);
+        'apply_dnp_paste_exclusion': Result := PCB_ApplyDnpPasteExclusion(Params, RequestId);
         'add_testpoints_for_net_class': Result := PCB_AddTestpointsForNetClass(Params, RequestId);
         'check_placement_collision': Result := PCB_CheckPlacementCollision(Params, RequestId);
         'get_trace_lengths':       Result := PCB_GetTraceLengths(Params, RequestId);

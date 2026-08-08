@@ -1068,7 +1068,13 @@ def run_python(fn_name: str, args: list[str]) -> str:
     """Run a single test case through the Python reimplementation.
     Returns the result as a string, matching Pascal output formatting."""
 
-    if fn_name == 'ExtractJsonValue':
+    if fn_name == 'GetBatchField':
+        return get_batch_field(args[0], args[1])
+
+    elif fn_name == 'BatchFieldSweep':
+        return batch_field_sweep(args[0], args[1])
+
+    elif fn_name == 'ExtractJsonValue':
         return extract_json_value(args[0], args[1])
 
     elif fn_name == 'ExtractJsonArray':
@@ -1240,6 +1246,151 @@ def fpc_executable():
 # Gather all test cases
 # ---------------------------------------------------------------------------
 
+
+def next_batch_op(remaining: str) -> tuple[str, str]:
+    """Main.pas NextBatchOp: returns (op, rest), skipping empty ops."""
+    while len(remaining) > 0:
+        sep = remaining.find("~~")
+        if sep < 0:
+            return remaining, ""
+        op = remaining[:sep]
+        remaining = remaining[sep + 2:]
+        if op != "":
+            return op, remaining
+    return "", ""
+
+
+def get_batch_field(op: str, key: str) -> str:
+    """Main.pas GetBatchField: fields split on ';', key on the FIRST '='."""
+    remaining = op
+    while len(remaining) > 0:
+        sep = remaining.find(";")
+        if sep < 0:
+            field, remaining = remaining, ""
+        else:
+            field, remaining = remaining[:sep], remaining[sep + 1:]
+        # Pascal's Pos is 1-BASED and returns 0 when absent, so its
+        # `EqPos > 0` means "an '=' exists". Python's find is 0-based
+        # and returns -1 when absent, so the faithful mirror is >= 0.
+        # Writing `> 0` here dropped a field whose '=' is the first
+        # character -- "=orphan" matches an EMPTY key in Pascal and
+        # returned "orphan" while this returned "". Caught by FPC on the
+        # first run, which is the entire point of comparing against the
+        # compiled original instead of a careful reading of it.
+        eq = field.find("=")
+        if eq >= 0:
+            fkey, fval = field[:eq], field[eq + 1:]
+            if fkey.upper() == key.upper():
+                return fval
+    return ""
+
+
+def batch_field_sweep(payload: str, key: str) -> str:
+    """Every operation's value for one key, joined with '|'."""
+    out = []
+    remaining = payload
+    while True:
+        op, remaining = next_batch_op(remaining)
+        if op == "":
+            break
+        out.append(get_batch_field(op, key))
+        if remaining == "":
+            break
+    return "|".join(out)
+
+
+def generate_batch_field_cases():
+    """Cases for the payload grammar every bulk tool depends on.
+
+    Built partly from the REAL emitter so the parser is exercised against
+    strings this codebase actually sends, not only hand-written ones. The
+    boundary is where a converter's sanitiser has to agree with Pascal,
+    and until now that agreement was asserted by reading the Pascal.
+    """
+    cases = [
+        # Plain lookups, and the case-insensitive key match.
+        ("GetBatchField", ["designator=1;x=10;y=20", "x"]),
+        ("GetBatchField", ["designator=1;x=10;y=20", "X"]),
+        ("GetBatchField", ["DESIGNATOR=A1", "designator"]),
+        ("GetBatchField", ["designator=1;x=10", "missing"]),
+        ("GetBatchField", ["", "x"]),
+        # A value MAY contain '=' -- only the first one splits. An
+        # emitter that escaped '=' would corrupt these.
+        ("GetBatchField", ["name=A=B;x=1", "name"]),
+        ("GetBatchField", ["expr=a==b;x=1", "expr"]),
+        # A leading '=' means an empty key, which never matches.
+        ("GetBatchField", ["=orphan;x=1", ""]),
+        # Field with no '=' at all is skipped, not treated as a key.
+        ("GetBatchField", ["bare;x=7", "bare"]),
+        ("GetBatchField", ["bare;x=7", "x"]),
+        # Trailing separator, empty value, repeated key (first wins).
+        ("GetBatchField", ["x=1;", "x"]),
+        ("GetBatchField", ["x=;y=2", "x"]),
+        ("GetBatchField", ["x=1;x=2", "x"]),
+        # Overbar names: a SINGLE '~' is data and must survive.
+        ("GetBatchField", ["name=~RESET;x=1", "name"]),
+        ("GetBatchField", ["name=~{RESET};x=1", "name"]),
+        # Whole-payload sweeps across the '~~' operation separator.
+        ("BatchFieldSweep", ["designator=1;x=0~~designator=2;x=10",
+                             "designator"]),
+        ("BatchFieldSweep", ["designator=1~~~~designator=2", "designator"]),
+        ("BatchFieldSweep", ["designator=1;name=~A~~designator=2;name=~B",
+                             "name"]),
+        ("BatchFieldSweep", ["a=1", "a"]),
+    ]
+
+    # And the real thing: payloads the Altium emitter produces.
+    try:
+        from eda_agent.libimport.easyeda.altium import build_altium_plan
+        from eda_agent.libimport.easyeda.document import EasyEdaComponent
+        from eda_agent.libimport.kicad.reader import read_kicad_symbol
+    except Exception:  # pragma: no cover - converter absent
+        return cases
+
+    sym = read_kicad_symbol('''(kicad_symbol_lib (version 20251024) (generator t)
+  (symbol "X" (property "Reference" "U" (at 0 0 0))
+    (symbol "X_1_1"
+      (pin input inverted (at -5 0 0) (length 2)
+        (name "~{RESET}") (number "1"))
+      (pin open_collector line (at -5 -2 0) (length 2)
+        (name "OC=OUT") (number "2"))
+      (pin power_in line (at -5 -4 0) (length 2)
+        (hide yes) (name "") (number "3")))))''')
+    plan = build_altium_plan(
+        EasyEdaComponent(mpn="X", symbol=sym.symbol), "a.SchLib", "b.PcbLib")
+    step = next(s for s in plan["steps"] if s["tool"] == "lib_add_pins")
+
+    from eda_agent.tools import library as _lib
+
+    payload, _skipped = _lib._pins_payload(step["args"]["pins"])
+    for key in ("designator", "name", "electrical_type", "hidden"):
+        cases.append(("BatchFieldSweep", [payload, key]))
+
+    # And the land-pattern payload, where a parse mistake is a board
+    # that cannot be assembled. Built from a footprint carrying the
+    # fields this converter had defects in: a rounded-rectangle pad with
+    # an explicit corner ratio, a slotted through-hole, and an unplated
+    # hole.
+    from eda_agent.libimport.kicad.reader import read_kicad_footprint
+
+    fp = read_kicad_footprint('''(footprint "F" (layer "F.Cu")
+  (pad "1" smd roundrect (at -0.25 0) (size 0.4 0.3)
+    (roundrect_rratio 0.25) (layers "F.Cu" "F.Paste" "F.Mask"))
+  (pad "2" thru_hole oval (at 0 0) (size 1 0.8) (drill oval 1.6 0.8)
+    (layers "*.Cu" "*.Mask"))
+  (pad "3" np_thru_hole circle (at 2 0) (size 1 1) (drill 0.9)
+    (layers "*.Cu" "*.Mask")))''')
+    fp_plan = build_altium_plan(
+        EasyEdaComponent(mpn="F", footprint=fp.footprint),
+        "a.SchLib", "b.PcbLib")
+    pad_step = next(s for s in fp_plan["steps"]
+                    if s["tool"] == "lib_add_footprint_pads")
+    pad_payload, _dropped = _lib._pads_payload(pad_step["args"]["pads"])
+    for key in ("designator", "shape", "corner_radius", "hole_size", "layer"):
+        cases.append(("BatchFieldSweep", [pad_payload, key]))
+    return cases
+
+
 def all_test_cases():
     """Return the complete list of (fn_name, args) tuples."""
     cases = []
@@ -1255,6 +1406,7 @@ def all_test_cases():
     cases.extend(generate_apply_set_properties_cases())
     cases.extend(generate_count_batch_operations_cases())
     cases.extend(generate_split_command_cases())
+    cases.extend(generate_batch_field_cases())
     return cases
 
 
@@ -1480,3 +1632,372 @@ class TestPythonSanity:
         """Make sure we generate a healthy number of test cases."""
         cases = all_test_cases()
         assert len(cases) > 400
+
+
+class TestPayloadSurvivesHostileInput:
+    """The payload must carry values Pascal can read back INTACT.
+
+    Distinct from the cross-validation above, and the distinction
+    matters: that suite proves the Python mirror and the compiled Pascal
+    agree on how a string parses. It cannot notice a payload that is
+    wrong, because both parsers mangle a corrupted string identically
+    and no divergence appears. Disabling the sanitiser entirely leaves
+    every cross-validation case green.
+
+    So these assert the property instead: a value containing the
+    grammar's own separators must still come back as intended. The
+    parser used here is the mirror the FPC suite has just proven
+    equivalent to Main.pas, so a pass here is a statement about Pascal.
+    """
+
+    def _field(self, payload, key, index=0):
+        remaining = payload
+        for _ in range(index + 1):
+            op, remaining = next_batch_op(remaining)
+        return get_batch_field(op, key)
+
+    def test_a_semicolon_in_a_pin_name_cannot_split_the_field(self):
+        """';' ends a field, so an unescaped one truncates the value AND
+        turns the remainder into a bogus key=value pair."""
+        from eda_agent.tools import library as lib
+
+        payload, _ = lib._pins_payload([
+            {"designator": "1", "name": "A;rotation=270", "x": 0, "y": 0},
+        ])
+        assert self._field(payload, "designator") == "1"
+        assert self._field(payload, "rotation") == "0", (
+            "the injected 'rotation=270' was read as a real field; the pin "
+            "would be placed at the attacker's angle")
+        assert ";" not in self._field(payload, "name")
+
+    def test_a_double_tilde_cannot_forge_an_extra_pin(self):
+        """'~~' ends an operation, so an unescaped one splits one pin
+        into two and the second is whatever the value said."""
+        from eda_agent.tools import library as lib
+
+        payload, _ = lib._pins_payload([
+            {"designator": "1", "name": "A~~designator=99", "x": 0, "y": 0},
+        ])
+        ops = []
+        remaining = payload
+        while True:
+            op, remaining = next_batch_op(remaining)
+            if not op:
+                break
+            ops.append(op)
+        assert len(ops) == 1, f"the payload forged {len(ops)} pins: {ops}"
+
+    def test_a_single_tilde_is_data_and_survives(self):
+        """Overbar names are spelled with '~', and mangling them renames
+        every active-low pin on the part."""
+        from eda_agent.tools import library as lib
+
+        payload, _ = lib._pins_payload([
+            {"designator": "1", "name": "~{RESET}", "x": 0, "y": 0},
+        ])
+        assert self._field(payload, "name") == "~{RESET}"
+
+    def test_an_equals_in_a_value_is_left_alone(self):
+        """Only the FIRST '=' splits, so a value may contain more. An
+        emitter that escaped them would corrupt real pin names."""
+        from eda_agent.tools import library as lib
+
+        payload, _ = lib._pins_payload([
+            {"designator": "1", "name": "OC=OUT", "x": 0, "y": 0},
+        ])
+        assert self._field(payload, "name") == "OC=OUT"
+
+    def test_a_hostile_pad_layer_cannot_move_the_pad(self):
+        """Same grammar, and here the consequence is copper in the wrong
+        place rather than a misdrawn symbol."""
+        from eda_agent.tools import library as lib
+
+        payload, _ = lib._pads_payload([
+            {"designator": "1", "x": 10, "y": 20,
+             "layer": "TopLayer;x=999", "shape": "rect"},
+        ])
+        assert self._field(payload, "x") == "10", (
+            "an injected coordinate overrode the real one")
+
+    def test_every_pin_payload_builder_shares_one_implementation(self):
+        """Three tools built this payload inline, all three raw.
+
+        lib_create_ic_symbol, lib_create_passive_symbol and
+        lib_add_pins each formatted their own ";"-joined string and
+        interpolated designator, name and electrical_type straight in.
+        Any of them carrying a ";" reshaped the payload -- and a pin
+        name copied out of a datasheet table is enough to do that by
+        accident, so this was not only an adversarial concern.
+
+        Pinned by BEHAVIOUR: hostile input through the tools that build
+        a symbol must survive exactly as it does through the shared
+        helper. A fourth copy would fail here rather than being noticed
+        by someone re-reading the file.
+        """
+        from eda_agent.tools import library as lib
+
+        hostile = {"designator": "1", "name": "A;rotation=270",
+                   "x": 0, "y": 0, "length": 200, "rotation": 0}
+        payload, _ = lib._pins_payload([hostile])
+        op, _rest = next_batch_op(payload)
+        assert get_batch_field(op, "rotation") == "0"
+        assert ";" not in get_batch_field(op, "name")
+
+    def test_one_sanitiser_serves_every_tool_module(self):
+        """library.py and generic.py must not disagree on the grammar.
+
+        They did: generic.py replaced "~~" with two spaces while
+        library.py collapsed runs of tildes to one, so the same pin name
+        came out differently depending on which tool sent it. Neither
+        was wrong about the injection, but two implementations of one
+        wire format is how the next one ends up wrong.
+
+        Asserted on BEHAVIOUR rather than on the import, so a fresh
+        local copy fails here even if it happens to look right.
+        """
+        from eda_agent.tools import generic as gen
+        from eda_agent.tools import library as lib
+
+        for value in ("A;x=99", "B~~designator=9", "~~~", "~{RESET}",
+                      "OC=OUT", "plain"):
+            assert lib._payload_safe(value) == gen.payload_safe(value), (
+                f"the two modules disagree on {value!r}")
+
+    def test_a_hostile_stamp_designator_cannot_inject_a_field(self):
+        """generic.py escaped every stamp value EXCEPT the designator,
+        which is the one field guaranteed to come from the caller."""
+        from eda_agent.tools import generic as gen
+
+        clean = gen.payload_safe("R1;Value=999")
+        assert ";" not in clean
+        assert get_batch_field(f"designator={clean};Value=10", "Value") == "10"
+
+    def test_the_stamp_tool_itself_sanitises_its_designator(self):
+        """Exercises the real tool, not just the helper.
+
+        The previous test compares the two modules' sanitisers and would
+        pass even if a builder stopped calling one -- which is exactly
+        what had happened here, the designator being the single field
+        every other value was escaped around. This drives
+        sch_set_components_parameters with a recording bridge and reads
+        the payload that would have gone to Pascal.
+        """
+        import asyncio
+
+        from eda_agent.tools import generic as gen_mod
+
+        sent: list[tuple[str, dict]] = []
+
+        class _Bridge:
+            def send_command(self, command, params=None, **kw):
+                sent.append((command, dict(params or {})))
+                return {"success": True}
+
+            async def send_command_async(self, command, params=None, **kw):
+                return self.send_command(command, params, **kw)
+
+        captured: dict = {}
+
+        class _Capture:
+            def tool(self, *a, **k):
+                def deco(fn):
+                    captured[fn.__name__] = fn
+                    return fn
+                return deco
+
+            def prompt(self, *a, **k):
+                return self.tool()
+
+            def resource(self, *a, **k):
+                return self.tool()
+
+        original = gen_mod.get_bridge
+        gen_mod.get_bridge = lambda: _Bridge()
+        try:
+            gen_mod.register_generic_tools(_Capture())
+            asyncio.run(captured["sch_set_components_parameters"](
+                stamps=[{"designator": "R1;Value=999", "Value": "10k"}]))
+        finally:
+            gen_mod.get_bridge = original
+
+        assert sent, "the tool sent nothing"
+        payload = sent[-1][1]["stamps"]
+        op, _rest = next_batch_op(payload)
+        assert get_batch_field(op, "Value") == "10k", (
+            f"an injected Value overrode the real one: {payload!r}")
+        assert ";" not in get_batch_field(op, "designator")
+
+    def test_the_design_emitter_shares_the_same_rules(self):
+        """design/ had its own third variant of the sanitiser.
+
+        It substituted ";" but not "~~", and left the designator raw, so
+        a plan-authored parameter value carrying "~~" ended its
+        operation early and forged an extra stamp. That path is fed by
+        LLM-written plans, which is exactly where an odd string arrives
+        without anyone typing it deliberately.
+
+        The rules now live in the BRIDGE layer, because the grammar is
+        the IPC contract rather than a detail of any one caller, and
+        design/ importing them from tools/ would be the wrong
+        dependency.
+        """
+        from pathlib import Path
+
+        from eda_agent.design.emitter import EmitResult, _emit_parameter_stamps
+
+        class _Inst:
+            # Hostile on purpose. A clean "R1" cannot tell a sanitised
+            # designator from a raw one, so a test using it passes with
+            # the guard removed -- which is exactly what happened.
+            refdes = "R1;Value=0"
+
+        sent = []
+
+        class _Bridge:
+            def send_command(self, command, params=None, **kw):
+                sent.append((command, dict(params or {})))
+                return {"success": True}
+
+        # The value the old local rule let through: it substituted ";"
+        # but never "~~", so this forged a second stamp for R99.
+        _emit_parameter_stamps(
+            [_Inst()],
+            {"R1;Value=0": {"Value": "10k~~designator=R99",
+                            "Note": "a;b=2"}},
+            Path("sheet.SchDoc"), _Bridge(), EmitResult())
+
+        assert sent, "the emitter sent nothing"
+        # The emitter makes several calls; take the stamp one.
+        payload = next(params["stamps"] for _cmd, params in sent
+                       if "stamps" in params)
+
+        ops = []
+        remaining = payload
+        while True:
+            op, remaining = next_batch_op(remaining)
+            if not op:
+                break
+            ops.append(op)
+        assert len(ops) == 1, f"the payload forged {len(ops)} stamps: {ops}"
+        assert get_batch_field(ops[0], "Value") == "10k~designator=R99", (
+            "an injected Value overrode the real one")
+        assert ";" not in get_batch_field(ops[0], "designator")
+        assert ";" not in get_batch_field(ops[0], "Note")
+
+
+class TestIeeePinSymbolsAgainstRealPascal:
+    """What decides whether an active-low pin gets its inversion bubble.
+
+    Unlike the suites above, these do NOT compare Pascal against a Python
+    mirror. A mirror would be circular here: nothing on the Python side
+    needs these ordinals, the emitter only ever sends the NAME. Agreement
+    between two things I wrote from the same misreading would prove
+    nothing anyway.
+
+    So the expected values below are ground truth lifted from the
+    schematic API types reference (TIeeeSymbol, 35 members, eNoSymbol=0),
+    and each assertion is against what a real Pascal compiler actually
+    produced. Getting an ordinal wrong is silent and ugly: the pin still
+    draws, just with the wrong decoration, so a NAND gate reads as an AND.
+    """
+
+    def _pascal(self, fpc_executable, tmp_path, cases, label):
+        """Run cases through the compiled Pascal and return its raw output."""
+        input_file = tmp_path / f"ieee_in_{label}.txt"
+        output_file = tmp_path / f"ieee_out_{label}.txt"
+        write_inputs(cases, str(input_file))
+        result = subprocess.run(
+            [fpc_executable, str(input_file), str(output_file)],
+            capture_output=True, text=True, timeout=30,
+        )
+        assert result.returncode == 0, (
+            f"Pascal failed for {label}: {result.stdout} {result.stderr}")
+        outputs = read_outputs(str(output_file))
+        assert len(outputs) == len(cases)
+        return outputs
+
+    def test_the_two_ordinals_that_carry_schematic_meaning(
+        self, fpc_executable, tmp_path
+    ):
+        """eDot=1 draws the inversion bubble, eClock=3 draws the wedge.
+
+        Everything else in this feature is plumbing around these two
+        numbers, and they are the two most likely to be wrong.
+        """
+        cases = [("StrToIeeeSymbol", ["dot"]), ("StrToIeeeSymbol", ["clock"])]
+        assert self._pascal(fpc_executable, tmp_path, cases, "core") == ["1", "3"]
+
+    def test_named_ordinals_match_the_api_reference(
+        self, fpc_executable, tmp_path
+    ):
+        """Spot-check members spread across the enum, so a shifted list
+        cannot pass by getting only the first few right."""
+        expected = {
+            "no_symbol": "0", "dot": "1", "clock": "3",
+            "active_low_input": "4", "open_collector": "9", "hiz": "10",
+            "schmitt": "13", "active_low_output": "17", "open_emitter": "23",
+            "bidirectional_signal_flow": "34",
+        }
+        cases = [("StrToIeeeSymbol", [name]) for name in expected]
+        got = self._pascal(fpc_executable, tmp_path, cases, "named")
+        assert got == list(expected.values())
+
+    def test_every_ordinal_survives_naming_and_reparsing(
+        self, fpc_executable, tmp_path
+    ):
+        """0..34 named then parsed back must be the identity.
+
+        This catches an off-by-one in the token walk. It CANNOT catch a
+        wrong ordering, and that is not a hypothetical: reordering the
+        name list so 'clock' sits at 2 instead of 3 leaves this test
+        green while breaking the other four here. Both converters read
+        the same list, so any permutation of it stays self-consistent and
+        a round trip is blind to it, the same way a reader/writer round
+        trip cannot see a bug the reader and writer share.
+
+        Hence the ground-truth assertions above. This test earns its
+        place by covering the walk itself, not the values.
+        """
+        got = self._pascal(
+            fpc_executable, tmp_path, [("IeeeRoundTripSweep", [])], "roundtrip")
+        assert got == ["|".join(str(n) for n in range(35))]
+
+    def test_aliases_and_altium_raw_enum_spelling(
+        self, fpc_executable, tmp_path
+    ):
+        """Callers write these several ways; all must land on eDot/eClock."""
+        dot_spellings = ["inverted", "INVERTED", "  inverted  ", "inversion",
+                         "bubble", "active_low", "activelow", "negated",
+                         "eDot", "e_dot"]
+        clk_spellings = ["clock", "clk", "CLOCK", "eClock"]
+        cases = ([("StrToIeeeSymbol", [s]) for s in dot_spellings]
+                 + [("StrToIeeeSymbol", [s]) for s in clk_spellings])
+        got = self._pascal(fpc_executable, tmp_path, cases, "alias")
+        assert got == ["1"] * len(dot_spellings) + ["3"] * len(clk_spellings)
+
+    def test_bare_ordinals_pass_through_and_junk_falls_back(
+        self, fpc_executable, tmp_path
+    ):
+        """A bare ordinal reaches members with no friendly name. Anything
+        unrecognised, out of range, or negative becomes eNoSymbol rather
+        than a wrong decoration or a crash inside the pin loop."""
+        cases = [
+            ("StrToIeeeSymbol", ["9"]),      # in range, passes through
+            ("StrToIeeeSymbol", ["34"]),     # last member
+            ("StrToIeeeSymbol", ["35"]),     # one past the end
+            ("StrToIeeeSymbol", ["-3"]),     # negative
+            ("StrToIeeeSymbol", ["999999"]),
+            ("StrToIeeeSymbol", ["nonsense"]),
+            ("StrToIeeeSymbol", [""]),
+            ("StrToIeeeSymbol", ["e"]),      # lone 'e', the prefix-strip edge
+            ("StrToIeeeSymbol", ["dot;x=1"]),  # a payload separator leaking in
+        ]
+        got = self._pascal(fpc_executable, tmp_path, cases, "bounds")
+        assert got == ["9", "34", "0", "0", "0", "0", "0", "0", "0"]
+
+    def test_naming_an_ordinal_back(self, fpc_executable, tmp_path):
+        """The reverse direction, used when reporting a pin's decoration."""
+        cases = [("IeeeSymbolToStr", [n]) for n in ("0", "1", "3", "34", "99", "-1")]
+        got = self._pascal(fpc_executable, tmp_path, cases, "tostr")
+        assert got == ["no_symbol", "dot", "clock",
+                       "bidirectional_signal_flow", "no_symbol", "no_symbol"]

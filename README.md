@@ -1,6 +1,6 @@
 # eda-agent
 
-MCP server that lets an AI (or any MCP-compatible client) **interact with a live Altium Designer session**, with KiCad available as an additional backend. It exposes 300+ tools covering schematic, PCB, library, project, and design-agent operations, over a persistent DelphiScript bridge for Altium (or KiCad's own IPC API). The AI reads the design you currently have open, asks questions about it, and can modify it in place while you watch. The [backend](#eda-backends-altium--kicad) is selected at startup, so an Altium user and a KiCad user each see only their tool set.
+MCP server that lets an AI (or any MCP-compatible client) **interact with a live Altium Designer session**, with KiCad available as an additional backend. It exposes around 400 tools on Altium, and 480+ with both backends registered, covering schematic, PCB, library, project, and design-agent operations, over a persistent DelphiScript bridge for Altium (or KiCad's own IPC API). The AI reads the design you currently have open, asks questions about it, and can modify it in place while you watch. The [backend](#eda-backends-altium--kicad) is selected at startup, so an Altium user and a KiCad user each see only their tool set.
 
 > **⚠️ Experimental.** Not all tools are extensively tested. Some can crash the Altium DelphiScript engine. See [Known limitations](#known-limitations) before using on any design you haven't backed up.
 
@@ -31,7 +31,7 @@ This is **not** a batch tool that opens a project, runs a script, and exits. It'
 
 ## Features
 
-- **300+ tools** across application, project, library, schematic/general, PCB, and design-agent categories
+- **~400 tools on the default Altium backend** (480+ with both registered) across application, project, library, schematic/general, PCB, and design-agent categories
 - **Generic primitives** (`obj_query`, `obj_modify`, `obj_create`, `obj_delete`, `run_process`) that work on almost any schematic or PCB object type via late-binding, avoiding per-type handler proliferation
 - **Bulk batch primitives**: `obj_batch_modify`, `obj_batch_create`, `obj_batch_delete`, `pcb_place_tracks`, `pcb_move_components`, `sch_place_wires`, `place_net_labels`, `place_power_ports`, `sch_place_components`, `sch_set_components_parameters`, `get_sch_doc_pins`, `lib_add_pins`, `proj_get_connectivity_many`, `sim_attach_primitives`. Collapse N LLM turns + N IPC round-trips into one. Typical wall-time savings: 10 to 100x on multi-item edits
 - **Design review snapshot**: `design_review_snapshot` bundles 8 to 12 review reads (project info, components, nets, rules, diff, messages, stats, unrouted, BOM) into a single call. One LLM turn instead of a dozen
@@ -130,6 +130,273 @@ claude mcp add -s user altium eda-agent
 claude mcp add -s user kicad -e EDA_AGENT_BACKEND=kicad eda-agent
 ```
 
+## Tool count (clients that cap it)
+
+Some MCP clients limit how many tools a server may expose, or serialize every
+schema into the model context at startup and slow noticeably. This server
+registers several hundred. Set `EDA_AGENT_TOOLSET=minimal` (or pass
+`--toolset minimal`) to advertise just two:
+
+- `tool_catalog` - find an operation by category, maturity, interaction or name,
+  and get its parameters with `with_schema=True`.
+- `tool_invoke` - run any tool by name with an arguments dict.
+
+Every other tool stays registered and reachable through that pair; only the
+advertised list shrinks, from several hundred to two.
+
+```bash
+claude mcp add -s user altium -e EDA_AGENT_TOOLSET=minimal eda-agent
+```
+
+The tools are deliberately **not** merged into generic dispatchers. Each one
+carries its own name, description and schema, and those are what let a model
+find the right operation and follow the per-tool discipline; collapsing them
+into `pcb(action=...)` style entry points loses that. Hiding them from the
+advertised list keeps the information available on demand via `tool_catalog`.
+
+The trade-off: in `minimal` the model no longer sees
+tool schemas up front, so it must discover before it can act, and an argument
+mistake surfaces as the target tool's own error rather than a schema
+validation message. Call `tool_catalog(query=..., with_schema=True)` to get a
+tool's parameters and required list before invoking it, rather than guessing
+argument names - some are not what they look like (`current_amps`, not
+`current_a`), and the same tool can differ between backends. Prefer `full`
+(the default) unless your client forces otherwise.
+
+## Part sourcing (multiple providers, none default)
+
+`part_search` queries **every** enabled part provider and merges the results,
+each hit attributed to the source that found it. `part_fetch` then pulls one
+part's detail from a provider you name.
+
+Sources come in **two kinds**, merged into one result but never conflated. A
+**library** provider yields geometry you can place. A **catalogue** provider
+yields part identity, a datasheet and stock, and no geometry at all. Every hit
+carries its `kind`, because discovering that a distributor hit has no symbol
+after picking the part is the expensive way to learn it. They are not tiers and
+neither is a fallback for the other: a catalogue tells you *which* part to use
+and hands you the datasheet every check here measures against, and a library
+tells you whether you can draw it.
+
+| Provider | Kind | What it is | Network | Credential |
+|---|---|---|---|---|
+| `altium_local` | library | The `.SchLib` libraries already on this machine. The only source that answers whether you **already own** a part, which is what stops an import creating a second symbol with a slightly different name. Reads the OLE files directly, so it works with Altium closed. Nothing to download: a hit is already an Altium symbol. Point it with `EDA_AGENT_ALTIUM_LIBRARIES` | no | no |
+| `digikey` | catalogue | Digi-Key's catalogue: MPN, datasheet, lifecycle and live stock. Needs an OAuth client from their developer portal via `DIGIKEY_CLIENT_ID` and `DIGIKEY_CLIENT_SECRET` | yes | yes |
+| `easyeda` | library | EasyEDA / LCSC component data. Fetch by LCSC part number works; **search is unavailable** because the upstream endpoint was withdrawn | yes | no |
+| `element14` | catalogue | element14 (Farnell, Newark): MPN, datasheet and stock. Needs `ELEMENT14_API_KEY`; `ELEMENT14_STORE` picks the regional storefront, which changes the catalogue you see | yes | yes |
+| `kicad_local` | library | The libraries KiCad installed on this machine. A fetch resolves the symbol's footprint reference against the installed `.pretty` libraries and the footprint's model reference against the `3dmodels` tree, so a hit can be a whole part with a 3D body (18003 of the 22728 symbols shipped with KiCad 10.0.1 name a footprint). No MPN or datasheet for most entries | no | no |
+| `mouser` | catalogue | Mouser's catalogue: MPN, datasheet and stock. Needs `MOUSER_API_KEY` | yes | yes |
+| `nexar` | catalogue | Nexar, the API behind Octopart: aggregates offers across many distributors at once. Needs `NEXAR_CLIENT_ID` and `NEXAR_CLIENT_SECRET` | yes | yes |
+| `partreel` | library | An open registry of verified KiCad parts, no login and no key: `/api/v1/parts.json` serves 21,657 parts. Yields KiCad files, usable in Altium through `lib_kicad_import`. Points at PartReel the way the Digi-Key client points at Digi-Key; `PARTS_REGISTRY_URL` redirects it at any API-compatible registry, since the API shape is the contract rather than the host. Run by a third party, proposed in issue #12 by its operator | yes | no |
+| `public_libraries` | library | Openly published KiCad libraries, no login and no key: KiCad's own 12,011 footprints, Digi-Key's 936, and JLCPCB's 20 symbol libraries plus footprints. Mostly **land patterns rather than symbols**, which is what you want once the part is chosen but its geometry is not. Indexed through GitHub's documented API, one request per repository, cached on disk for a week. `EDA_AGENT_CACHE_DIR` relocates the cache | yes | no |
+| `tme` | catalogue | TME: MPN, datasheet and stock, strongest on European availability. Requests are HMAC signed; needs `TME_TOKEN` and `TME_SECRET`, and `TME_COUNTRY` selects the market | yes | yes |
+
+**No provider is a default and none is preferred.** All are searched equally,
+and the merged order is alphabetical by provider then part, which is not a
+relevance ranking: do not read the first hit as the best one. `part_fetch`
+requires the provider name rather than supplying one, so a fetch always states
+which source it trusts. Tests enforce this rather than leaving it to
+convention, because a default parameter or a preference sort would quietly make
+one source the answer to every query.
+
+A provider that cannot answer reports **why** instead of returning nothing.
+"The endpoint is gone" and "no such part exists" are different answers, and
+only one of them is a reason to stop looking.
+
+Select a subset with `EDA_AGENT_PART_PROVIDERS=kicad_local,altium_local` (the
+variable selects, it never ranks). `PARTS_REGISTRY_URL` names the registry the
+`partreel` client queries; there is no default, so that source stays off until
+you choose one. Call `part_search` with an empty query to list the providers
+and who operates them.
+
+**Four of the ten answer on a fresh install**, none of them needing a
+credential: `altium_local` and `kicad_local` read libraries already on disk,
+`partreel` queries an open registry, and `public_libraries` indexes openly
+published KiCad libraries from GitHub. That is deliberately more than one, so
+no single free source is load-bearing. The five catalogues each need their own
+credential and none ships with one, and EasyEDA's search endpoint was withdrawn
+upstream (fetch by LCSC part number still works). Every source that cannot answer reports itself unavailable, names the
+environment variable it wants, and says so per provider in the search result
+rather than folding into an empty list.
+
+A client pointing at its own service is not a preference: the Digi-Key client
+points at Digi-Key, and `partreel` points at PartReel. What neutrality means
+here is the absence of RANKING, and that is enforced by tests rather than left
+to intent. No source is consulted as a fallback when another returns thin
+results, none can reach the front of a merged list, and there is deliberately
+no "default provider" setting to point anywhere.
+
+**What was verified, and what was not.** Every catalogue endpoint above was
+probed live before it was written into the code: a 401 or 403 proves the host
+and path exist and refused only for lack of a credential. Three further
+candidates were probed and **dropped** for answering 404 on the recalled URL
+rather than being shipped as plausible guesses. What that probing could *not*
+establish, without a paid credential, is the request and response shapes. So
+every catalogue publishes `verified_live: false`, and the parsers are written
+to degrade a single hit on a renamed field rather than assume a shape and lose
+the whole search. The flag flips only when a client has actually run against
+the live API.
+
+**Access policy of the hosts, checked rather than assumed.** Every host these
+providers reach was checked for a `robots.txt` before anything was built
+against it. That check changed the design once: `gitlab.com/robots.txt` carries
+`Disallow: /api/v*`, and the GitLab API is where KiCad's canonical *symbol*
+repository lives, so `public_libraries` does not touch GitLab and serves
+footprints from GitHub instead. KiCad's symbols are already covered by
+`kicad_local`, which reads them off disk. GitHub's API is used as documented,
+with a User-Agent naming this project rather than impersonating a browser, one
+recursive request per repository instead of directory walking, a week-long disk
+cache so repeat searches cost nothing, and rate limiting treated as "back off"
+rather than "no results". PartReel's `robots.txt` allows all agents and names
+`ClaudeBot` and `GPTBot` explicitly. TrustedParts was evaluated and **dropped**:
+it returns 403 to non-browser clients, so access is by arrangement rather than
+open, and nothing here works around that.
+
+One measured behaviour is worth naming, because it is the failure this layer
+exists to prevent: **Mouser answers an invalid API key with HTTP 200** and an
+`Errors` array. A client that judged success by status code would report a
+rejected credential as a search that ran and found nothing. Payload-level error
+detection is in the shared base class, not in five copies, and a mutation test
+confirms removing it breaks the guard.
+
+Each hit carries `formats`, `usable_in` and `import_with`: the tool that turns
+that hit into a real part on the active backend. Those live on the provider,
+not on the part, so without them a result gives no way to tell a lead from a
+dead end. `import_with` is derived from the same map that gates a provider's
+Altium claim, so it can only ever name an importer that exists, and it comes
+back empty (never a guess) for a format nothing reads.
+
+A hit is a lead, not a verified part. The `provenance` and `license` fields
+report what the provider claims about where its geometry came from, and a blank
+means unknown rather than permissive. Audit any imported footprint against the
+manufacturer land pattern with `lib_audit_footprint_vs_datasheet` before
+trusting it.
+
+Pass `download_dir` to `part_fetch` to also write a provider's library files
+there (off by default, since it writes to disk). Only known artefact kinds are
+taken, and each is saved with the extension this code expects rather than one
+read out of the payload.
+
+Downloaded files are checked against the KiCad installed on this machine,
+because a registry can publish a **newer** s-expression format than your KiCad
+can open. Measured against the live service: PartReel ships format `20260206`
+while KiCad 10.0.1 writes `20251024`, and KiCad's symbol parser refuses the
+newer file outright ("Unable to load library") though its footprint parser
+accepts it. Any such file comes back with a `*_warning` naming both versions,
+rather than looking like a clean download.
+
+### Getting a KiCad-format part into Altium
+
+Two of the three providers publish KiCad format, so on the Altium side a hit
+would otherwise be a dead end. `lib_kicad_import` reads `.kicad_sym` and
+`.kicad_mod` and produces the same thing `lib_easyeda_import` does: with
+`target=altium`, an ordered plan of this server's own library tools, run by
+`design_execute_plan`. Altium's binary library formats are never synthesized.
+
+The two importers share one neutral geometry model and one Altium emitter, so
+they cannot drift apart: a fix to pad shapes or arc handling lands in both. The
+s-expression reader is written here rather than taken as a dependency, which
+keeps the escaping rules (a footprint named `2.5"`, a description containing
+parentheses) verifiable instead of trusted.
+
+Eight things about the format are silent when handled wrongly, and all eight
+produce something that still looks like a converted part:
+
+- **Derived symbols.** Over half of KiCad's standard entries (12209 of 22728 in
+  10.0.1) carry no geometry at all: they are `(extends "PARENT")` and inherit
+  the parent's pins and body, restating only the properties that differ. That
+  link is followed, with the child's own values winning and everything it does
+  not restate inherited. Not following it yields a part with no pins.
+- **Multi-part components.** A quad gate keeps each gate in its own unit, all
+  drawn at the same coordinates. They convert in one call to a real Altium
+  multi-part symbol (`part_count` plus per-pin `owner_part_id`), not to N
+  symbols to merge by hand; pass `unit=N` to take a single sub-part instead.
+  Merging units into a flat symbol would stack every unit's pins on the same
+  points and still look converted.
+
+  Supply rails come across whichever way the source expresses them. A symbol
+  that puts them in **unit 0** (shared by every unit; 678 unit-0 sub-symbols
+  in KiCad 10.0.1 carry pins) maps straight onto Altium's `owner_part_id=0`,
+  so a CD4001 becomes four gates sharing one Vdd/Vss. A symbol that gives them
+  their **own unit** instead keeps that structure, and a warning names the
+  shared alternative with the exact edit rather than silently reinterpreting
+  what the file says. Both forms are legitimate; only one of them is what the
+  file actually contains.
+- **Pin electrical type.** Carried across rather than flattened, because it is
+  what ERC reasons about: an open-collector output recorded as passive stops
+  ERC asking for its pull-up, and two of them driving one net stops being a
+  reported conflict. KiCad's `open_collector`, `open_emitter` and `tri_state`
+  map to Altium's `open_collector`, `open_emitter` and `hiz` (1827, 119 and
+  1858 pins respectively in KiCad 10.0.1). `no_connect` becomes passive, and
+  that one is a genuine gap rather than a choice: Altium's pin vocabulary has
+  no "not connected" (an unused pin carries a No-ERC directive instead).
+- **Hidden pins.** Kept, and kept hidden (5378 of the 106032 pin definitions
+  in KiCad 10.0.1 are hidden). Dropping them would lose real supply and
+  no-connect pins; showing them would clutter every symbol that hides them.
+  Both the modern `(hide yes)` and the older bare `hide` spelling are read,
+  since a library can predate the KiCad that opens it.
+- **Body styles.** `NAME_1_1` and `NAME_1_2` are the same unit drawn two ways
+  (KiCad's DeMorgan alternate), with the same pins. Taking both duplicates
+  every pin, so one style is converted and the other is reported.
+- **Rounded rectangle pads.** Used by 116 of the 206 SMD footprints sampled
+  from KiCad 10.0.1, and Altium supports the shape natively, so it is not
+  flattened to a plain rectangle. The corner value does not carry over
+  directly: Altium's
+  documentation defines its percentage against *half* the shortest pad side,
+  while KiCad's `roundrect_rratio` is measured against the *whole* shorter
+  side, so the conversion is a factor of two. Multiplying by 100 would halve
+  every corner radius and look entirely plausible.
+- **Y axis.** `.kicad_sym` is Y-up like the neutral model, `.kicad_mod` is
+  Y-down. A sign error mirrors the land pattern.
+- **Pin angles and arcs.** KiCad's pin angle already matches the neutral
+  convention and passes through untouched (EasyEDA's is 180 degrees off, and
+  the asymmetry is deliberate). Arcs are stored as start/mid/end, so the radius
+  and sweep are recovered from the circle through those three points.
+
+A local hit can also carry its **3D body**. KiCad ships STEP models and
+Altium's linker takes STEP, so `part_fetch` resolves the footprint's model
+reference against the installed `3dmodels` tree and `lib_kicad_import` adds a
+`lib_link_3d_model` step for it (while the `.PcbLib` is still the active
+document, which is where that tool has to run). The path has to be one that
+resolved: the tool loads the file, so a guess would either fail on execution or
+attach the wrong shape. An unresolved reference is reported instead.
+
+Generated KiCad files are checked against **KiCad's own parser** (`kicad-cli`),
+not just re-read by this code. That matters because this reader is lenient by
+design and a round trip through it cannot see output KiCad refuses: the writer
+once emitted two graphic-style tokens on an inverted pin, which read back as a
+merely-missing bubble here and as `Unable to load library` in KiCad. Those
+tests skip when KiCad is absent.
+
+Anything with no faithful Altium equivalent comes back in `warnings` rather
+than being quietly approximated. The library API takes one hole diameter and
+no plating flag, so a **slotted** drill is emitted round and an **unplated**
+hole is emitted plated: both are the right size and the wrong thing, and
+neither would show up anywhere downstream. Custom and trapezoid pads are
+emitted as their bounding rectangle.
+
+**Solder-paste and mask apertures are never emitted as pads.** Fine-pitch
+chip footprints subdivide paste with apertures that carry no copper (332 of
+the 6902 pads in KiCad 10.0.1's sampled libraries), and an Altium pad always
+carries copper, so emitting one would short the pads the aperture exists to
+subdivide. They are skipped because of their layer, not because they usually
+lack a designator, and reported as apertures with the advice to draw them as
+paste-layer regions.
+
+**Active-low and clock pin markers** are read but cannot be written. `ISch_Pin`
+has the slots (`Symbol_OuterEdge` for the inversion bubble, `Symbol_InnerEdge`
+for the clock wedge) and `lib_add_pins` has no field for either, so setting
+them needs a bridge change. They are reported per part rather than dropped
+silently, because an active-low pin drawn plain states the opposite of the
+truth. Both of KiCad's spellings count: `inverted` (the bubble) and `*_low`
+(IEEE's wedge) mean the same thing.
+
+These checks live in the shared emitter, so they apply to `lib_easyeda_import`
+too.
+
+Check the result against the manufacturer land pattern with
+`lib_audit_footprint_vs_datasheet` before using it.
+
 ### KiCad
 
 KiCad support talks to a running KiCad over its own supported IPC API (`kicad-python`), so - unlike the Altium side - there are no scripts to install. Requirements: KiCad 9+, the API server enabled (Preferences → Plugins → KiCad API server), a board open in the PCB editor, and `pip install -e .[kicad]`.
@@ -221,6 +488,8 @@ Bulk tools like `obj_batch_modify`, `pcb_move_components`, and `sch_place_compon
 
 **This tool is experimental. Please read this section before using on a design you haven't backed up.**
 
+> Bridge changes are checked by Free Pascal and a linter before they ship, which cannot prove Altium's own DelphiScript engine accepts them: the two differ on which identifiers exist, and an undeclared one faults at runtime rather than at compile time. [`docs/RELEASE_VERIFICATION.md`](docs/RELEASE_VERIFICATION.md) is the procedure for closing that gap on a release, starting with a self-test that runs inside Altium and needs no document.
+
 ### Altium DelphiScript engine can crash
 
 Some tool paths trigger DelphiScript compile or runtime errors ("Undeclared identifier…", "Could not convert variant of type (Dispatch) into type (OleStr)", etc.). When that happens, the script project halts mid-execution and the polling loop stops responding. You will see one of:
@@ -231,6 +500,16 @@ Some tool paths trigger DelphiScript compile or runtime errors ("Undeclared iden
 **Recovery:** in Altium Designer, open the script project tab and press the **red Stop** button in the Script IDE toolbar (equivalently **Run > Stop** from the menu, or **Ctrl+F3**; use **Ctrl+Pause/Break** if the script is stuck in an infinite loop). This stops the halted debugger. Then re-launch the polling loop via **File > Run Script... > StartMCPServer > Run**.
 
 This is an ongoing reliability effort. Every identified crash is either fixed or guarded. If you hit a new one, the Altium error dialog tells you the exact identifier or line. Opening an issue with that text helps us harden the relevant path.
+
+### Projects on a UNC network path do not open
+
+Use a mapped drive letter (`Z:\team\board.PrjPcb`) rather than a UNC path (`\\server\team\board.PrjPcb`). A path given in UNC form arrives at the bridge with one leading backslash missing, so the file is not found and the error names a path that looks almost right. Every other path form is unaffected, and a mapped drive is the workaround until the fix ships with the next script deploy.
+
+### Text above Latin-1 becomes question marks
+
+Altium's DelphiScript strings are single-byte, so the bridge carries text as one byte per character. Any character above U+00FF is replaced with `?` on the way in, silently. Accented Latin, the micro sign, and the degree sign are all below that boundary and survive; the ohm sign and any CJK text do not, so `10Ω` arrives as `10?`.
+
+This shows up most often on imported parts: LCSC descriptions are frequently Chinese, and `lib_easyeda_import` passes the description straight through. If you need those fields readable, set them to a transliteration before importing, or edit them in Altium afterwards.
 
 ### Altium tool buttons relying on internal scripting pause while the server is running
 
@@ -251,7 +530,7 @@ In practice, while an MCP client is attached and sending keep-alive pings every 
 
 ### Tools vary in maturity
 
-Not every one of the 300+ tools has been exercised on every Altium version or design size. The [generic primitives](#generic-primitives-the-core) and the core `application` / `project` tools are the best-tested. Some PCB modify operations (polygon repour, room creation, align-components) are less battle-tested. Queries are generally safer than mutations.
+Not every one of these tools has been exercised on every Altium version or design size. The [generic primitives](#generic-primitives-the-core) and the core `application` / `project` tools are the best-tested. Some PCB modify operations (polygon repour, room creation, align-components) are less battle-tested. Queries are generally safer than mutations.
 
 ## Timeout and server lifecycle
 
@@ -283,7 +562,7 @@ The polling loop goes into idle mode after ~1 second of no MCP commands. In idle
 
 ## Tool reference
 
-300+ tools grouped into six categories. The **generic primitives** are the engine; the rest are convenience wrappers or category-specific operations.
+The tools below, grouped into six categories. The **generic primitives** are the engine; the rest are convenience wrappers or category-specific operations.
 
 > For a browsable index with per-tool **maturity** (offline / simulator / live-only) and **interaction** badges (which tools open a blocking dialog or leave work incomplete), see [`docs/TOOL_REFERENCE.md`](docs/TOOL_REFERENCE.md), auto-generated by `python scripts/gen_tool_reference.py`. At runtime, the `tool_catalog` tool serves the same data filtered.
 
@@ -357,7 +636,7 @@ Lifecycle, parameters, compilation, analysis, outputs, ECO sync, variants.
 | `proj_list_outjob_containers` / `proj_run_outjob` / `proj_run_outjob_all` | OutJob execution (`proj_run_outjob_all` fires every container in one pass) |
 | `proj_generate_fab_package` | Run every OutJob container (Gerber / NC drill / IPC-356 / P&P / assembly / BOM) and return a consolidated manifest of produced files; optional STEP / DXF |
 
-### Library (60 tools)
+### Library (65 tools)
 
 Symbol and footprint creation, linking, batch editing, comparison.
 
@@ -365,7 +644,8 @@ Symbol and footprint creation, linking, batch editing, comparison.
 |---|---|
 | `lib_create_symbol` / `lib_copy_component` / `lib_set_component_description` / `lib_set_current_component` | Symbol lifecycle. `lib_set_current_component` switches the SchLib editor's active component so subsequent generic-primitive calls (`obj_modify` on pins / rect / parameters) target the named symbol rather than whatever was last UI-selected |
 | `lib_add_pins` / `lib_get_pin_list` | Pins (places the whole pinout in one call) |
-| `lib_add_symbol_rectangle` / `lib_add_symbol_lines` / `lib_add_symbol_arc` / `lib_add_symbol_polygon` | Symbol graphics. Coordinates auto-snap to the 100-mil grid. `lib_add_symbol_lines` does N lines in one IPC round-trip for diode glyphs / op-amp triangles / connector outlines |
+| `lib_add_symbol_text` | Free text on a symbol body (Altium's `ISch_Label`): polarity marks, pin-group headings, NC annotations. Batched like `lib_add_pins`. `font_size` is Altium's own unit, NOT mils, and is deliberately not converted from one |
+| `lib_add_symbol_rectangle` / `lib_add_symbol_lines` / `lib_add_symbol_arc` / `lib_add_symbol_polygon` | Symbol graphics. `lib_add_symbol_rectangle` takes `fill_color` / `border_color`; a real colour also makes the rectangle solid, which is what discipline rule 17 asks for on an IC body (`-1` means no fill). Coordinates auto-snap to the 100-mil grid. `lib_add_symbol_lines` does N lines in one IPC round-trip for diode glyphs / op-amp triangles / connector outlines |
 | `lib_create_footprint` | Footprint creation |
 | `lib_add_footprint_pad` / `lib_add_footprint_track` / `lib_add_footprint_arc` | Footprint primitives |
 | `lib_link_footprint` / `lib_link_3d_model` | Link footprint / 3D model to symbol |
@@ -373,6 +653,10 @@ Symbol and footprint creation, linking, batch editing, comparison.
 | `lib_rename_component` / `lib_delete_component` | Rename or delete one symbol. Both accept `component_index` (the `index` from `lib_get_components`) as well as `component_name`, so a part whose LibReference holds bytes a caller cannot reproduce (an embedded quote or a control char from a broken import) is still reachable |
 | `lib_batch_set_params` / `lib_batch_rename` | Bulk parameter / rename operations |
 | `lib_diff_libraries` | Compare two libraries |
+| `lib_easyeda_import` | Convert an LCSC / EasyEDA part into a real library part. Independent implementation from EasyEDA's published format spec, so no third-party converter is involved: symbol, footprint, pads, drills, silkscreen, 3D model and metadata all convert. `target=altium` returns an ordered plan of this server's own library tools (Altium's binary formats are never synthesized, the authoring API is used instead); `target=kicad` writes `.kicad_sym` / `.kicad_mod` plus a `.wrl` 3D model converted from EasyEDA's OBJ payload; `target=inspect` parses only. Works offline from a saved payload. Geometry with no faithful equivalent is reported in `warnings` rather than quietly approximated: polygon pads, filled regions in Altium, the HEIGHT of symbol body text (the text itself is placed as an `ISch_Label`; Altium's font size is not in mils and the conversion is undocumented, so the source range is reported instead of guessed), and the two that look correct after conversion, a slotted drill emitted round and an unplated hole emitted plated. The result should be checked with `lib_audit_footprint_vs_datasheet` |
+| `lib_easyeda_search` | EXPECT IT TO FAIL. EasyEDA withdrew its public part-search endpoint and LCSC's own search API answers with an error body, so there is nothing left to query and no login would restore it (the route returns an HTML error page, not an auth challenge). Get the LCSC part number from a browser and pass it to `lib_easyeda_import` instead, which is unaffected |
+| `lib_kicad_import` | The other direction from `lib_export_kicad_symbol`: read `.kicad_sym` / `.kicad_mod` and produce an Altium part. Needed because two of the three part providers publish only KiCad format, so without it every one of those hits is a dead end on Altium. `target=altium` returns an ordered plan of this server's own library tools; `target=inspect` parses only. Shares the neutral geometry model and the Altium emitter with `lib_easyeda_import`, so the two cannot drift. The s-expression reader is written here rather than depended on, so its escaping rules are verified not trusted. Conversions handled: derived symbols (`extends`, which is over half of KiCad's standard library and would otherwise convert to a part with no pins), multi-part components (a quad gate or dual op-amp becomes one Altium symbol with `part_count` and per-pin `owner_part_id` in a single call, never a flat merge), hidden pins (kept, and kept hidden), DeMorgan body styles (one taken, so pins are not duplicated), mm to mils, `.kicad_sym` Y-up vs `.kicad_mod` Y-down, KiCad pin angles (which pass through, unlike EasyEDA's 180-degree offset), arcs recovered from KiCad's start/mid/end form, active-low and clock pin markers (`Symbol_OuterEdge` / `Symbol_InnerEdge`, 1872 of them across 57 of KiCad's shipped libraries), pin name/number visibility (declared once per symbol in KiCad and per pin in Altium, which is how every passive is drawn), symbol body text, real text height and stroke instead of a constant, mirrored bottom-side text (unmirrored bottom silkscreen reads backwards on the board and this server's own `audit_find_mirrored_pcb_text` flags it), and the closing edge of a filled outline (`fp_poly` stores a closed area without repeating the final vertex, so walking consecutive pairs alone leaves a notch in 6028 polygons across 3626 of the shipped footprints). Adds a `lib_link_3d_model` step when `model_3d_path` names a STEP file that exists (KiCad ships STEP, which is what Altium's linker wants). Custom and trapezoid pads are emitted as their bounding rectangle, and that plus slotted drills emitted round and unplated holes emitted plated is reported in `warnings` |
+| `lib_clear_source_library` | Unpin every symbol (or a named subset) from its source-library provenance: clears SourceLibraryName, resets TargetFileName, syncs DesignItemId to the LibReference. The library-side sibling of `sch_clear_source_library`; the minimal fast path of `lib_normalize_implementations` when only provenance needs cleaning |
 | `lib_get_pad_geometry` / `lib_audit_footprint_vs_datasheet` | Audit one footprint against the manufacturer's recommended land pattern. The agent transcribes the datasheet drawing into a spec (pad grid, dimensions, numbering, thermal pad, paste policy - citation required); the tool reads the real pad geometry in mm precision and reports every discrepancy with expected-vs-actual: count, per-pad position/size/shape/drill, numbering sequence, thermal paste. Alignment to the library's origin and rotation convention is automatic; a mirrored pattern is deliberately reported, never compensated |
 | `lib_audit_footprint_policies` | Sweep a whole PcbLib and flag footprints that break the library's *own* conventions - pad rules (numbering scheme, drill/layer integrity), pin-1 markings, layer usage, courtyard, silkscreen, 3D models, designator presence/layer/height/centring. Infers each convention by majority across the library; every finding carries expected-vs-actual to drive a fix. Pass `policy` to enforce an explicit standard |
 | `lib_convert_designators_to_stroke` | Convert every TrueType `.Designator` in a PcbLib to a stroke font (clears bold/italic/UseTTFonts). TrueType PCB text won't persist a position change - it reverts on reload - so bold/italic designators can't be centred until converted. Reads back to confirm, saves, reloads |
@@ -398,7 +682,7 @@ Schematic-side operations plus viewport and sheet management.
 | `sch_place_sheet_symbol` / `sch_place_sheet_entry` / `sch_place_bus_entry` | Hierarchical sheet primitives |
 | `sch_place_components` | Instantiate one or more components from an SchLib at (x,y) with rotation and designator override |
 | `sch_set_sheet_size` | Change SheetStyle (A / A0-A4 / Letter / Legal / Custom) |
-| `sch_place_no_erc` / `sch_place_junction` / `sch_place_image` / `sch_place_note` / `place_directive` | Markers, annotations, directives |
+| `sch_place_no_erc` / `sch_place_junction` / `sch_place_image` / `sch_place_note` / `sch_add_directive` | Markers, annotations, directives |
 | `sch_place_rectangle` / `sch_place_line` | Graphical primitives |
 | `obj_copy` / `obj_count` / `proj_replace_component` | Bulk operations. `proj_replace_component` also syncs the component's Design Item ID so a re-linked part re-matches against the new library instead of showing Not Found |
 | `sch_clear_source_library` | Unpin placed components from a stale source library: clears SourceLibraryName and syncs DesignItemId to LibReference so Altium re-matches from Available Libraries. Schematic mirror of `pcb_clear_source_footprint_library`; per sheet, with optional designator filter |
@@ -421,7 +705,7 @@ Schematic-side operations plus viewport and sheet management.
 | `obj_crossref_net` | Sch pin list vs PCB pad list for a named net: diff + `in_sync` flag |
 | `obj_run_process` | Run any Altium process command |
 
-### PCB (104 tools)
+### PCB (105 tools)
 
 Queries and modifications on the active PCB document.
 
@@ -437,7 +721,7 @@ Queries and modifications on the active PCB document.
 | `pcb_get_differential_pairs` | Enumerate every `IPCB_DifferentialPair` with both half-lengths + skew_mils. Catch length-mismatch high-speed bugs (USB / HDMI / PCIe transceiver skew limits) pre-fab |
 | `pcb_get_components` / `pcb_move_components` / `pcb_flip_component` / `pcb_align_components` / `pcb_snap_to_grid` | Component placement (`pcb_move_components` moves N components in one round-trip; pass a single-element list to move one) |
 | `pcb_get_component_pads` / `pcb_get_pad_properties` | Pad inspection |
-| `pcb_place_tracks` / `pcb_set_track_width` / `pcb_get_trace_lengths` / `pcb_fillet_corners` | Track operations (`pcb_place_tracks` routes a whole net in one round-trip; pass a single-element list for one segment; `pcb_fillet_corners` rounds acute same-net joins with a tangent arc, defaults to dry_run) |
+| `pcb_place_tracks` / `pcb_set_track_width` / `pcb_get_trace_lengths` | Track operations (`pcb_place_tracks` routes a whole net in one round-trip; pass a single-element list for one segment) |
 | `pcb_place_via` / `pcb_place_via_array` / `pcb_get_vias` | Via operations and stitching arrays |
 | `pcb_set_via_soldermask_relief` | Open soldermask over via barrels (barrel relief) |
 | `pcb_place_arc` / `pcb_place_text` / `pcb_place_fill` / `pcb_place_pad` | Primitive placement |
@@ -470,6 +754,7 @@ Queries and modifications on the active PCB document.
 | `pcb_clear_source_footprint_library` | Clear `SourceFootprintLibrary` so components re-match by lib-ref name from current Available Libraries (library-consolidation housekeeping) |
 | `pcb_place_stitching_vias` | Fill a rectangle with via stitching on a target net (collision-checked, defaults to dry_run) |
 | `pcb_make_paste_grid` | Split a thermal pad's paste opening into a grid (QFN swimming fix) |
+| `pcb_apply_dnp_paste_exclusion` | Suppress stencil paste on Not-Fitted components, the remediation half of `audit_variant_not_fitted`. Takes that tool's list by default so there is one definition of Not Fitted. Collapses the aperture per surface pad; through-hole pads have none and are counted separately. Reversible with `restore=True`, which requires the designators the apply reported, or `use_current_variant=True` to re-resolve them deliberately, since a variant change between the two calls would otherwise leave a fitted part with no aperture and say nothing. `dry_run=True` names the targets without touching the board |
 | `pcb_add_testpoints_for_net_class` | Auto-place SMD or through-hole testpoints above the board for every net in a netclass without existing coverage |
 | `pcb_calc_track_current_capacity` | IPC-2221 current capacity at multiple ΔT (pure Python, no Altium hit) |
 | `pcb_calc_trace_width_for_current` | Inverse IPC-2221: minimum + recommended track width to carry a target current at a given ΔT, copper weight and layer (the design-time complement of the capacity calc). Pure Python; optional resistance / voltage drop for a length |

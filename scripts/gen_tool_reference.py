@@ -6,7 +6,7 @@ The README's tool tables are hand-maintained and don't carry the discovery
 metadata (maturity tier, interaction class) that the ``tools/metadata.py``
 registry computes. This generator enumerates the actually-registered tools,
 joins each with its metadata and one-line docstring, and emits a searchable
-reference grouped by category with maturity/interaction badges — the same
+reference grouped by category with maturity/interaction badges: the same
 data ``tool_catalog`` serves at runtime, in a browsable form.
 
 Run: ``python scripts/gen_tool_reference.py`` (writes docs/TOOL_REFERENCE.md).
@@ -28,13 +28,23 @@ _INTERACTION_NOTE = {
 
 _MATURITY_NOTE = {
     "offline": "pure Python, CI-tested",
-    "simulator": "bridge + simulator-tested",
+    # Not "simulator-tested": the label means every command the tool
+    # sends has a simulator handler, so the call CAN be driven with no
+    # Altium. Whether a test does drive it today is a separate claim,
+    # and the old wording asserted it for 131 tools that had no handler
+    # at all. See _SIMULATOR_TOOLS in tools/metadata.py.
+    "simulator": "runs against the simulator, no Altium needed",
     "live_only": "verified only on live Altium",
 }
 
 _CATEGORY_ORDER = [
-    "meta", "application", "project", "library", "schematic", "generic",
-    "pcb", "audit", "design", "simulation", "routing", "kicad", "other",
+    # "core" first: it holds the EDA-agnostic main flow (review_design,
+    # get_board_info, list_components, list_nets, run_drc, run_erc), which
+    # is where a reader starts. Unlisted categories are appended after
+    # these, so a new one is never dropped, only badly placed.
+    "core", "meta", "parts", "application", "project", "library", "schematic",
+    "generic", "pcb", "audit", "design", "simulation", "routing", "kicad",
+    "other",
 ]
 
 
@@ -71,11 +81,11 @@ def build_reference() -> str:
         "",
         f"**{len(records)} tools** across {len(by_cat)} categories.",
         "",
-        "**Maturity** — "
+        "**Maturity**: "
         + "; ".join(f"`{k}` = {v}" for k, v in _MATURITY_NOTE.items())
         + ".",
         "",
-        "**Interaction** — "
+        "**Interaction**: "
         + "; ".join(f"`{k}` = {v}" for k, v in _INTERACTION_NOTE.items())
         + ".",
         "",

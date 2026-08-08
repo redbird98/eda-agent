@@ -3,8 +3,8 @@
 """End-to-end autonomy harness test through the real MCP tool layer (1.4).
 
 The unit tests cover session.py / state_machine.py directly. This drives the
-harness the way a client does — through design_session_start /
-design_next_action / design_session_log via call_tool — so the tool wrappers
+harness the way a client does: through design_session_start /
+design_next_action / design_session_log via call_tool, so the tool wrappers
 (session resolution, asdict serialization, workspace-path handling) are
 exercised too, not just the underlying modules.
 """

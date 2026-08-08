@@ -169,3 +169,59 @@ async def test_rasterize_failure_falls_back_to_svg(tmp_path, monkeypatch):
     assert out["png_path"] is None
     assert out["rasterize_note"] == "no browser"
     assert "r.svg" in out["next_step"]
+
+
+# ---------------------- libraries are not documents ------------------
+#
+# DM_DocumentKind spells libraries 'PCBLIB' and 'SCHLIB', so the plain
+# substring test that picks the render target reads "pcb" out of
+# "pcblib" and sent a PcbLib down the PcbDoc geometry path. The user got
+# an obscure geometry failure instead of being told the active document
+# is a library, and this is not a rare state: every library-authoring
+# call leaves a SchLib or PcbLib active, which is precisely when someone
+# renders to check their work.
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["PCBLIB", "PcbLib", "SCHLIB", "SchLib"])
+async def test_a_library_is_not_auto_detected_as_a_document(
+    kind, tmp_path, monkeypatch
+):
+    bridge = _Bridge(kind)
+    tool = _capture_tool(monkeypatch, bridge)
+    out = await tool(output_path=str(tmp_path / "r.svg"), rasterize=False)
+
+    assert out["ok"] is False, (
+        f"{kind} was auto-detected as a renderable document")
+    assert "librar" in out["reason"].lower(), out["reason"]
+    # And it must not have gone off to fetch geometry for a document
+    # that is not open.
+    assert "generic.get_pcb_geometry" not in bridge.calls
+    assert "generic.get_sch_geometry" not in bridge.calls
+
+
+@pytest.mark.asyncio
+async def test_the_reason_says_how_to_proceed(tmp_path, monkeypatch):
+    """An error that only says "no" costs the caller another round trip."""
+    bridge = _Bridge("PCBLIB")
+    tool = _capture_tool(monkeypatch, bridge)
+    out = await tool(rasterize=False)
+    reason = out["reason"].lower()
+    assert "target=" in reason, reason
+    assert out["active_document"] == {"document_kind": "PCBLIB"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target,expected", [
+    ("pcb", "pcb"), ("schematic", "schematic"),
+])
+async def test_an_explicit_target_still_overrides_a_library(
+    target, expected, tmp_path, monkeypatch
+):
+    """The guard is on AUTO-detection only. A caller who names the target
+    has said what they want and keeps it."""
+    bridge = _Bridge("PCBLIB")
+    tool = _capture_tool(monkeypatch, bridge)
+    out = await tool(target=target, output_path=str(tmp_path / "r.svg"),
+                     rasterize=False)
+    assert out["ok"] is True
+    assert out["target"] == expected

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
-"""Headless Altium project reader (roadmap V1 — hardware CI).
+"""Headless Altium project reader (roadmap V1: hardware CI).
 
 Real designs are multi-sheet: a ``.PrjPcb`` project owns several ``.SchDoc``
 sheets. The authoritative sheet list lives in the sibling
@@ -11,7 +11,7 @@ sheets. The authoritative sheet list lives in the sibling
 
 (The ``.PrjPcb`` INI itself only reliably carries settings; its print-view
 paths can point at stale/renamed files, so we trust the structure file.)
-This lets ``eda-agent review`` cover a whole project, not one sheet — and
+This lets ``eda-agent review`` cover a whole project, not one sheet, and
 enables cross-sheet checks (e.g. a net label that appears on only one sheet
 but nowhere else is a likely typo). Fully offline.
 """

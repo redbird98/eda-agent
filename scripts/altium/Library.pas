@@ -333,7 +333,7 @@ Begin
         Result := BuildErrorResponse(RequestId, 'CREATE_FAILED', 'Failed to create symbol');
 End;
 
-{ Lib_SetCurrentComponent — make a named component the "current" one in    }
+{ Lib_SetCurrentComponent: make a named component the "current" one in    }
 { the SchLib editor so subsequent SchIterator-based commands (modify_objects }
 { on ePin / eRectangle / eParameter via active_doc scope) target it. The    }
 { asymmetry this fixes: GetState_SchComponentByLibRef is a read-only fetch  }
@@ -347,10 +347,16 @@ End;
 { lib_component scope handling in the generic primitives, so a caller can   }
 { target a library symbol without a separate set_current_component round-   }
 { trip.                                                                      }
-Function SelectLibComponent(Name : String) : ISch_Component;
+{ SelectLibComponentPart - focus a library symbol and make PART PartId the    }
+{ active one. A SchLib iterator only ever yields the CURRENT part's           }
+{ primitives, so on a multi-part symbol every query, modify and delete sees   }
+{ part 1 alone unless the caller can move the part pointer. PartId <= 0 keeps }
+{ the historical part-1 behaviour.                                            }
+Function SelectLibComponentPart(Name : String; PartId : Integer) : ISch_Component;
 Var
     SchLib : ISch_Lib;
     Component : ISch_Component;
+    Target, Count : Integer;
 Begin
     Result := Nil;
     If (Name = '') Or (SchServer = Nil) Then Exit;
@@ -363,16 +369,35 @@ Begin
 
     SchLib.CurrentSchComponent := Component;
     LastCreatedLibComponent := Component;
+
     { Reset PartID + DisplayMode so subsequent Lib_AddSymbol* calls write     }
-    { their primitives onto the visible normal-mode part (Part 1, DisplayMode }
-    { 0). Without this, after a fresh SchLib reopen Component.CurrentPartID   }
-    { can be 0 (no part) and AddSchObject silently succeeds but the primitive }
-    { lands on an invisible bucket -- explains the "line added with success   }
-    { but no eLine in query_objects" behaviour observed 2026-05-16.           }
-    Try Component.CurrentPartID := 1; Except End;
+    { their primitives onto a VISIBLE normal-mode part. Without this, after a }
+    { fresh SchLib reopen Component.CurrentPartID can be 0 (no part) and      }
+    { AddSchObject silently succeeds but the primitive lands on an invisible  }
+    { bucket -- explains the "line added with success but no eLine in         }
+    { query_objects" behaviour observed 2026-05-16. The reset stays; the only }
+    { change is WHICH part it selects when the caller asks for one.           }
+    Target := 1;
+    If PartId > 1 Then
+    Begin
+        Count := 1;
+        Try Count := Component.PartCount; Except End;
+        { PartCount can read high by one on some symbols; clamp rather than  }
+        { refuse, and never below 1.                                          }
+        If (Count > 0) And (PartId <= Count) Then
+            Target := PartId
+        Else
+            Target := PartId;   { let Altium reject an out-of-range id }
+    End;
+    Try Component.CurrentPartID := Target; Except End;
     Try Component.DisplayMode := 0; Except End;
     Try SchLib.GraphicallyInvalidate; Except End;
     Result := Component;
+End;
+
+Function SelectLibComponent(Name : String) : ISch_Component;
+Begin
+    Result := SelectLibComponentPart(Name, 1);
 End;
 
 Function Lib_SetCurrentComponent(Params : String; RequestId : String) : String;
@@ -470,6 +495,7 @@ End;
 Function Lib_AddSymbolRectangle(Params : String; RequestId : String) : String;
 Var
     X1, Y1, X2, Y2 : Integer;
+    FillColorStr, BorderColorStr : String;
     SchLib : ISch_Lib;
     Component : ISch_Component;
     Rect : ISch_Rectangle;
@@ -479,6 +505,8 @@ Begin
     Y1 := StrToIntDef(ExtractJsonValue(Params, 'y1'), 0);
     X2 := StrToIntDef(ExtractJsonValue(Params, 'x2'), 0);
     Y2 := StrToIntDef(ExtractJsonValue(Params, 'y2'), 0);
+    FillColorStr := ExtractJsonValue(Params, 'fill_color');
+    BorderColorStr := ExtractJsonValue(Params, 'border_color');
 
     SchLib := SchServer.GetCurrentSchDocument;
     If (SchLib = Nil) Or (SchLib.ObjectId <> eSchLib) Then
@@ -509,7 +537,27 @@ Begin
         Loc.X := MilsToCoord(X2);
         Loc.Y := MilsToCoord(Y2);
         Rect.Corner := Loc;
+
+        { Colours are OPTIONAL and only touched when supplied, so a caller }
+        { that sends neither gets exactly the outline it got before.       }
+        {                                                                   }
+        { IsSolid is the reason fill_color did nothing: it was pinned False }
+        { here, so an AreaColor would never have been drawn. A supplied     }
+        { fill therefore turns the rectangle solid as well, which is what   }
+        { lib_create_ic_symbol has been asking for all along by sending     }
+        { Altium's pale-yellow body colour and getting a hollow box.        }
+        { -1 is the tool's documented "no fill" sentinel and is what the   }
+        { parameter DEFAULTS to, so it arrives on nearly every call.       }
+        { Treating any non-empty value as a fill would have turned every   }
+        { symbol rectangle solid in colour -1.                              }
         Rect.IsSolid := False;
+        If BorderColorStr <> '' Then
+            Try Rect.Color := StrToIntDef(BorderColorStr, 0); Except End;
+        If (FillColorStr <> '') And (StrToIntDef(FillColorStr, -1) >= 0) Then
+            Try
+                Rect.AreaColor := StrToIntDef(FillColorStr, 0);
+                Rect.IsSolid := True;
+            Except End;
 
         SchServer.ProcessControl.PreProcess(SchLib, '');
         SetOwnerPart(Rect, Component);
@@ -1031,6 +1079,8 @@ End;
 Function Lib_AddFootprintText(Params : String; RequestId : String) : String;
 Var
     TextStr, LayerStr, CompName, LibPath, FocusedPath, FlagStr, RespJson : String;
+    MirrorStr : String;
+    Mirror : Boolean;
     Workspace : IWorkspace;
     Doc : IDocument;
     PcbLib : IPCB_Library;
@@ -1057,6 +1107,11 @@ Begin
     If LayerStr = '' Then LayerStr := 'TopOverlay';
     FlagStr := ExtractJsonValue(Params, 'use_ttfont');
     UseTTFont := (FlagStr = 'true') Or (FlagStr = 'True') Or (FlagStr = '1');
+    { Bottom-side text must be mirrored or it reads backwards on the      }
+    { board. audit_find_mirrored_pcb_text reports exactly this pairing:    }
+    { eBottomOverlay without MirrorFlag, and eTopOverlay with it.          }
+    MirrorStr := ExtractJsonValue(Params, 'mirror');
+    Mirror := (MirrorStr = 'true') Or (MirrorStr = 'True') Or (MirrorStr = '1');
     LibPath := ExtractJsonValue(Params, 'library_path');
     LibPath := StringReplace(LibPath, '\\', '\', -1);
     CompName := ExtractJsonValue(Params, 'component_name');
@@ -1142,6 +1197,7 @@ Begin
         Text.UnderlyingString := TextStr;
         Text.Size := MilsToCoord(Size);
         Text.Width := MilsToCoord(Width);
+        Try Text.MirrorFlag := Mirror; Except End;
         Try Text.Rotation := Rotation; Except End;
 
         { The working pattern: add to footprint AND to its                  }
@@ -3009,7 +3065,10 @@ End;
 {         not applied (Altium ignores them on import; set in the editor).     }
 Function Lib_Link3DModel(Params : String; RequestId : String) : String;
 Var
-    ModelPath, ComponentName, FpName : String;
+    ModelPath, ComponentName, FpName, AppliedJson : String;
+    OffX, OffY, OffZ : Integer;
+    RotZ : Double;
+    DidStandoff, DidRotation, DidMove : Boolean;
     PcbLib : IPCB_Library;
     Footprint : IPCB_LibComponent;
     Iter : IPCB_LibraryIterator;
@@ -3019,6 +3078,15 @@ Begin
     ModelPath := ExtractJsonValue(Params, 'model_path');
     ModelPath := StringReplace(ModelPath, '\\', '\', -1);
     ComponentName := ExtractJsonValue(Params, 'component_name');
+    { Mils and degrees, matching the tool's documented units.             }
+    { rotation_x / rotation_y are deliberately NOT read: the body exposes }
+    { StandoffHeight and a PLANAR Rotation, and the PCB API reference     }
+    { gives the model no X or Y tilt, so reading them would imply a       }
+    { capability that does not exist.                                      }
+    OffX := StrToIntDef(ExtractJsonValue(Params, 'offset_x'), 0);
+    OffY := StrToIntDef(ExtractJsonValue(Params, 'offset_y'), 0);
+    OffZ := StrToIntDef(ExtractJsonValue(Params, 'offset_z'), 0);
+    RotZ := StrToFloatDef(ExtractJsonValue(Params, 'rotation_z'), 0.0);
 
     If (ModelPath = '') Or (Not FileExists(ModelPath)) Then
     Begin
@@ -3088,9 +3156,41 @@ Begin
                 Body.SetState_FromModel;
                 Body.Model := Model;
                 Footprint.AddPCBObject(Body);
-                Result := BuildSuccessResponse(RequestId,
-                    '{"success":true,"footprint":"' + EscapeJsonString(FpName) +
-                    '","model":"' + EscapeJsonString(ExtractFileName(ModelPath)) + '"}');
+
+                { Placement adjustments. Each is guarded AND REPORTED:     }
+                { StandoffHeight, Rotation and MoveByXY are documented on  }
+                { the body (MoveByXY via IPCB_Primitive, used on other     }
+                { primitives in PCB.pas) but appear nowhere else in this   }
+                { codebase, so the first live run needs to show which ones }
+                { actually took rather than trusting a blanket success.    }
+                DidStandoff := False;
+                DidRotation := False;
+                DidMove := False;
+                If OffZ <> 0 Then
+                    Try
+                        Body.StandoffHeight := MilsToCoord(OffZ);
+                        DidStandoff := True;
+                    Except End;
+                If RotZ <> 0 Then
+                    Try
+                        Body.Rotation := RotZ;
+                        DidRotation := True;
+                    Except End;
+                If (OffX <> 0) Or (OffY <> 0) Then
+                    Try
+                        Body.MoveByXY(MilsToCoord(OffX), MilsToCoord(OffY));
+                        DidMove := True;
+                    Except End;
+
+                AppliedJson := JsonBool('standoff_height', DidStandoff) + ','
+                    + JsonBool('rotation_z', DidRotation) + ','
+                    + JsonBool('offset_xy', DidMove);
+
+                Result := BuildSuccessResponse(RequestId, JsonObj(
+                    JsonBool('success', True) + ','
+                    + JsonStr('footprint', FpName) + ','
+                    + JsonStr('model', ExtractFileName(ModelPath)) + ','
+                    + JsonRaw('applied', JsonObj(AppliedJson))));
             End;
         End;
     Finally
@@ -4781,7 +4881,11 @@ End;
 { Params: pins = '~~'-separated list; each pin has key=value fields joined by  }
 {         ';'. Fields: designator, name, x, y, length (mils), rotation        }
 {         (0/90/180/270), electrical_type (input/output/bidirectional/        }
-{         passive/power/open_collector/open_emitter/hiz), hidden (true/false).}
+{         passive/power/open_collector/open_emitter/hiz), hidden (true/false),}
+{         symbol_outer_edge / symbol_inner_edge (IEEE decoration name or      }
+{         ordinal; 'dot' = inversion bubble, 'clock' = clock wedge),          }
+{         show_name / show_designator (true/false; whether the pin's name     }
+{         and number are drawn. Omit to leave at Altium's default).           }
 {..............................................................................}
 
 Function Lib_AddPins(Params : String; RequestId : String) : String;
@@ -4789,6 +4893,7 @@ Var
     PinsStr, Op, Remaining : String;
     OpCount, Added, Failed : Integer;
     Designator, Name, ElecType, HiddenStr, OwnerStr : String;
+    OuterStr, InnerStr, ShowNameStr, ShowDesigStr : String;
     X, Y, Length, Rotation, OwnerPartId : Integer;
     Hidden, OwnerExplicit : Boolean;
     SchLib : ISch_Lib;
@@ -4845,6 +4950,17 @@ Begin
             OwnerStr := GetBatchField(Op, 'owner_part_id');
             OwnerExplicit := OwnerStr <> '';
             OwnerPartId := StrToIntDef(OwnerStr, 0);
+            { IEEE edge decorations: 'dot' on the outer edge is the inversion }
+            { bubble of an active-low pin, 'clock' on the inner edge is the   }
+            { wedge of a clock pin. Any TIeeeSymbol name or ordinal is        }
+            { accepted; see StrToIeeeSymbol.                                  }
+            OuterStr := GetBatchField(Op, 'symbol_outer_edge');
+            InnerStr := GetBatchField(Op, 'symbol_inner_edge');
+            { Whether the pin's name and number are DRAWN. Distinct from  }
+            { 'hidden', which hides the whole pin: a resistor shows both  }
+            { its pins and neither of their labels. Absent = leave alone. }
+            ShowNameStr := GetBatchField(Op, 'show_name');
+            ShowDesigStr := GetBatchField(Op, 'show_designator');
 
             Pin := SchServer.SchObjectFactory(ePin, eCreate_Default);
             If Pin = Nil Then
@@ -4866,6 +4982,22 @@ Begin
 
             Pin.Electrical := StrToPinElectrical(ElecType);
 
+            { Only written when the caller asked for a decoration. A fresh    }
+            { pin already carries eNoSymbol on both edges, so skipping the     }
+            { assignment keeps this bulk path (every symbol we author runs     }
+            { through it) byte-identical to its previous behaviour whenever    }
+            { the new fields are absent.                                       }
+            If OuterStr <> '' Then
+                Pin.Symbol_OuterEdge := StrToIeeeSymbol(OuterStr);
+            If InnerStr <> '' Then
+                Pin.Symbol_InnerEdge := StrToIeeeSymbol(InnerStr);
+
+            If ShowNameStr <> '' Then
+                Pin.ShowName := (ShowNameStr = 'true') Or (ShowNameStr = '1');
+            If ShowDesigStr <> '' Then
+                Pin.ShowDesignator :=
+                    (ShowDesigStr = 'true') Or (ShowDesigStr = '1');
+
             If OwnerExplicit Then
             Begin
                 { Explicit owner_part_id from caller (multi-part symbol).  }
@@ -4877,6 +5009,147 @@ Begin
 
             Component.AddSchObject(Pin);
             SchRegisterObject(Component, Pin);
+            Inc(Added);
+        End;
+    Finally
+        SchServer.ProcessControl.PostProcess(SchLib, 'Edit');
+    End;
+
+    MarkLibDirty(SchLib);
+
+    Result := BuildSuccessResponse(RequestId,
+        '{"added":' + IntToStr(Added) + ',"failed":' + IntToStr(Failed)
+        + ',"total":' + IntToStr(OpCount) + '}');
+End;
+
+{..............................................................................}
+{ Lib_AddSymbolText - Bulk add body text to the current library symbol.       }
+{ Same batch shape as Lib_AddPins: one PreProcess/PostProcess for the lot.    }
+{ Params: texts = '~~'-separated list; fields joined by ';'. Fields: text,    }
+{         x, y (mils), rotation (0/90/180/270), font_size, font_name, bold,   }
+{         italic (true/false), owner_part_id.                                 }
+{                                                                             }
+{ The primitive is an ISch_Label, which is what Altium uses for free text on  }
+{ a symbol. Its property set is the one BuildLabelStyleJson already reads     }
+{ (Text / FontId / Location / Orientation / Justification), so nothing new is }
+{ being assumed about the interface.                                          }
+{                                                                             }
+{ font_size is Altium's own font size, the number SchServer.FontManager       }
+{ takes, NOT mils. No conversion is attempted here because the relationship   }
+{ between the two is not documented anywhere this project can check, and a    }
+{ guessed constant would silently resize every imported note.                 }
+{..............................................................................}
+
+Function Lib_AddSymbolText(Params : String; RequestId : String) : String;
+Var
+    TextsStr, Op, Remaining : String;
+    OpCount, Added, Failed : Integer;
+    Content, OwnerStr, FontName, BoldStr, ItalicStr : String;
+    X, Y, Rotation, FontSize, OwnerPartId : Integer;
+    OwnerExplicit, Bold, Italic : Boolean;
+    SchLib : ISch_Lib;
+    Component : ISch_Component;
+    Lbl : ISch_Label;
+    Loc : TLocation;
+    FontMgr : ISch_FontManager;
+Begin
+    TextsStr := ExtractJsonValue(Params, 'texts');
+    If TextsStr = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAM', 'texts is required');
+        Exit;
+    End;
+
+    SchLib := SchServer.GetCurrentSchDocument;
+    If (SchLib = Nil) Or (SchLib.ObjectId <> eSchLib) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_SCHLIB', 'No schematic library is active');
+        Exit;
+    End;
+
+    Component := GetTargetLibComponent(SchLib);
+    If Component = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_COMPONENT', 'No component is selected');
+        Exit;
+    End;
+
+    FontMgr := SchServer.FontManager;
+
+    Added := 0;
+    Failed := 0;
+    OpCount := 0;
+    Remaining := TextsStr;
+
+    SchServer.ProcessControl.PreProcess(SchLib, '');
+    Try
+        While True Do
+        Begin
+            Op := NextBatchOp(Remaining);
+            If Op = '' Then Break;
+            OpCount := OpCount + 1;
+
+            Content := GetBatchField(Op, 'text');
+            If Content = '' Then
+            Begin
+                { An empty string would place an invisible, unselectable }
+                { primitive that only shows up as a stray object later.  }
+                Inc(Failed);
+                Continue;
+            End;
+
+            X := StrToIntDef(GetBatchField(Op, 'x'), 0);
+            Y := StrToIntDef(GetBatchField(Op, 'y'), 0);
+            Rotation := StrToIntDef(GetBatchField(Op, 'rotation'), 0);
+            FontSize := StrToIntDef(GetBatchField(Op, 'font_size'), 10);
+            FontName := GetBatchField(Op, 'font_name');
+            If FontName = '' Then FontName := 'Arial';
+            BoldStr := GetBatchField(Op, 'bold');
+            ItalicStr := GetBatchField(Op, 'italic');
+            Bold := (BoldStr = 'true') Or (BoldStr = '1');
+            Italic := (ItalicStr = 'true') Or (ItalicStr = '1');
+            OwnerStr := GetBatchField(Op, 'owner_part_id');
+            OwnerExplicit := OwnerStr <> '';
+            OwnerPartId := StrToIntDef(OwnerStr, 0);
+
+            Lbl := SchServer.SchObjectFactory(eLabel, eCreate_Default);
+            If Lbl = Nil Then
+            Begin
+                Inc(Failed);
+                Continue;
+            End;
+
+            Lbl.Text := Content;
+            { Location is a by-value record: read, mutate, write back. }
+            Loc := Lbl.Location;
+            Loc.X := MilsToCoord(X);
+            Loc.Y := MilsToCoord(Y);
+            Lbl.Location := Loc;
+
+            { Orientation is enum-typed. Assign the quarter-turn ordinal as }
+            { a plain Integer, exactly as Lib_AddPins sets Pin.Orientation,  }
+            { rather than naming a type this codebase cannot verify.        }
+            Try
+                Lbl.Orientation := (((Rotation Mod 360) + 360) Mod 360) Div 90;
+            Except
+            End;
+
+            Try
+                Lbl.FontId := FontMgr.GetFontID(FontSize, 0, False, Italic,
+                                                Bold, False, FontName);
+            Except
+            End;
+
+            If OwnerExplicit Then
+            Begin
+                Try Lbl.OwnerPartId := OwnerPartId; Except End;
+                Try Lbl.OwnerPartDisplayMode := 0; Except End;
+            End
+            Else
+                SetOwnerPart(Lbl, Component);
+
+            Component.AddSchObject(Lbl);
+            SchRegisterObject(Component, Lbl);
             Inc(Added);
         End;
     Finally
@@ -7721,6 +7994,135 @@ Begin
     Result := BuildSuccessResponse(RequestId, RespJson);
 End;
 
+{ Lib_ClearSourceLibrary - unpin every symbol in a SchLib from its source     }
+{ provenance, the library-side sibling of the placed-component               }
+{ clear_sch_source_library. When symbols were copied in from another library  }
+{ (a vendor pack, a stock library) each carries SourceLibraryName /           }
+{ TargetFileName pointing at the ORIGIN, and a stale DesignItemId; placing    }
+{ them then re-links against a library that no longer exists. Per matching    }
+{ component: clear SourceLibraryName, reset TargetFileName to '*', and sync   }
+{ DesignItemId to the LibReference (each independently switchable). The       }
+{ minimal fast path of what lib_normalize_implementations does as part of     }
+{ its full model sweep. Deferred save via MarkLibDirty.                        }
+{ Params: library_path (optional, focused default),                           }
+{         component_names (optional comma list, empty = all),                 }
+{         clear_target_file_name=true, sync_design_item_id=true.               }
+Function Lib_ClearSourceLibrary(Params : String; RequestId : String) : String;
+Var
+    LibPath, NamesCsv, FlagStr, Nm, LibRef : String;
+    SchLib : ISch_Lib;
+    CompIter : ISch_Iterator;
+    Component : ISch_Component;
+    AllNames, WantNames : TStringList;
+    ClearTarget, SyncId, WantAll : Boolean;
+    C, Total, ClearedSrc, ClearedTgt, Synced : Integer;
+Begin
+    LibPath := StringReplace(ExtractJsonValue(Params, 'library_path'), '\\', '\', -1);
+    NamesCsv := ExtractJsonValue(Params, 'component_names');
+    FlagStr := ExtractJsonValue(Params, 'clear_target_file_name');
+    ClearTarget := Not ((FlagStr = 'false') Or (FlagStr = 'False') Or (FlagStr = '0'));
+    FlagStr := ExtractJsonValue(Params, 'sync_design_item_id');
+    SyncId := Not ((FlagStr = 'false') Or (FlagStr = 'False') Or (FlagStr = '0'));
+
+    SchLib := FocusSchLib(LibPath);
+    If SchLib = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_SCHLIB',
+            'Failed to focus schematic library at ' + LibPath);
+        Exit;
+    End;
+
+    AllNames := TStringList.Create;
+    WantNames := TStringList.Create;
+    Try
+        WantNames.CommaText := NamesCsv;
+        WantAll := WantNames.Count = 0;
+
+        { Two-phase walk (the normalize pattern): collect names via the   }
+        { live iterator first, mutate by LibRef lookup after, so the      }
+        { iterator never sees a component being modified under it.        }
+        CompIter := SchLib.SchLibIterator_Create;
+        Try
+            CompIter.AddFilter_ObjectSet(MkSet(eSchComponent));
+            Component := CompIter.FirstSchObject;
+            While Component <> Nil Do
+            Begin
+                Nm := '';
+                Try Nm := Component.LibReference; Except End;
+                If Nm <> '' Then
+                Begin
+                    If WantAll Or (WantNames.IndexOf(Nm) >= 0) Then
+                        AllNames.Add(Nm);
+                End;
+                Component := CompIter.NextSchObject;
+            End;
+        Finally
+            SchLib.SchIterator_Destroy(CompIter);
+        End;
+
+        Total := 0;
+        ClearedSrc := 0;
+        ClearedTgt := 0;
+        Synced := 0;
+
+        SchServer.ProcessControl.PreProcess(SchLib, '');
+        Try
+            For C := 0 To AllNames.Count - 1 Do
+            Begin
+                Component := SchLib.GetState_SchComponentByLibRef(AllNames[C]);
+                If Component = Nil Then Continue;
+                Inc(Total);
+
+                Try
+                    If Component.SourceLibraryName <> '' Then
+                    Begin
+                        Component.SourceLibraryName := '';
+                        Inc(ClearedSrc);
+                    End;
+                Except End;
+
+                If ClearTarget Then
+                Begin
+                    Try
+                        If Component.TargetFileName <> '*' Then
+                        Begin
+                            Component.TargetFileName := '*';
+                            Inc(ClearedTgt);
+                        End;
+                    Except End;
+                End;
+
+                If SyncId Then
+                Begin
+                    Try
+                        LibRef := Component.LibReference;
+                        If (LibRef <> '') And (Component.DesignItemId <> LibRef) Then
+                        Begin
+                            Component.DesignItemId := LibRef;
+                            Inc(Synced);
+                        End;
+                    Except End;
+                End;
+            End;
+        Finally
+            SchServer.ProcessControl.PostProcess(SchLib, 'Edit');
+        End;
+
+        SchLib.GraphicallyInvalidate;
+        MarkLibDirty(SchLib);
+    Finally
+        AllNames.Free;
+        WantNames.Free;
+    End;
+
+    Result := BuildSuccessResponse(RequestId,
+        '{"library_path":"' + EscapeJsonString(LibPath) + '"' +
+        ',"total":' + IntToStr(Total) +
+        ',"cleared_source_library":' + IntToStr(ClearedSrc) +
+        ',"cleared_target_file_name":' + IntToStr(ClearedTgt) +
+        ',"synced_design_item_id":' + IntToStr(Synced) + '}');
+End;
+
 {..............................................................................}
 { Command Handler - must be at end                                             }
 {..............................................................................}
@@ -7731,6 +8133,7 @@ Begin
         'create_symbol':        Result := Lib_CreateSymbol(Params, RequestId);
         'add_pin':              Result := Lib_AddPin(Params, RequestId);
         'add_pins':             Result := Lib_AddPins(Params, RequestId);
+        'add_symbol_text':      Result := Lib_AddSymbolText(Params, RequestId);
         'add_symbol_rectangle': Result := Lib_AddSymbolRectangle(Params, RequestId);
         'add_symbol_line':      Result := Lib_AddSymbolLine(Params, RequestId);
         'add_symbol_lines':     Result := Lib_AddSymbolLines(Params, RequestId);
@@ -7784,6 +8187,7 @@ Begin
         'probe_footprint':      Result := Lib_ProbeFootprint(Params, RequestId);
         'get_pad_geometry':     Result := Lib_GetPadGeometry(Params, RequestId);
         'normalize_implementations': Result := Lib_NormalizeImplementations(Params, RequestId);
+        'clear_source_library': Result := Lib_ClearSourceLibrary(Params, RequestId);
     Else
         Result := BuildErrorResponse(RequestId, 'UNKNOWN_ACTION', 'Unknown library action: ' + Action);
     End;

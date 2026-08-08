@@ -2,8 +2,8 @@
 # Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """The autonomous-design loop protocol (roadmap 2.1 client packaging).
 
-The harness has the pieces — a durable session journal, a 13-stage state
-machine (``design_next_action``), background jobs, project checkpoints — but
+The harness has the pieces: a durable session journal, a 13-stage state
+machine (``design_next_action``), background jobs, project checkpoints, but
 a client needs to know the *protocol* that ties them together. This module is
 the single source of that protocol, surfaced as the ``design_autonomy_guide``
 tool and the ``autonomous_design`` MCP prompt so any client (Claude Code,
@@ -18,11 +18,11 @@ from __future__ import annotations
 from .session import STAGES
 from .state_machine import MAX_STAGE_ATTEMPTS, STAGE_PLAYBOOKS
 
-# The loop a client runs. Kept short and imperative — it is meant to be read
+# The loop a client runs. Kept short and imperative: it is meant to be read
 # once and followed.
 LOOP_PROTOCOL = [
-    "1. Call design_get_discipline once — hard rules + the DesignPlan schema.",
-    "2. design_session_start(requirement) — opens the durable journal. Keep "
+    "1. Call design_get_discipline once: hard rules + the DesignPlan schema.",
+    "2. design_session_start(requirement): opens the durable journal. Keep "
     "the returned session_id.",
     "3. If a project is open or will be modified, app_checkpoint('before "
     "autonomous run') so the whole run is revertible.",
@@ -33,13 +33,13 @@ LOOP_PROTOCOL = [
     "status='blocked' with a question and stop.",
     "   - blocked: put the open_question to the user; when answered, "
     "design_session_log(event='resolved', text=<answer>) and continue.",
-    "   - complete: the pipeline is done — proceed to outputs review.",
+    "   - complete: the pipeline is done; proceed to outputs review.",
     "5. Checkpoint again before each high-risk mutating stage (sch_to_pcb, "
     "routing, pours_tuning).",
     "6. Long engine runs (routing a dense board) can exceed the tool "
-    "timeout — start them with design_job_start and poll design_job_status.",
+    "timeout: start them with design_job_start and poll design_job_status.",
     f"Bounded retries: a stage that fails {MAX_STAGE_ATTEMPTS} times escalates "
-    "to a human question automatically — do not loop past it.",
+    "to a human question automatically: do not loop past it.",
 ]
 
 # The non-negotiables, condensed. The full text is in design_get_discipline.
@@ -50,7 +50,7 @@ HARD_CONSTRAINTS = [
     "No third-party routing engines or account-gated APIs in the design loop.",
     "Verify quality render-and-look, not by score alone; the visual rubric is "
     "the shipping bar.",
-    "No unverifiable safety tables — ship only sourced/verified values.",
+    "No unverifiable safety tables: ship only sourced/verified values.",
 ]
 
 

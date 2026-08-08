@@ -274,7 +274,11 @@ def register_project_tools(mcp):
         if project_path:
             params["project_path"] = project_path
         if force_recompile:
-            params["proj_force_recompile"] = "true"
+            # Project.pas ForceRecompileIfRequested reads
+            # "force_recompile". Sent under the tool's own name this
+            # matched nothing, so the flag was dead and a caller who
+            # asked for fresh data got the cached compile instead.
+            params["force_recompile"] = "true"
         result = await bridge.send_command_async("project.get_nets", params)
         hint = BulkHintTracker.record_and_hint("proj_get_nets")
         if hint and isinstance(result, dict):
@@ -1089,14 +1093,14 @@ def register_project_tools(mcp):
         IPC-356, pick-and-place, assembly, BOM) and report every file produced.
 
         Altium has no per-format export process for Gerber / NC-drill /
-        IPC-356 / P&P — those exist only as OutJob output containers. This runs
+        IPC-356 / P&P: those exist only as OutJob output containers. This runs
         every container in the project's OutJob, scans each container's output
         directory, and returns a consolidated manifest. Optionally also exports
         a STEP 3D model and a DXF (which are separate PCB export processes, not
         OutJob containers).
 
         Prerequisite: the project must have an OutJob whose fab containers are
-        configured and enabled — the script cannot enable outputs that are off
+        configured and enabled: the script cannot enable outputs that are off
         in the OutJob editor.
 
         Args:
@@ -1341,7 +1345,14 @@ def register_project_tools(mcp):
 
         Returns:
             {"exported": [{variant, output_path, ok, error}], "count"} plus
-            ``restored`` (the variant left active at the end).
+            ``restored``: the variant put back, or null if putting it
+            back FAILED. Null is not cosmetic. This loop leaves the
+            project on the last variant it exported, so a null means the
+            active variant is not the one you started with, and anything
+            variant-sensitive run afterwards (an export, a BOM,
+            ``pcb_apply_dnp_paste_exclusion``) will act on the wrong
+            set. A failure also carries ``restore_error``,
+            ``active_variant_unknown`` and a ``note``.
         """
         from pathlib import Path
 
@@ -1385,19 +1396,40 @@ def register_project_tools(mcp):
             exported.append(entry)
 
         # Restore the variant that was active before we started.
+        #
+        # Report whether that WORKED, not merely that it was attempted.
+        # This loop leaves the project on the last variant it touched,
+        # so a swallowed failure here hands back a project whose active
+        # variant is not the one the caller had, and every
+        # variant-sensitive operation after it acts on the wrong set:
+        # an export, a BOM, or pcb_apply_dnp_paste_exclusion stripping
+        # paste off the components the OTHER variant does not fit.
+        restored: Optional[str] = None
+        restore_error = ""
         if original:
             try:
                 await bridge.send_command_async(
                     "project.set_active_variant", dict(params, variant_name=original)
                 )
-            except Exception:
-                pass
+                restored = original
+            except Exception as exc:
+                restore_error = str(exc)
 
-        return {
+        result: dict[str, Any] = {
             "exported": exported,
             "count": sum(1 for e in exported if e["ok"]),
-            "restored": original,
+            "restored": restored,
         }
+        if restore_error:
+            result["restore_error"] = restore_error
+            result["active_variant_unknown"] = True
+            result["note"] = (
+                "the originally-active variant could not be restored, so "
+                "the project is left on the last variant exported. Set it "
+                "back with proj_set_active_variant before any "
+                "variant-sensitive operation."
+            )
+        return result
 
     @mcp.tool()
     async def proj_create_variant(
@@ -1558,7 +1590,11 @@ def register_project_tools(mcp):
         if project_path:
             params["project_path"] = project_path
         if force_recompile:
-            params["proj_force_recompile"] = "true"
+            # Project.pas ForceRecompileIfRequested reads
+            # "force_recompile". Sent under the tool's own name this
+            # matched nothing, so the flag was dead and a caller who
+            # asked for fresh data got the cached compile instead.
+            params["force_recompile"] = "true"
         result = await bridge.send_command_async("project.get_connectivity", params)
         hint = BulkHintTracker.record_and_hint("proj_get_connectivity")
         if hint and isinstance(result, dict):
@@ -1610,7 +1646,11 @@ def register_project_tools(mcp):
         if project_path:
             params["project_path"] = project_path
         if force_recompile:
-            params["proj_force_recompile"] = "true"
+            # Project.pas ForceRecompileIfRequested reads
+            # "force_recompile". Sent under the tool's own name this
+            # matched nothing, so the flag was dead and a caller who
+            # asked for fresh data got the cached compile instead.
+            params["force_recompile"] = "true"
         result = await bridge.send_command_async(
             "project.get_connectivity_batch", params
         )
@@ -1788,12 +1828,12 @@ def register_project_tools(mcp):
 
     @mcp.tool()
     async def proj_sync_pcb() -> dict[str, Any]:
-        """Push schematic changes to PCB (ECO) — Design ▸ Update PCB Document.
+        """Push schematic changes to PCB (ECO): Design ▸ Update PCB Document.
 
-        IMPORTANT — this is NOT silent. Altium's ECO (change-review) dialog
+        IMPORTANT: this is NOT silent. Altium's ECO (change-review) dialog
         is non-suppressible by design, so this **fires the real ECO and then
         BLOCKS on a modal dialog until a human clicks "Execute Changes"**.
-        Do not call it in an unattended/headless run — it will hang the
+        Do not call it in an unattended/headless run: it will hang the
         Altium-side polling loop until someone interacts. (There is no
         documented silent flag; the prior implementation called a
         non-existent process id and silently did nothing.)
@@ -1802,7 +1842,7 @@ def register_project_tools(mcp):
           1. Compiles the project and records before-state mappings
              (matched, extra-in-schematic, extra-in-pcb).
           2. Invokes ``WorkspaceManager:Compare`` (ObjectKind=Project,
-             Action=UpdateOther) — the evidenced scriptable sch→PCB update.
+             Action=UpdateOther): the evidenced scriptable sch→PCB update.
              The modal ECO dialog opens here.
           3. After the user accepts, recompiles and reports the after-state
              delta (how many components were added/removed).
@@ -1810,7 +1850,7 @@ def register_project_tools(mcp):
              that the dialog was dismissed without applying.
 
         For unattended board population without a schematic, use
-        ``pcb_place_components`` instead (places geometry only — see its note
+        ``pcb_place_components`` instead (places geometry only: see its note
         about leaving the project unsynced).
 
         Returns:

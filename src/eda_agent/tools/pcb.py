@@ -25,6 +25,7 @@ from ..placement import (
 )
 from .bulk_hints import BulkHintTracker
 from .datasheet_hints import tag_response
+from ..bridge.payload import payload_safe
 
 
 def _build_objective_report(
@@ -186,6 +187,19 @@ def _build_placement_summary(
 
 NETLIST_CSV_HEADER = ("component", "pin", "pin_name", "net")
 
+# The fitted-classes pcb_filter_variant_components can select. Validated
+# in Python because the Pascal cannot: PCB_FilterVariantComponents tests
+# 'all_fitted', 'fitted_original' and 'alternate' in an If chain whose
+# implicit else is not_fitted, so an unrecognised word silently selects
+# the not-fitted parts. It then echoes the caller's own string back as
+# "select", so the reply CONFIRMS the class that was not selected.
+#
+# A typo of "alternate" therefore selects the opposite class and says it
+# did what was asked. Anything acting on that selection, a delete, a
+# component class, a variant review, acts on the wrong components.
+FILTER_VARIANT_SELECT = (
+    "not_fitted", "fitted_original", "alternate", "all_fitted")
+
 
 def parse_tabular_netlist(text: str) -> dict[str, Any]:
     """Parse the tabular netlist CSV that ``proj_export_netlist`` writes.
@@ -304,7 +318,7 @@ def register_pcb_tools(mcp):
         When several PcbDocs are open, the other PCB tools
         (`pcb_get_components`, `pcb_delete_object`, `pcb_delete_net`,
         `pcb_plan_placement`, `design_visual_review`, …) operate on the
-        *focused* board — and `app_set_active_document` does NOT reliably set
+        *focused* board, and `app_set_active_document` does NOT reliably set
         that for a PcbDoc. Call this first to point them all at the board
         you mean. (`pcb_place_components` already accepts `board_path`
         directly.)
@@ -328,7 +342,7 @@ def register_pcb_tools(mcp):
         """Delete nets from the active PCB.
 
         By default removes only EMPTY nets (no connected pads / tracks /
-        vias) — the cleanup for stray nets left behind after deleting
+        vias): the cleanup for stray nets left behind after deleting
         components, e.g. nets created by `pcb_place_components`' synced
         mode. A net that still has connections is skipped unless
         ``force=True`` (forcing orphans those pads/tracks, so use it
@@ -340,18 +354,38 @@ def register_pcb_tools(mcp):
             force: Also delete nets that still have connected primitives
                 (orphans them). Default False.
 
+        A net name containing a COMMA is refused rather than sent. The
+        list rides one comma-separated field and the handler splits it
+        with ``Pos(',', ...)``, so such a name would arrive as two, and
+        the fragments can match real nets: ``VCC,GND`` becomes ``VCC``
+        and ``GND``. With ``force=True`` that deletes nets nobody named
+        and orphans their pads and tracks.
+
         Returns:
             Dict with ``deleted`` (count removed), ``skipped_connected``
             (count), and ``skipped_nets`` (names skipped because still
-            connected).
+            connected). Or ``{"ok": False, "reason": ...}`` if a name
+            contains a comma, in which case nothing is sent.
         """
+        wanted = [str(n).strip() for n in (nets or []) if str(n).strip()]
+        unsendable = [n for n in wanted if "," in n]
+        if unsendable:
+            return {
+                "ok": False,
+                "reason": (
+                    f"these net names contain a comma and cannot be sent: "
+                    f"{unsendable}. The list travels as one "
+                    "comma-separated field, so each would arrive as two "
+                    "names, and a fragment can match a real net: "
+                    "'VCC,GND' becomes 'VCC' and 'GND'. Delete them "
+                    "individually through the Altium UI."
+                ),
+            }
         bridge = get_bridge()
         return await bridge.send_command_async(
             "pcb.delete_nets",
             {
-                "nets": ",".join(
-                    str(n).strip() for n in (nets or []) if str(n).strip()
-                ),
+                "nets": ",".join(payload_safe(n) for n in wanted),
                 "force": "true" if force else "false",
             },
         )
@@ -800,7 +834,7 @@ def register_pcb_tools(mcp):
 
         Launches Altium's Teardrop command on all objects. The Teardrop dialog
         is modal and cannot be suppressed from script (same limitation as the
-        ECO dialog) — choose Add and confirm it in Altium. Returns once the
+        ECO dialog): choose Add and confirm it in Altium. Returns once the
         command is dispatched.
         """
         bridge = get_bridge()
@@ -822,7 +856,7 @@ def register_pcb_tools(mcp):
 
         For every visible designator, tries a ring of auto-position anchors and
         keeps the first that overlaps no pad or other silk text; otherwise
-        leaves the designator where it was. First-fit, not a global optimum —
+        leaves the designator where it was. First-fit, not a global optimum;
         pair with the silk audits and `design_visual_review` to check the
         result.
 
@@ -2036,9 +2070,28 @@ def register_pcb_tools(mcp):
                 ``fitted_original``, ``alternate``, or ``all_fitted``
                 (fitted_original + alternate).
 
+        An unrecognised ``select`` is REJECTED rather than guessed. The
+        handler's If chain falls through to not-fitted for any word it
+        does not know, and the reply echoes back the word you sent, so a
+        typo would select the opposite class and report success.
+
         Returns:
-            {"variant", "select", "matched", "designators"} or an error.
+            {"variant", "select", "matched", "designators"}, or
+            ``{"ok": False, "reason": ...}`` if ``select`` is not one of
+            the four classes, in which case nothing is sent or selected.
         """
+        if select not in FILTER_VARIANT_SELECT:
+            return {
+                "ok": False,
+                "reason": (
+                    f"select must be one of "
+                    f"{', '.join(FILTER_VARIANT_SELECT)}, not "
+                    f"{select!r}. Unknown values are not rejected by the "
+                    "board handler: they fall through to not_fitted, and "
+                    "the reply echoes the word you sent, so a typo would "
+                    "select the opposite class and look like it worked."
+                ),
+            }
         bridge = get_bridge()
         return await bridge.send_command_async(
             "pcb.filter_variant_components",
@@ -2886,6 +2939,162 @@ def register_pcb_tools(mcp):
             },
             timeout=60.0,
         )
+
+    @mcp.tool()
+    async def pcb_apply_dnp_paste_exclusion(
+        designators: Optional[list[str]] = None,
+        restore: bool = False,
+        dry_run: bool = False,
+        use_current_variant: bool = False,
+    ) -> dict[str, Any]:
+        """Suppress stencil paste on Not-Fitted (DNP) components.
+
+        The remediation half of ``audit_variant_not_fitted``. A Not-Fitted
+        component is on the BOM as a placeholder and must NOT receive
+        paste: the SMT line would otherwise deposit paste on empty pads,
+        and the bridging that follows shows up as rework.
+
+        With no ``designators`` this asks ``audit_variant_not_fitted``
+        for the components Not Fitted in the project's CURRENT variant,
+        so the selection follows the variant you actually have open.
+        Pass an explicit list to override that.
+
+        Mechanism: each surface pad gets a manual PasteMaskExpansion of
+        minus its larger dimension, which collapses the stencil aperture
+        whatever the pad shape. Through-hole pads are left alone and
+        counted separately, since they have no aperture to suppress.
+
+        Reversible: ``restore=True`` discards the manual override so
+        Altium recomputes the expansion from the design rules.
+
+        RESTORE THE SAME LIST YOU APPLIED. ``restore`` will NOT guess:
+        called without ``designators`` it refuses and tells you what to
+        pass. That is deliberate. Resolving a restore from the current
+        variant means excluding under one variant, switching, then
+        restoring, and leaving any component that was excluded but is
+        fitted in the new variant with its aperture still suppressed.
+        Nothing would report it: the call succeeds, the pad looks
+        ordinary in the editor, and the part comes back from assembly
+        unsoldered.
+
+        The apply reply lists every component it touched in ``items``.
+        Pass those designators back to restore. If you really do want
+        the current variant's Not-Fitted list, ask for it with
+        ``use_current_variant=True`` and you own the choice.
+
+        Apply is unaffected: with no ``designators`` it uses the current
+        variant's Not-Fitted list, which is the whole point of applying.
+
+        Mismatch is visible either way. ``components_requested`` versus
+        ``components_matched`` in the reply reports how many of the
+        names you passed were actually found on this board.
+
+        Args:
+            designators: Components to treat. Omit on an apply to use
+                the current variant's Not-Fitted list. Required on a
+                restore unless ``use_current_variant`` is set.
+            restore: Undo a previous exclusion instead of applying one.
+            dry_run: Report which components WOULD be treated and change
+                nothing. Worth using first: this edits the board, and a
+                wrong variant selection would strip paste off parts that
+                are meant to be fitted.
+            use_current_variant: Allow a restore with no ``designators``
+                to resolve from the variant open right now. Off by
+                default because that is the failure above.
+
+        Returns:
+            Dict with ``restored``, ``components_requested``,
+            ``components_matched``, ``pads_changed``,
+            ``pads_skipped_through_hole`` and per-component ``items``.
+            In dry-run mode: ``dry_run``, ``designators`` and ``source``.
+            On a refused restore: ``{"ok": False, "reason": ...}`` and
+            nothing is read from or written to the board.
+        """
+        bridge = get_bridge()
+
+        source = "explicit"
+        variant = ""
+        names = [str(d).strip() for d in (designators or []) if str(d).strip()]
+
+        # Refuse BEFORE asking the bridge anything. A restore that
+        # resolves from whatever variant happens to be open is the one
+        # way this tool can leave a fitted part with no paste, and the
+        # result is indistinguishable from success.
+        if restore and not names and not use_current_variant:
+            return {
+                "ok": False,
+                "reason": (
+                    "restore needs the designators that were excluded. "
+                    "Resolving them from the variant open right now "
+                    "would restore the wrong components if the variant "
+                    "changed since the apply, leaving a fitted part "
+                    "with no stencil aperture. Pass the designators "
+                    "from the apply reply's 'items', or set "
+                    "use_current_variant=True to accept that risk "
+                    "deliberately."
+                ),
+            }
+
+        if not names:
+            source = "variant_not_fitted"
+            found = await bridge.send_command_async(
+                "audit.variant_not_fitted", {})
+            items = (found or {}).get("items") or []
+            names = [str(i.get("designator", "")).strip()
+                     for i in items if isinstance(i, dict)]
+            names = [n for n in names if n]
+            variant = str((found or {}).get("variant", ""))
+            if not names:
+                return {
+                    "ok": True,
+                    "components_matched": 0,
+                    "pads_changed": 0,
+                    "source": source,
+                    "variant": (found or {}).get("variant", ""),
+                    "note": "no Not-Fitted components in the current "
+                            "variant; nothing to exclude",
+                }
+
+        if dry_run:
+            return {
+                "ok": True,
+                "dry_run": True,
+                "restore": restore,
+                "source": source,
+                "variant": variant,
+                "designators": names,
+                "note": "nothing was changed; re-run with dry_run=False "
+                        "to apply",
+            }
+
+        # The designator list rides ONE field, so a designator containing
+        # the separator would silently split into two names and treat a
+        # component nobody asked for.
+        #
+        # Blanks are filtered again AFTER stripping separators, not just
+        # before. A name that is only separator characters survives the
+        # earlier filter and reduces to "" here, which would put a stray
+        # "|" in the payload; the handler counts pipes to report
+        # components_requested, so a run that matched everything would
+        # look like it had missed one.
+        safe = [s for s in (payload_safe(n).replace("|", "") for n in names)
+                if s]
+        result = await bridge.send_command_async(
+            "pcb.apply_dnp_paste_exclusion",
+            {
+                "designators": "|".join(safe),
+                "restore": "true" if restore else "false",
+            },
+        )
+        # Report WHERE the list came from. An apply and a later restore
+        # that resolved against different variants is the failure mode
+        # that leaves a fitted part with no paste, and without these two
+        # keys the two replies are indistinguishable.
+        if isinstance(result, dict):
+            result.setdefault("source", source)
+            if variant:
+                result.setdefault("variant", variant)
+        return result
 
     @mcp.tool()
     async def pcb_make_paste_grid(

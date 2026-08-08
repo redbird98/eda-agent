@@ -106,7 +106,7 @@ def render_bom_html(
     total_lines = len(grouped_rows)
     total_distinct_values = len({k[0] for k in groups.keys() if k[0]})
 
-    # The HTML is intentionally one giant template literal — easier to
+    # The HTML is intentionally one giant template literal: easier to
     # eyeball than fragmented innerHTML pieces in Python.
     return f"""<!doctype html>
 <html lang="en">

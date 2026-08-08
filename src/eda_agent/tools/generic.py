@@ -8,6 +8,7 @@ a pass-through layer for object iteration, property access, and process executio
 """
 
 from typing import Any, Optional
+from ..bridge.payload import payload_safe
 from ..bridge import get_bridge
 from ..scope import to_wire as scope_to_wire
 from .bulk_hints import BulkHintTracker
@@ -45,6 +46,16 @@ def register_generic_tools(mcp):
                 "doc:C:\\path\\to\\Sheet.SchDoc", specific sheet by path (no focus change)
                 "project:C:\\path\\to\\Project.PrjPcb", specific project by path
                 "lib_component:NAME", a named symbol in the active SchLib
+                "lib_component:NAME@3", part 3 of a MULTI-PART symbol.
+                    A SchLib iterator yields one part at a time, so
+                    without the suffix only part 1 is visible and a pin
+                    on part 3 reports matched:0. Query each part in
+                    turn to cover the whole component. The suffix is
+                    read from the RIGHT, so a LibRef containing '@'
+                    still works.
+                    Ask for the `OwnerPartId` property to see which
+                    part a returned primitive belongs to (0 means
+                    shared across every part).
             filter: Pipe-separated property=value conditions (AND logic), e.g.:
                 "Text=VCC", match net labels with Text equal to VCC
                 "Designator.Text=R1", match component with designator R1
@@ -152,7 +163,7 @@ def register_generic_tools(mcp):
         """Create and place a schematic object.
 
         If you are creating more than one object, use `obj_batch_create`
-        instead — one IPC round-trip for the whole set vs one LLM turn
+        instead, one IPC round-trip for the whole set vs one LLM turn
         per object.
 
         Args:
@@ -189,7 +200,7 @@ def register_generic_tools(mcp):
         """Find and delete schematic objects.
 
         For several scope/type/filter sets at once, use `obj_batch_delete`
-        — one IPC round-trip vs one LLM turn per delete.
+       , one IPC round-trip vs one LLM turn per delete.
 
         Args:
             object_type: Altium object type constant (see `obj_query`)
@@ -540,14 +551,18 @@ def register_generic_tools(mcp):
             if "designator" not in stamp:
                 return {"ok": False,
                         "reason": f"stamp missing 'designator': {stamp}"}
-            fields = [f"designator={stamp['designator']}"]
+            # The designator was interpolated RAW here while every other
+            # value was escaped, so the one field guaranteed to come
+            # from the caller was the one that could reshape the
+            # payload. Both go through the shared sanitiser now; the
+            # local copy also collapsed "~~" differently from
+            # library.py, so identical input produced different output
+            # depending on which tool sent it.
+            fields = [f"designator={payload_safe(stamp['designator'])}"]
             for key, val in stamp.items():
                 if key == "designator":
                     continue
-                # Escape `;` and `~~` from values so they don't break
-                # the wire format. Pascal side trims whitespace.
-                clean = str(val).replace("~~", "  ").replace(";", ",")
-                fields.append(f"{key}={clean}")
+                fields.append(f"{key}={payload_safe(val)}")
             encoded_stamps.append(";".join(fields))
         params: dict[str, str] = {"stamps": "~~".join(encoded_stamps)}
         if sheet_path:
@@ -564,12 +579,30 @@ def register_generic_tools(mcp):
         Two-step pattern by design: ``proj_run_erc()`` performs the
         compile-and-check (slow, can be 30+ s on a large project);
         this tool reads back the violations cheaply so the agent can
-        re-query without re-running ERC. Each violation carries the
-        source-level description (sheet, location, rule, primitives
-        involved) the agent needs to navigate to it.
+        re-query without re-running ERC.
+
+        Each violation names the OBJECTS it is about, not just a
+        category. ``related_objects`` carries one entry per offending
+        object with its ``kind`` (Pin, Net, Port), its ``document``, and
+        a ``cross_probe`` string, which is what Altium itself uses to
+        jump to that exact object and is therefore what identifies the
+        specific pin or net.
+
+        That detail is the difference between a report and something
+        actionable. A category plus a sheet name cannot be acted on: the
+        only safe response to "floating input pin, somewhere on this
+        sheet" is to do nothing, because a NoERC marker placed by
+        guesswork silently suppresses a real disconnection and is worse
+        than the warning it clears.
+
+        ``related_object_count`` is reported separately, so a violation
+        that genuinely exposes no objects is distinguishable from one
+        whose objects could not be read.
 
         Returns:
-            Dictionary with violation count and per-violation details.
+            ``{"violation_count", "violations": [{"index",
+            "description", "detail", "related_object_count",
+            "related_objects": [{"kind", "document", "cross_probe"}]}]}``
         """
         bridge = get_bridge()
         return await bridge.send_command_async(
@@ -1147,6 +1180,7 @@ def register_generic_tools(mcp):
         x: int,
         y: int,
         style: str = "circle",
+        orientation: int = -1,
     ) -> dict[str, Any]:
         """Place a power port symbol (VCC, GND, etc.) on the active schematic.
 
@@ -1162,6 +1196,15 @@ def register_generic_tools(mcp):
                 "gnd_power", power ground symbol
                 "gnd_signal", signal ground symbol
                 "gnd_earth", earth ground symbol
+            orientation: which way the glyph points from the connection
+                point: 0=right, 1=up, 2=left, 3=down. Leave at -1 to let
+                the bridge decide by style, which sends the ground
+                glyphs down and everything else up.
+
+                PASS IT EXPLICITLY FOR A RAIL DRAWN WITH style="bar".
+                The style-based default groups "bar" and "wave" with the
+                grounds, so a VCC bar comes out pointing DOWN and reads
+                as a ground symbol. orientation=1 is what you want there.
 
         Returns:
             Dictionary confirming placement
@@ -1174,6 +1217,7 @@ def register_generic_tools(mcp):
                 "x": str(x),
                 "y": str(y),
                 "style": style,
+                "orientation": str(int(orientation)),
             },
         )
         return result
@@ -1948,13 +1992,16 @@ def register_generic_tools(mcp):
             container = op.get("container", "")
             if not obj_type:
                 continue
+            # `properties` is PIPE-separated ("Text=X|Location.X=100"),
+            # so ";" is not a legitimate separator inside it and "=" is.
+            # payload_safe leaves "=" alone for exactly that reason.
             fields = [
-                f"scope={scope}",
-                f"object_type={obj_type}",
-                f"properties={props}",
+                f"scope={payload_safe(scope)}",
+                f"object_type={payload_safe(obj_type)}",
+                f"properties={payload_safe(props)}",
             ]
             if container:
-                fields.append(f"container={container}")
+                fields.append(f"container={payload_safe(container)}")
             op_strs.append(";".join(fields))
 
         if not op_strs:
@@ -1969,6 +2016,7 @@ def register_generic_tools(mcp):
     @mcp.tool()
     async def obj_batch_delete(
         operations: list[dict[str, str]],
+        confirm_delete_all: bool = False,
     ) -> dict[str, Any]:
         """Delete matching objects across many scope/type/filter operations.
 
@@ -1984,11 +2032,17 @@ def register_generic_tools(mcp):
                   "eNoERC", "eWire").
                 - filter: pipe-separated ``PropName=Value`` filter
                   conditions (AND logic), same format as
-                  ``obj_delete``.
+                  ``obj_delete``. An EMPTY filter deletes every object
+                  of that type in that scope.
+            confirm_delete_all: required when any operation has an empty
+                filter. Same guard ``obj_delete`` applies to the single
+                call, so routing a sweep through the bulk tool does not
+                get around it.
 
         Example, purge all no-ERCs on a specific sheet and every
-        junction on the project:
-            obj_batch_delete(operations=[
+        junction on the project. Both filters are empty, so the
+        confirmation is required:
+            obj_batch_delete(confirm_delete_all=True, operations=[
                 {"scope": "doc:C:\\proj\\Power.SchDoc",
                  "object_type": "eNoERC", "filter": ""},
                 {"scope": "project",
@@ -1996,21 +2050,43 @@ def register_generic_tools(mcp):
             ])
 
         Returns:
-            Dict with operations_processed and total.
+            Dict with operations_processed and total, or an ``error``
+            with ``operations_processed`` 0 when a sweep is unconfirmed,
+            in which case nothing is sent.
         """
         op_strs: list[str] = []
+        sweeping: list[str] = []
         for op in operations:
             scope = op.get("scope", "active_doc")
             obj_type = op.get("object_type", "")
             filt = op.get("filter", "")
             if not obj_type:
                 continue
+            if not str(filt).strip():
+                sweeping.append(f"{obj_type} in {scope}")
             op_strs.append(
                 f"scope={scope};object_type={obj_type};filter={filt}"
             )
 
         if not op_strs:
             return {"error": "No valid operations", "operations_processed": 0}
+
+        # obj_delete refuses an unfiltered delete and then tells the
+        # caller to come here instead, so without this the guard is just
+        # a detour. One op with a blank filter is enough: the others
+        # would still run, and a partly-applied batch is harder to
+        # reason about afterwards than one that did nothing.
+        if sweeping and not confirm_delete_all:
+            return {
+                "error": (
+                    "Safety guard: these operations have an empty filter "
+                    f"and would delete ALL matching objects: {sweeping}. "
+                    "Add a filter to select specific objects, or set "
+                    "confirm_delete_all=True to sweep them."
+                ),
+                "operations_processed": 0,
+                "unfiltered_operations": sweeping,
+            }
 
         bridge = get_bridge()
         return await bridge.send_command_async(
@@ -2073,7 +2149,7 @@ def register_generic_tools(mcp):
         without `document_path` parts can silently land on a *different*
         open sheet. Pass `document_path` (absolute .SchDoc path) and this
         tool focuses that sheet first (`app_set_active_document`) before
-        placing — always set it when you have just created the target
+        placing, always set it when you have just created the target
         sheet.
 
         Args:
@@ -2110,8 +2186,8 @@ def register_generic_tools(mcp):
             if not lib_ref:
                 continue
             fields = [
-                f"library_path={p.get('library_path', '')}",
-                f"lib_reference={lib_ref}",
+                f"library_path={payload_safe(p.get('library_path', ''))}",
+                f"lib_reference={payload_safe(lib_ref)}",
                 f"x={int(p.get('x', 0))}",
                 f"y={int(p.get('y', 0))}",
                 f"rotation={int(p.get('rotation', 0))}",

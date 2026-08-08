@@ -60,8 +60,14 @@ def _bundled_script_version() -> Optional[str]:
     return m.group(1) if m else None
 
 
-def register_application_tools(mcp):
-    """Register application tools with the MCP server."""
+def register_meta_tools(mcp):
+    """Register the backend-agnostic discovery/dispatch pair.
+
+    These are deliberately NOT part of register_application_tools. They
+    describe the tool surface itself rather than Altium, so every backend
+    needs them: the KiCad backend previously had no tool_catalog at all,
+    which also made the minimal toolset impossible there.
+    """
 
     @mcp.tool()
     async def tool_catalog(
@@ -70,6 +76,7 @@ def register_application_tools(mcp):
         interaction: str = "",
         query: str = "",
         with_description: bool = False,
+        with_schema: bool = False,
     ) -> dict[str, Any]:
         """Discover tools by category / maturity / interaction without
         loading every schema.
@@ -79,20 +86,38 @@ def register_application_tools(mcp):
         client can find the right tool first, then rely on its full schema.
 
         Filters (all optional, AND-combined):
-            category: application, project, library, generic, schematic,
-                pcb, audit, design, simulation, routing.
-            maturity: offline | simulator | live_only (verification level).
+            category: core, application, project, library, generic,
+                schematic, pcb, audit, design, simulation, routing, meta,
+                parts (and kicad on the KiCad backend). "core" holds the
+                EDA-agnostic main flow (review_design, get_board_info,
+                list_components, list_nets, run_drc, run_erc) and is the
+                usual starting point. Call with NO filter to get the live
+                ``categories`` map rather than trusting this list.
+            maturity: how far a tool can be exercised without Altium.
+                ``offline`` needs no Altium at all; ``simulator`` is
+                bridge-backed but every command it sends is implemented
+                by the in-repo Altium simulator; ``live_only`` sends at
+                least one command only real Altium answers. Filter on
+                ``offline`` to find what runs with nothing open.
             interaction: readonly | silent | modal | partial. ``modal``
                 tools pop a blocking Altium dialog; ``partial`` ones leave
-                the job incomplete — plan around both.
+                the job incomplete: plan around both.
             query: case-insensitive substring over the tool name (and
                 description when ``with_description``).
             with_description: include the one-line summary per tool.
+            with_schema: include each tool's parameters and required
+                list. ESSENTIAL under the minimal toolset: no tool schema
+                is loaded up front there, so calling tool_invoke without
+                this means guessing argument names. Filter first, schemas
+                are dropped past a cap so this cannot flood the very
+                context the minimal toolset exists to protect.
 
         Returns ``{count, tools:[{name, category, maturity, interaction
-        [, description]}], categories:{cat: n}}``.
+        [, description][, parameters, required]}], categories:{cat: n}}``.
         """
         from .metadata import tool_metadata
+
+        _SCHEMA_CAP = 40
 
         tools = await mcp.list_tools()
         q = query.lower().strip()
@@ -113,23 +138,48 @@ def register_application_tools(mcp):
             rec = dict(md)
             if with_description:
                 rec["description"] = desc.split("\n", 1)[0][:200]
+            if with_schema:
+                # A FastMCP tool and a captured ToolSpec both expose
+                # inputSchema, so this reads the same in either toolset.
+                schema = getattr(t, "inputSchema", None) or {}
+                rec["parameters"] = schema.get("properties", {})
+                rec["required"] = schema.get("required", [])
             out.append(rec)
         out.sort(key=lambda r: (r["category"], r["name"]))
-        return {
+        result: dict[str, Any] = {
             "count": len(out),
             "categories": dict(sorted(cat_counts.items())),
             "tools": out,
         }
+        if with_schema and len(out) > _SCHEMA_CAP:
+            # Returning hundreds of schemas would defeat the purpose of
+            # the minimal toolset, so drop them and say so rather than
+            # truncate silently.
+            for entry in out:
+                entry.pop("parameters", None)
+                entry.pop("required", None)
+            result["schema_omitted"] = (
+                f"{len(out)} tools matched, over the {_SCHEMA_CAP} cap; "
+                f"narrow with category/query to get parameters")
+        return result
 
     @mcp.tool()
     async def tool_invoke(name: str, arguments: Optional[dict] = None) -> dict[str, Any]:
-        """Invoke any registered tool by name — the companion to
+        """Invoke any registered tool by name: the companion to
         `tool_catalog`.
 
         A client with a limited context can expose only the core tools plus
         this pair: discover a tool with `tool_catalog`, then run it here by
         name without ever loading its schema. ``arguments`` is the tool's
         keyword-argument dict.
+
+        GET THE ARGUMENT NAMES FIRST. Under the minimal toolset no schema
+        is loaded up front, so call
+        ``tool_catalog(query="<name>", with_schema=True)`` and use the
+        ``parameters``/``required`` it returns. Guessing is a real failure
+        mode: several tools take names that look obvious but are not
+        (``current_amps``, not ``current_a``), and the same tool can differ
+        between backends.
 
         Returns the tool's own result (JSON-decoded), or ``{"error": ...}``
         for an unknown/disallowed name. Note: bypassing the schema means
@@ -157,6 +207,10 @@ def register_application_tools(mcp):
             except (ValueError, TypeError):
                 return {"tool": name, "result": content[0].text}
         return {"tool": name, "result": content}
+
+
+def register_application_tools(mcp):
+    """Register application tools with the MCP server."""
 
     @mcp.tool()
     async def app_get_status() -> dict[str, Any]:
@@ -265,21 +319,45 @@ def register_application_tools(mcp):
 
         Returns:
             The checkpoint manifest summary (id, created, file_count, ...).
+            With ``save_first``, also ``saved``: True when the flush
+            worked, False with ``save_error`` and a ``note`` when it did
+            not. A checkpoint is still taken either way, but one taken
+            after a failed save holds the on-disk state only, which is
+            missing precisely the in-editor work you were protecting.
         """
+        saved: Optional[bool] = None
+        save_error = ""
         if save_first:
             try:
                 await get_bridge().send_command_async(
                     "application.save_all", timeout=60.0
                 )
-            except Exception:
-                pass  # snapshot on-disk state regardless
+                saved = True
+            except Exception as exc:  # noqa: BLE001 - reported, not raised
+                # Still snapshot the on-disk state: a checkpoint of
+                # something beats none. But SAY SO. A checkpoint is a
+                # safety net, and one taken after a failed save is
+                # missing exactly the in-editor work the caller was
+                # protecting.
+                saved = False
+                save_error = str(exc)
         project_dir, project_file, err = await _resolve_project_dir()
         if err:
             return err
         from pathlib import Path
         store = _checkpoint_store()
         info = store.create(Path(project_dir), project_file=project_file or "", label=label)
-        return {"checkpoint": info.summary()}
+        result: dict[str, Any] = {"checkpoint": info.summary()}
+        if save_first:
+            result["saved"] = saved
+            if not saved:
+                result["save_error"] = save_error
+                result["note"] = (
+                    "save_all failed, so this checkpoint holds the "
+                    "on-disk state only. Unsaved editor changes are NOT "
+                    "in it."
+                )
+        return result
 
     @mcp.tool()
     async def app_list_checkpoints() -> dict[str, Any]:

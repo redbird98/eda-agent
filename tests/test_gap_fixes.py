@@ -4,9 +4,9 @@
 
 Covers the two Python-side fixes from the autonomous-project gap run:
   - design_snapshot_inventory: name_filter / limit_per_library /
-    include_descriptions trimming (Gap #7 — unbounded output).
+    include_descriptions trimming (Gap #7: unbounded output).
   - place_sch_components_from_library: document_path focuses the target
-    sheet before placing, and aborts on focus failure (Gap #5 — parts
+    sheet before placing, and aborts on focus failure (Gap #5: parts
     silently landing on the wrong document).
 
 The Pascal-side fixes (pcb_place_component, get_object_count doc: scope,
@@ -34,7 +34,7 @@ def _capture(module, register_fn_name: str):
 
 
 # --------------------------------------------------------------------
-# Gap #7 — design_snapshot_inventory trimming
+# Gap #7: design_snapshot_inventory trimming
 # --------------------------------------------------------------------
 
 class _FakeInventory:
@@ -104,7 +104,7 @@ async def test_inventory_caches_full_to_disk(_patched_design, tmp_path):
 
 
 # --------------------------------------------------------------------
-# Gap #5 — placement focuses the target document first
+# Gap #5: placement focuses the target document first
 # --------------------------------------------------------------------
 
 class _RecordingBridge:

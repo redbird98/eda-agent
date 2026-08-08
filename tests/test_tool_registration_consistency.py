@@ -51,7 +51,16 @@ def _imported_registrars() -> set[str]:
 # suite; ``register_backend`` orchestrates per-backend registration (Altium,
 # KiCad, the neutral EDA-agnostic tools). A registrar wired through either
 # counts as registered.
-_AGGREGATORS = {"register_all_tools", "register_backend"}
+# Registration entrypoints in __init__.py. register_backend dispatches on
+# the toolset and delegates the actual per-backend calls to _register_full,
+# so that helper is an entrypoint too: leaving it out would make this guard
+# report every backend-specific registrar as "imported but never called".
+_AGGREGATORS = {
+    "register_all_tools",
+    "register_backend",
+    "_register_full",
+    "_register_minimal",
+}
 
 
 def _called_registrars() -> set[str]:

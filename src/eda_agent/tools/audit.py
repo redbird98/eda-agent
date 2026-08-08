@@ -582,7 +582,7 @@ def register_audit_tools(mcp):
         DIFFERENT Manufacturer Part Numbers.
 
         Two presumably-identical parts pointing at different MPNs is
-        almost always a bug — either a typo / accidental override
+        almost always a bug: either a typo / accidental override
         during a sub-circuit clone, or means the design genuinely wants
         two sources but lost the alternates table somewhere. The agent
         reviewing the BOM should see this before purchase.
@@ -612,7 +612,7 @@ def register_audit_tools(mcp):
         At least one of those needs to carry an ``http(s)://`` value
         for the IC to count as covered. The agent's review discipline
         requires fetching the actual manufacturer datasheet before
-        making any device-related claim — ICs without a stored URL
+        making any device-related claim: ICs without a stored URL
         force the agent to web-search the part name, which is slower
         and more error-prone than a direct link.
 
@@ -637,7 +637,7 @@ def register_audit_tools(mcp):
           - pin "VCC" wired to a non-power net (swapped rail bug)
           - pin "GND" or "VSS" wired to a non-ground net (broken
             reference plane)
-        ERC won't catch these — the wire is connected, the names just
+        ERC won't catch these: the wire is connected, the names just
         disagree on intent. A class of bug that ships when the user
         copied a sub-circuit and forgot to re-tag the rail.
 
@@ -697,7 +697,7 @@ def register_audit_tools(mcp):
         """Find IC pins with an empty / unset net (excluding pins
         intentionally named NC / DNC / RSVD / RESERVED).
 
-        Walks the project BOM (cheap — uses the already-cached
+        Walks the project BOM (cheap: uses the already-cached
         ``project.get_bom`` snapshot, no extra Altium round-trip) and,
         for every component whose designator starts with ``U``, counts
         pins whose `net` is empty / null / "?". Pins whose NAME marks
@@ -863,7 +863,7 @@ def register_audit_tools(mcp):
         Walks every track / arc on a signal layer. For each endpoint, looks
         for ANOTHER same-net primitive (track / arc / pad / via) within
         ``tolerance_mils``. If nothing same-net is in range, the endpoint
-        is "dangling" — Altium may show it as connected in the analyser
+        is "dangling": Altium may show it as connected in the analyser
         (centre-point heuristic) but the photoplot will not bridge it,
         producing a real open on the fab side.
 
@@ -1007,7 +1007,7 @@ def register_audit_tools(mcp):
         Schematic best practice: components sit on a 100-mil (or whatever
         the project standard is) grid so pins land predictably on wire
         endpoints. Off-grid placement is the classic "I edited around it
-        and never resnapped" trap — the symbol LOOKS wired but the pin
+        and never resnapped" trap: the symbol LOOKS wired but the pin
         doesn't actually touch the wire, ERC silently passes (no visible
         net) and the connection is missing on the netlist.
 
@@ -1039,7 +1039,7 @@ def register_audit_tools(mcp):
         Altium's "Tools → Remove Unused Pad Shapes" optimization
         deletes per-layer pad copper where a primitive isn't electrically
         used on that layer. Applied too aggressively, it leaves a via
-        that drills through an inner layer with NO annular ring there —
+        that drills through an inner layer with NO annular ring there:
         any later trace edit on that inner layer that tries to land on
         the via will silently fail to connect at fab.
 
@@ -1074,7 +1074,7 @@ def register_audit_tools(mcp):
         can leave duplicates that the agent / reviewer want to surface
         before they hit ERC.
 
-        Walks source schematic sheets (not compiled docs — compiled
+        Walks source schematic sheets (not compiled docs: compiled
         flattening would auto-disambiguate multichannel instances with
         channel suffixes, hiding the real source-level collision).
 
@@ -1137,7 +1137,7 @@ def register_audit_tools(mcp):
         Catches the two cases that matter most:
 
           - **multi_output**: a net has MORE THAN ONE Output port. Two
-            drivers fighting for the same net — almost always a wiring
+            drivers fighting for the same net: almost always a wiring
             error or copy-paste mistake.
           - **no_driver**: a net has Input ports but ZERO Output (or
             Bidirectional) ports anywhere in the project. Orphan signal:
@@ -1166,21 +1166,22 @@ def register_audit_tools(mcp):
         """List components marked Not Fitted in the project's CURRENT variant.
 
         Manufacturing context: a Not-Fitted component is on the BOM as a
-        placeholder but should NOT receive paste on the stencil — otherwise
+        placeholder but should NOT receive paste on the stencil, otherwise
         the SMT line deposits paste on empty pads and bridging forms on
         rework. Many houses also want a "DNP" silkscreen marker on the
         artwork. This tool returns the list of components the agent
         should consider for those treatments.
 
-        This is the identify half; adding a PasteMaskExpansion rule to actually
-        suppress paste is a separate mutating call — defer to a future
-        ``pcb_apply_dnp_paste_exclusion`` tool once we're happy with the
-        DNP-detection result.
+        This is the identify half. ``pcb_apply_dnp_paste_exclusion`` is
+        the remediation half: it takes this list (or re-derives it) and
+        collapses the stencil aperture on each Not-Fitted component's
+        surface pads. Kept as two calls so the detection can be reviewed
+        before anything on the board is edited.
 
         Returns:
             Dict with:
               - ``variant``: the current variant's description (empty
-                when the project has no variant selected — DNP only
+                when the project has no variant selected: DNP only
                 applies to a variant)
               - ``checked``: total flattened-project components
               - ``violations``: how many are NotFitted in this variant

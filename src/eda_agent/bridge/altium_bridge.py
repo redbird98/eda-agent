@@ -251,7 +251,7 @@ class AltiumBridge:
         self._fault_recorded = True
 
     def _clear_fault_if_any(self, workspace_dir) -> None:
-        """A command succeeded — the loop is alive; drop any banner state.
+        """A command succeeded: the loop is alive; drop any banner state.
 
         Clears when THIS instance recorded a fault, and once at first success
         to sweep a stale ``last_fault.json`` left by a previous process (the
@@ -312,10 +312,20 @@ class AltiumBridge:
                         path.unlink()
                 except OSError:
                     pass
-            # Stray .tmp files from older builds that did atomic rename
+            # Stray .tmp files from older builds that did atomic rename.
+            # Age-filtered like the responses above, and for the same
+            # reason: an unconditional delete here removes a temp file
+            # that another writer is between writing and renaming, which
+            # destroys that caller's response and leaves it polling until
+            # it times out. Today's Pascal writes responses directly so
+            # nothing in production creates these, but "nothing creates
+            # them" is a property of the current script, not a guarantee
+            # -- and a sweep whose safety depends on the swept file never
+            # existing is one build away from being wrong.
             for path in workspace.glob("response_*.json.tmp"):
                 try:
-                    path.unlink()
+                    if path.stat().st_mtime < cutoff:
+                        path.unlink()
                 except OSError:
                     pass
         except OSError:

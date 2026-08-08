@@ -122,11 +122,46 @@ def test_prune_keeps_newest_and_gcs_orphan_blobs(tmp_path):
     (proj / "main.SchDoc").write_text("v3", encoding="utf-8")
     store.create(proj, checkpoint_id="c3", now=datetime(2026, 7, 2, 11, 0, 0))
 
+    # Age every blob past the collector's safety window. That window
+    # exists because ``create`` promotes a blob to its final name BEFORE
+    # writing the manifest that references it, so for a moment a live
+    # blob looks exactly like garbage; without the guard a concurrent
+    # collector deletes it and the manifest points at nothing.
+    #
+    # Ageing them here keeps this test about the CONTRACT -- orphans are
+    # collected -- rather than about how promptly, which is the
+    # collector's business and changed when the guard was added.
+    import os
+    import time as _time
+
+    stale = _time.time() - 3600
+    for blob in store.blobs.iterdir():
+        os.utime(blob, (stale, stale))
+
     removed = store.prune(keep=1)
     assert set(removed) == {"c1", "c2"}
     assert [c.id for c in store.list()] == ["c3"]
     # Only c3's 4 files remain as blobs; the v1/v2 SchDoc variants are GC'd.
     assert len(list(store.blobs.iterdir())) == 4
+
+
+def test_a_freshly_written_blob_is_never_collected(tmp_path):
+    """The guard itself: a blob mid-create must survive a collection.
+
+    Reproduces the window directly -- a blob on disk under its final
+    name with no manifest referencing it yet, which is precisely what
+    ``create`` leaves behind between promoting the blob and committing
+    the manifest.
+    """
+    store = _store(tmp_path)
+    store.blobs.mkdir(parents=True, exist_ok=True)
+    inflight = store.blobs / ("f" * 64)
+    inflight.write_text("body being checkpointed", encoding="utf-8")
+
+    assert store._gc_blobs() == 0
+    assert inflight.exists(), (
+        "the collector deleted a blob that create had not yet referenced; "
+        "its manifest would point at nothing and the restore would fail")
 
 
 def test_restore_unknown_checkpoint_raises(tmp_path):

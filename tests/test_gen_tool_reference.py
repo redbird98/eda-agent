@@ -54,8 +54,31 @@ def test_reference_flags_modal_tools(reference):
 
 
 def test_pipe_in_summary_is_escaped(reference):
-    # Every table row has exactly 4 content cells (5 pipes) — an unescaped
+    # Every table row has exactly 4 content cells (5 pipes): an unescaped
     # pipe in a summary would break the markdown table.
     for ln in reference.splitlines():
         if ln.startswith("| `"):
             assert ln.count("|") == 5, ln
+
+
+def test_the_committed_reference_is_current(reference):
+    """The file in docs/ must match what the generator produces now.
+
+    Every check above reads freshly generated output, so all of them
+    stay green while the COMMITTED file rots. That file is the one
+    people actually read, and it carries per-tool maturity and
+    interaction badges: a stale copy tells a reader an operation is
+    safe or offline when the code says otherwise. Nothing regenerates
+    it automatically, so nothing but this notices.
+
+    Generation is deterministic (same input, byte-identical output), so
+    this compares whole files rather than sampling.
+    """
+    committed = _REPO / "docs" / "TOOL_REFERENCE.md"
+    assert committed.is_file(), f"{committed} is missing"
+    on_disk = committed.read_text(encoding="utf-8")
+    assert on_disk == reference, (
+        "docs/TOOL_REFERENCE.md is out of date with the tool surface. "
+        "Regenerate it with `python scripts/gen_tool_reference.py` and "
+        "include the result in the same commit as the change that moved "
+        "it.")

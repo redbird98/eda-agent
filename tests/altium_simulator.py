@@ -22,6 +22,7 @@ import re
 import string
 import threading
 import time
+import traceback
 from pathlib import Path
 from typing import Any, Optional
 
@@ -245,6 +246,87 @@ def _build_error_response(
 # The Altium Simulator
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Batch payload grammar, mirroring Main.pas NextBatchOp / GetBatchField.
+#
+# Every bulk tool rides this grammar and until now the simulator parsed it
+# ad hoc with split("~~") and split(";"), which is LOOSER than the Pascal:
+# a plain split keeps empty operations that NextBatchOp discards, and a
+# naive key/value split disagrees with GetBatchField on a value that
+# itself contains "=". A harness that accepts payloads Altium would
+# reject cannot be used to check a payload builder.
+#
+# These two are the semantics the FPC cross-validation suite compares
+# against the compiled originals, so a handler built on them tests the
+# real contract.
+# ---------------------------------------------------------------------------
+
+def _next_batch_op(remaining: str) -> tuple[str, str]:
+    """(op, rest) for the next non-empty operation. Mirrors NextBatchOp."""
+    while remaining:
+        sep = remaining.find("~~")
+        if sep < 0:
+            return remaining, ""
+        op, remaining = remaining[:sep], remaining[sep + 2:]
+        if op:
+            return op, remaining
+    return "", ""
+
+
+def _iter_batch_ops(payload: str):
+    """Every operation in a batch payload, empties discarded."""
+    remaining = payload
+    while True:
+        op, remaining = _next_batch_op(remaining)
+        if not op:
+            return
+        yield op
+        if not remaining:
+            return
+
+
+
+def _int_or_zero(text: str) -> int:
+    """Mirrors StrToIntDef(x, 0): a non-numeric field reads as zero."""
+    try:
+        return int(str(text).strip())
+    except (TypeError, ValueError):
+        return 0
+
+def _get_batch_field(op: str, key: str) -> str:
+    """One field's value. Mirrors GetBatchField.
+
+    Fields split on ";", key and value on the FIRST "=", so a value may
+    contain "=" and is returned whole. Key match is case-insensitive and
+    the first match wins. A field with no "=" is skipped, not treated as
+    a valueless key.
+    """
+    remaining = op
+    while remaining:
+        sep = remaining.find(";")
+        if sep < 0:
+            field, remaining = remaining, ""
+        else:
+            field, remaining = remaining[:sep], remaining[sep + 1:]
+        eq = field.find("=")
+        if eq >= 0 and field[:eq].upper() == key.upper():
+            return field[eq + 1:]
+    return ""
+
+
+#: Set EDA_SIM_TRACE=1 to have the poll loop log iterations that did
+#: work or ran long. Used to tell a starved simulator apart from one
+#: that never saw the request, which look identical from the bridge
+#: side (both report a timeout with first_seen_ms=-1).
+_SIM_TRACE = bool(os.environ.get("EDA_SIM_TRACE"))
+
+#: How many consecutive read failures a request file gets before the
+#: simulator gives up on it. At a 10ms poll that is a fifth of a second,
+#: far longer than a transient share-violation and far shorter than the
+#: bridge's 5s deadline, so a real answer still beats the timeout.
+_MAX_REQUEST_READ_ATTEMPTS = 20
+
+
 class AltiumSimulator:
     """Simulates Altium Designer's scripting engine for testing.
 
@@ -258,6 +340,21 @@ class AltiumSimulator:
         self.running = False
         self._thread: Optional[threading.Thread] = None
         self._poll_interval = 0.01  # 10ms for fast tests
+        #: Anything the poll loop caught. Empty is the normal
+        #: state; a non-empty list explains a timeout that would
+        #: otherwise look like a slow machine.
+        self.errors: list[str] = []
+        #: request path -> consecutive read failures, so a file locked
+        #: for an instant is retried rather than destroyed.
+        self._read_failures: dict[str, int] = {}
+        #: What the bulk library handlers accepted, so a test can assert
+        #: on the PARSED payload rather than only on a success count.
+        self.lib_pins: list[dict] = []
+        self.lib_symbol_texts: list[dict] = []
+        self.lib_pads: list[dict] = []
+        self.lib_tracks: list[dict] = []
+        #: designator -> paste currently suppressed?
+        self.dnp_excluded: dict[str, bool] = {}
 
         # ----- Mock state -----
         self.version = "connected"
@@ -378,6 +475,10 @@ class AltiumSimulator:
                              {"Partnumber": "", "Manufacturer": ""}),
         ]
         self.lib_has_schlib = True  # Simulate having an active SchLib
+        # Lib_AddFootprintPads refuses with NO_PCBLIB when no PCB
+        # library is active, so the state is modelled rather than
+        # assumed, letting a test exercise that refusal.
+        self.lib_has_pcblib = True
 
         # Active PCB board (for pcb.* commands). Positions in mils.
         self.board = MockBoard(
@@ -448,7 +549,19 @@ class AltiumSimulator:
     # ------------------------------------------------------------------
 
     def _poll_loop(self) -> None:
-        """Main polling loop, scans for any request_<id>.json file."""
+        """Main polling loop, scans for any request_<id>.json file.
+
+        Every iteration is guarded. This runs on a DAEMON thread, so an
+        exception escaping here kills the simulator silently: the thread
+        is gone, no further request is ever answered, and each waiting
+        caller reports only a timeout. That is indistinguishable from a
+        slow machine, and it is the shape of a failure this suite hit
+        twice without being able to explain it.
+
+        The exception is recorded rather than raised so the loop keeps
+        serving, and ``self.errors`` gives the next failure something to
+        say beyond "no response".
+        """
         stop_path = self.workspace_dir / "stop"
 
         while self.running:
@@ -460,8 +573,60 @@ class AltiumSimulator:
                 self.running = False
                 break
 
-            self._process_single_request()
+            try:
+                _t0 = time.monotonic()
+                _did = self._process_single_request()
+                _gap = (time.monotonic() - _t0) * 1000.0
+                self._trace(_did, _gap)
+            except BaseException as exc:  # noqa: BLE001 - see docstring
+                self.errors.append(
+                    f"{type(exc).__name__}: {exc}\n"
+                    + "".join(traceback.format_exc()))
             time.sleep(self._poll_interval)
+
+    def _write_error_response(self, request_id: str, code: str,
+                              message: str) -> None:
+        """Answer a request that could not even be read.
+
+        Written directly, with no tmp+rename, because that is what
+        Main.pas WriteResponseFile does and the bridge's poll loop is
+        built to retry a partial parse. The point is that the caller
+        gets a REASON: before this, an unreadable request was dropped
+        and the only symptom was a timeout.
+        """
+        path = self.workspace_dir / f"response_{request_id}.json"
+        try:
+            path.write_text(
+                _build_error_response(request_id, code, message),
+                encoding="utf-8")
+        except (IOError, OSError):
+            pass
+
+    def _trace(self, did: bool, gap_ms: float) -> None:
+        """Record loop activity when EDA_SIM_TRACE is set.
+
+        Off by default on purpose: an unconditional file write inside the
+        poll loop would perturb the very timing this exists to measure.
+        Logs only iterations that did work or ran long, so the file shows
+        where a missing response actually went.
+        """
+        if not _SIM_TRACE:
+            return
+        self._trace_ticks = getattr(self, "_trace_ticks", 0) + 1
+        # A heartbeat every 100 idle iterations, so silence in the log
+        # means the THREAD stopped running rather than merely finding
+        # nothing to do. Without it the two are indistinguishable, which
+        # is the whole question when a request goes unanswered.
+        beat = (self._trace_ticks % 100) == 0
+        if not did and gap_ms <= 50.0 and not beat:
+            return
+        try:
+            with open(self.workspace_dir / "sim_trace.log", "a",
+                      encoding="utf-8") as handle:
+                handle.write("%.3f did=%s gap=%.0fms\n"
+                             % (time.time(), did, gap_ms))
+        except Exception:
+            pass
 
     def _process_single_request(self) -> bool:
         """Mirrors Dispatcher.pas ProcessSingleRequest under IPC v2.
@@ -492,15 +657,43 @@ class AltiumSimulator:
         stem = request_path.stem  # request_<id>
         filename_id = stem[len("request_"):] if stem.startswith("request_") else ""
 
+        # A read that fails here USED TO delete the request and return,
+        # which destroyed the call: no response was ever written and the
+        # bridge could only report a timeout, indistinguishable from a
+        # slow machine. On Windows the read fails transiently whenever
+        # something else holds the file open for an instant (indexer,
+        # sync client, AV), so under CPU load this lost roughly 1 request
+        # in 25 and produced exactly the trace seen while chasing it:
+        # bridge polling healthily with first_seen_ms=-1, simulator loop
+        # alive and finding nothing, because the file was already gone.
+        #
+        # Leave the file for the next iteration instead, and only give up
+        # after enough attempts that a genuinely unreadable file cannot
+        # spin forever -- reporting an error response, so the caller
+        # learns the reason rather than waiting out the deadline.
         try:
             content = request_path.read_text(encoding="utf-8")
-        except (IOError, OSError, UnicodeDecodeError):
+        except (IOError, OSError, UnicodeDecodeError) as exc:
+            key = str(request_path)
+            attempts = self._read_failures.get(key, 0) + 1
+            self._read_failures[key] = attempts
+            if attempts < _MAX_REQUEST_READ_ATTEMPTS:
+                return False        # transient: try again next iteration
+            self._read_failures.pop(key, None)
             try:
                 request_path.unlink()
             except OSError:
                 pass
+            if filename_id and _is_valid_request_id(filename_id):
+                self._write_error_response(
+                    filename_id, "REQUEST_UNREADABLE",
+                    f"Request file was unreadable after {attempts} "
+                    f"attempts ({type(exc).__name__}: {exc}) and has been "
+                    f"discarded. The polling loop is healthy; retry the "
+                    f"call.")
             return False
 
+        self._read_failures.pop(str(request_path), None)
         try:
             request_path.unlink()
         except OSError:
@@ -556,11 +749,24 @@ class AltiumSimulator:
                         f"Unhandled exception processing: {command}",
                     )
 
+            # Written DIRECTLY, exactly as Main.pas WriteResponseFile does.
+            # Its comment records why: an earlier tmp+RenameFile was
+            # abandoned because DelphiScript's RenameFile silently failed
+            # for some paths and the response never reached its final
+            # name. Python tolerates a partially-written response --
+            # json.load raises and the poller retries -- so a direct
+            # write is the contract.
+            #
+            # This simulator used tmp+replace, i.e. it was MORE atomic
+            # than the thing it simulates. Two consequences, both real:
+            # the suite never exercised the partial-read retry path, and
+            # the bridge's unconditional sweep of "response_*.json.tmp"
+            # could unlink an in-flight temp file between the write and
+            # the rename, destroying that caller's response. That was
+            # the intermittent concurrency failure -- 5 runs in 60.
             response_path = self.workspace_dir / f"response_{request_id}.json"
-            tmp_path = response_path.with_suffix(".json.tmp")
             try:
-                tmp_path.write_text(response_content, encoding="utf-8")
-                tmp_path.replace(response_path)
+                response_path.write_text(response_content, encoding="utf-8")
             except (IOError, OSError):
                 pass
         finally:
@@ -955,6 +1161,135 @@ class AltiumSimulator:
                 rid,
                 '{"success":true,"designator":"' + _escape_json_string(designator) + '"}'
             )
+
+        elif action == "add_pins":
+            # Mirrors Lib_AddPins: one PreProcess for the batch, a pin
+            # with no designator is DISCARDED rather than failing the
+            # call, and the reply is added/failed/total. Getting the
+            # blank-designator rule wrong here would let a payload that
+            # silently loses pins in Altium look clean in a test.
+            if not self.lib_has_schlib:
+                return _build_error_response(rid, "NO_SCHLIB",
+                                             "No schematic library is active")
+            added = failed = total = 0
+            for op in _iter_batch_ops(params.get("pins", "")):
+                total += 1
+                if _get_batch_field(op, "designator").strip():
+                    added += 1
+                    self.lib_pins.append({
+                        "designator": _get_batch_field(op, "designator"),
+                        "name": _get_batch_field(op, "name"),
+                        "electrical_type": _get_batch_field(
+                            op, "electrical_type"),
+                        "symbol_outer_edge": _get_batch_field(
+                            op, "symbol_outer_edge"),
+                        "symbol_inner_edge": _get_batch_field(
+                            op, "symbol_inner_edge"),
+                        "show_name": _get_batch_field(op, "show_name"),
+                        "show_designator": _get_batch_field(
+                            op, "show_designator"),
+                        # Captured so an INJECTED field is observable: a
+                        # name carrying ";rotation=270" would otherwise
+                        # land silently.
+                        "rotation": _get_batch_field(op, "rotation"),
+                    })
+                else:
+                    failed += 1
+            return _build_success_response(
+                rid, '{"added":%d,"failed":%d,"total":%d}' % (
+                    added, failed, total))
+
+        elif action == "add_footprint_pads":
+            # Mirrors Lib_AddFootprintPads, which creates a pad for EVERY
+            # operation and only counts a failure when the object factory
+            # returns Nil. Blank designators never reach it: _pads_payload
+            # filters them on the Python side and reports the count, so a
+            # handler that rejected them here would disagree with Altium
+            # and hide that split of responsibility.
+            if not params.get("pads"):
+                return _build_error_response(rid, "MISSING_PARAM",
+                                             "pads is required")
+            if not self.lib_has_pcblib:
+                return _build_error_response(rid, "NO_PCBLIB",
+                                             "No PCB library is active")
+            added = total = 0
+            for op in _iter_batch_ops(params.get("pads", "")):
+                total += 1
+                added += 1
+                self.lib_pads.append({
+                    "designator": _get_batch_field(op, "designator"),
+                    "x": _get_batch_field(op, "x"),
+                    "y": _get_batch_field(op, "y"),
+                    "x_size": _get_batch_field(op, "x_size"),
+                    "y_size": _get_batch_field(op, "y_size"),
+                    "hole_size": _get_batch_field(op, "hole_size"),
+                    "shape": _get_batch_field(op, "shape"),
+                    "corner_radius": _get_batch_field(op, "corner_radius"),
+                    "rotation": _get_batch_field(op, "rotation"),
+                    # EFFECTIVE layer, not the one that was sent.
+                    # Lib_AddFootprintPads overrides it: a pad with a
+                    # drill is forced to MultiLayer regardless of what
+                    # the caller asked for, because a drilled pad on a
+                    # single copper layer is not a through-hole pad.
+                    # Recording the raw field would make a test assert a
+                    # value Altium discards.
+                    "layer": ("MultiLayer"
+                              if _int_or_zero(_get_batch_field(
+                                  op, "hole_size")) > 0
+                              else _get_batch_field(op, "layer")),
+                    "layer_requested": _get_batch_field(op, "layer"),
+                })
+            return _build_success_response(
+                rid, '{"added":%d,"failed":0,"total":%d}' % (added, total))
+
+        elif action == "add_footprint_tracks":
+            # Mirrors Lib_AddFootprintTracks. Note the per-track layer
+            # default: an EMPTY layer means silkscreen (eTopOverlay), not
+            # the eTopLayer that GetLayerFromString falls back to for an
+            # unrecognised name. Modelling the fallback instead of the
+            # default would put courtyard and outline art on copper here
+            # and hide the distinction the handler is careful about.
+            if not params.get("tracks"):
+                return _build_error_response(rid, "MISSING_PARAM",
+                                             "tracks is required")
+            if not self.lib_has_pcblib:
+                return _build_error_response(rid, "NO_PCBLIB",
+                                             "No PCB library is active")
+            added = total = 0
+            for op in _iter_batch_ops(params.get("tracks", "")):
+                total += 1
+                added += 1
+                layer = _get_batch_field(op, "layer") or "TopOverlay"
+                self.lib_tracks.append({
+                    "x1": _get_batch_field(op, "x1"),
+                    "y1": _get_batch_field(op, "y1"),
+                    "x2": _get_batch_field(op, "x2"),
+                    "y2": _get_batch_field(op, "y2"),
+                    "width": _get_batch_field(op, "width") or "10",
+                    "layer": layer,
+                })
+            return _build_success_response(
+                rid, '{"added":%d,"failed":0,"total":%d}' % (added, total))
+
+        elif action == "add_symbol_text":
+            # Mirrors Lib_AddSymbolText: empty text is refused per item.
+            if not self.lib_has_schlib:
+                return _build_error_response(rid, "NO_SCHLIB",
+                                             "No schematic library is active")
+            added = failed = total = 0
+            for op in _iter_batch_ops(params.get("texts", "")):
+                total += 1
+                if _get_batch_field(op, "text").strip():
+                    added += 1
+                    self.lib_symbol_texts.append({
+                        "text": _get_batch_field(op, "text"),
+                        "rotation": _get_batch_field(op, "rotation"),
+                    })
+                else:
+                    failed += 1
+            return _build_success_response(
+                rid, '{"added":%d,"failed":%d,"total":%d}' % (
+                    added, failed, total))
 
         elif action == "add_symbol_rectangle":
             if not self.lib_has_schlib:
@@ -1411,6 +1746,37 @@ class AltiumSimulator:
         if board is None:
             return _build_error_response(rid, "NO_PCB", "No PCB document is active")
 
+        if action == "apply_dnp_paste_exclusion":
+            # Mirrors PCB_ApplyDnpPasteExclusion. The designator list is
+            # ONE pipe-delimited field, and membership is tested with the
+            # separators attached ('|R1|' inside '|' + list + '|') so R1
+            # cannot match R10. Modelling that anchoring is the point: a
+            # substring test here would pass a payload that treats the
+            # wrong components on a real board.
+            desigs = params.get("designators", "")
+            if not desigs:
+                return _build_error_response(
+                    rid, "MISSING_PARAM", "designators is required")
+            restore = str(params.get("restore", "")).lower() in ("true", "1")
+            wanted = "|" + desigs + "|"
+            matched, pads_changed = [], 0
+            for comp in board.components:
+                if "|" + comp.designator + "|" not in wanted:
+                    continue
+                matched.append(comp.designator)
+                # Two surface pads per component in the mock board.
+                pads_changed += 2
+                self.dnp_excluded[comp.designator] = not restore
+            return _build_success_response(rid, (
+                '{"restored":%s,"components_requested":%d,'
+                '"components_matched":%d,"pads_changed":%d,'
+                '"pads_skipped_through_hole":0,"items":[%s]}' % (
+                    "true" if restore else "false",
+                    len([d for d in desigs.split("|") if d]),
+                    len(matched), pads_changed,
+                    ",".join('{"designator":"%s","pads_changed":2}'
+                             % _escape_json_string(d) for d in matched))))
+
         if action == "get_components":
             items = []
             for c in board.components:
@@ -1588,15 +1954,15 @@ class AltiumSimulator:
             bound, failed = 0, 0
             missing_components, missing_nets = [], []
             comp_names = {c.designator for c in board.components}
-            for op in bindings.split("~~"):
-                if not op:
-                    continue
-                fields = {}
-                for kv in op.split(";"):
-                    if "=" in kv:
-                        k, v = kv.split("=", 1)
-                        fields[k.strip()] = v.strip()
-                desig, pin, net = fields.get("designator"), fields.get("pin"), fields.get("net")
+            # PCB_BindPadNets parses with NextBatchOp / GetBatchField, so
+            # this does too. The previous split("~~") + split(";") was
+            # looser in two ways that matter to a payload builder: it
+            # stripped surrounding whitespace, which the Pascal keeps, and
+            # it matched keys case-sensitively, which the Pascal does not.
+            for op in _iter_batch_ops(bindings):
+                desig = _get_batch_field(op, "designator") or None
+                pin = _get_batch_field(op, "pin") or None
+                net = _get_batch_field(op, "net") or None
                 if not desig or not pin or not net:
                     failed += 1
                     continue
@@ -1710,6 +2076,19 @@ class AltiumSimulator:
     # ------------------------------------------------------------------
 
     def _handle_audit(self, action: str, params: dict, rid: str) -> str:
+        """Answer ANY audit action with a seeded or empty result.
+
+        Deliberately a catch-all, unlike every other category here: the
+        audit checks are Pascal logic, and re-implementing them would
+        only test the copy. A test seeds ``audit_results[action]`` to
+        drive the Python side against a known verdict.
+
+        So this is NOT per-action coverage, and must not be read as any.
+        tests/test_simulator_maturity_is_measured.py unmasks it by
+        probing for an action that cannot exist, and excludes the whole
+        category from the published simulator label; without that the
+        claim inflates by 32 tools whose checks nothing implements.
+        """
         if not action:
             return _build_error_response(rid, "UNKNOWN_ACTION",
                                          "Empty audit action")

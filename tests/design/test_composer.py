@@ -93,7 +93,7 @@ def test_compose_fallback_when_no_motifs_match():
              "status": "existing", "sheet": "main", "role": "fb_top"},
         ],
         nets=[
-            # R between two signal nets — doesn't match pull_up/pull_down
+            # R between two signal nets: doesn't match pull_up/pull_down
             # (no power), doesn't match voltage_divider (only one R).
             {"name": "SIG_A", "pins": [
                 {"refdes": "U1", "pin": "1"},

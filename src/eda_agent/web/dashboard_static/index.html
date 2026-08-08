@@ -4,7 +4,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>EDA Agent — Design Dashboard</title>
+<title>EDA Agent - Design Dashboard</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <script>
 /* No-flash theme bootstrap: set data-theme before the body paints so a
@@ -5019,7 +5019,7 @@ function renderComponents() {
   }
   if (bomA.singleUse) {
     addIssue("warn", bomA.singleUse + " single-use values",
-             "Values used by exactly one component — consolidation candidates",
+             "Values used by exactly one component: consolidation candidates",
              null);
   }
   if (dsCov.withoutDs.length) {
@@ -5060,7 +5060,7 @@ function renderComponents() {
   if (issues.children.length) {
     summary.appendChild(issues);
   } else {
-    // No problems found — show a one-liner so the section doesn't look
+    // No problems found: show a one-liner so the section doesn't look
     // broken (e.g. snapshot loaded but every check passed).
     const ok = el("div", {class:"row-actions", style:"margin-top:6px;"});
     ok.appendChild(el("span", {class:"tag ok"}, "no issues"));
@@ -5092,8 +5092,8 @@ function renderComponents() {
       "reviewed " + reviewedCount + " / " + designators.length
       + " (" + pct + "%)"));
     if (reviewedCount < designators.length) {
-      // Replaces the rounded "unreviewed only" tag with a real checkbox
-      // — same affordance, no fake-pill ambiguity.
+      // Replaces the rounded "unreviewed only" tag with a real checkbox,
+      // same affordance, no fake-pill ambiguity.
       const lbl = el("label",
         {style:"display:inline-flex; align-items:center; gap:4px; "
               + "cursor:pointer; font-size:var(--fs-xs); color:var(--text-mute);",
@@ -6847,7 +6847,7 @@ function updateStatusPill(forced, detail) {
 //   ×  disconnected  (red pill -- no ping in 15s+)
 // Only writes when the value actually changes, so we don't churn the
 // title every poll tick.
-const BASE_TITLE = "EDA Agent — Design Dashboard";
+const BASE_TITLE = "EDA Agent - Design Dashboard";
 const TITLE_GLYPH = { ok: "●", busy: "◌", stale: "◦", dead: "×" };
 let lastTitleKind = null;
 function syncTabTitle(kind) {

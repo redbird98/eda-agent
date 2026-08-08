@@ -29,7 +29,7 @@ Pipeline stages, in order:
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Optional
 
 from eda_agent.design.canvas import (
@@ -67,6 +67,7 @@ from eda_agent.design.priors import (
 )
 from eda_agent.design.quality import LayoutScore, score_canvas
 from eda_agent.design.router import (
+    _adaptive_stub_length,
     _pin_direction_vector,
     _route_l_path,
     _route_signal_pins,
@@ -1182,6 +1183,38 @@ def build_best_canvas_from_plan(
                 "convention polish failed and was skipped: "
                 f"{type(pol_exc).__name__}: {pol_exc}"),
         ))
+
+    # LAST, on the winner only. Moving a repair glyph off its pin onto a
+    # short stub is how the sheet is drawn by hand, but it adds wire, and
+    # wire drawn before this point would enter the scored objective and
+    # steer placement. Run here and the selection above is bit-identical
+    # to what it was without the feature.
+    try:
+        moved = upgrade_repair_ports_to_stubs(best_result.canvas, plan)
+        if moved:
+            # Designator/value text was placed against the OLD glyph
+            # positions, inside the per-candidate build. Moving a glyph
+            # afterwards can drop it on text that was routed around where
+            # it used to be, so re-run the placer over the finished
+            # canvas. It only moves text (never symbols or wires) and is
+            # documented as invisible to the scorer, so this is safe
+            # after selection.
+            from eda_agent.design.text_placement import place_instance_text
+            place_instance_text(best_result.canvas)
+            best_result.notes.append(PipelineNote(
+                severity="info",
+                text=(
+                    f"{moved} repair power port(s) moved onto a short stub "
+                    f"off their pin; the rest stayed coincident because a "
+                    f"stub there would have touched another net"),
+            ))
+    except Exception as stub_exc:
+        best_result.notes.append(PipelineNote(
+            severity="warning",
+            text=(
+                "repair-port stub upgrade failed and was skipped: "
+                f"{type(stub_exc).__name__}: {stub_exc}"),
+        ))
     return best_result
 
 
@@ -2166,6 +2199,267 @@ def _emit_port_cluster(
                 sheet_wire_segments.append((seg[0], seg[1], seg[2], seg[3], net.name))
 
 
+#: How far a repair stub reaches before the glyph sits on it. Short on
+#: purpose: this is the "pin, tick, glyph" the hand-drawn convention
+#: uses, not a route. Clipped further by _adaptive_stub_length when a
+#: neighbouring body is closer than this.
+_REPAIR_STUB_LEN_MILS = 200
+
+
+def _repair_stub_is_safe(
+    sx: int, sy: int, ex: int, ey: int,
+    foreign_points: set[tuple[int, int]],
+    foreign_wires: list[tuple[int, int, int, int]],
+) -> bool:
+    """True iff a stub (sx,sy)->(ex,ey) cannot bond to another net.
+
+    Encodes Altium's connection rules rather than plain geometry, and
+    the distinction matters in both directions.
+
+    Two wires CROSSING mid-span do not connect without a junction dot,
+    so a crossing must not veto the stub. Vetoing on crossings would
+    reject almost every stub on a dense sheet, which is the same as not
+    having the feature.
+
+    What does connect, and is therefore checked:
+      * a foreign pin or power port anywhere along the stub
+      * our endpoint landing on a foreign wire (a T-intersection)
+      * a foreign wire's endpoint landing on our stub (the same, mirrored)
+    """
+    for (px, py) in foreign_points:
+        # The source end is this net's own pin, so it is not foreign
+        # traffic even if some other net's geometry also passes there.
+        if (px, py) == (sx, sy):
+            continue
+        if _point_on_segment(px, py, sx, sy, ex, ey):
+            return False
+    for (x1, y1, x2, y2) in foreign_wires:
+        if _point_on_segment(ex, ey, x1, y1, x2, y2):
+            return False
+        if _point_on_segment(x1, y1, sx, sy, ex, ey):
+            return False
+        if _point_on_segment(x2, y2, sx, sy, ex, ey):
+            return False
+    return True
+
+
+def _clearance_to_bodies(
+    x: int, y: int, bboxes: list[tuple[int, int, int, int]],
+) -> float:
+    """Distance from a point to the nearest symbol body, 0 if inside.
+
+    Used to keep the stub upgrade from crowding a glyph it was meant to
+    give room to.
+    """
+    best = float("inf")
+    for (x1, y1, x2, y2) in bboxes:
+        dx = max(x1 - x, 0, x - x2)
+        dy = max(y1 - y, 0, y - y2)
+        best = min(best, (dx * dx + dy * dy) ** 0.5)
+    return best
+
+
+def _glyph_would_hit_text(
+    x: int, y: int, text: str, canvas: SchematicCanvas, sheet: str,
+    skip_index: int,
+) -> bool:
+    """True if a glyph at (x, y) would collide with text already placed.
+
+    Only NET LABELS and other glyphs are checked here. Designator and
+    value text is deliberately not: ``place_instance_text`` re-runs after
+    this pass and moves that text out of the way, so rejecting a move on
+    its account would forfeit the improvement for a collision that is
+    about to be resolved anyway. Net labels are never moved, so a glyph
+    dropped on one stays there.
+
+    Extents use the text placer's own character metrics rather than a
+    second set, so the two agree on what overlaps.
+    """
+    from eda_agent.design.text_placement import CHAR_W, LINE_H
+
+    def _text_box(tx: int, ty: int, s: str, just: int = 0):
+        w = CHAR_W * max(1, len(s))
+        x1 = tx - w if just == 2 else tx
+        return (x1, ty, x1 + w, ty + LINE_H)
+
+    # The glyph's own footprint: the bar/symbol plus its name underneath.
+    half = max(100, (CHAR_W * max(1, len(text))) // 2)
+    mine = (x - half, y - LINE_H, x + half, y + LINE_H)
+
+    def _hits(box) -> bool:
+        return not (mine[2] <= box[0] or box[2] <= mine[0]
+                    or mine[3] <= box[1] or box[3] <= mine[1])
+
+    for lab in canvas.labels:
+        if lab.sheet != sheet:
+            continue
+        if _hits(_text_box(lab.x, lab.y, lab.text,
+                           getattr(lab, "justification", 0))):
+            return True
+    for i, other in enumerate(canvas.power_ports):
+        # Skip by INDEX, not by coordinate. The glyph being moved is
+        # still recorded at its old position while its new one is being
+        # tested, so a coordinate check does not exclude it -- and with
+        # LINE_H at 110 its own 220-tall box overlaps itself across a
+        # 200-mil stub, which silently rejected every vertical move.
+        if i == skip_index or other.sheet != sheet:
+            continue
+        o_half = max(100, (CHAR_W * max(1, len(other.text))) // 2)
+        if _hits((other.x - o_half, other.y - LINE_H,
+                  other.x + o_half, other.y + LINE_H)):
+            return True
+    return False
+
+
+def upgrade_repair_ports_to_stubs(
+    canvas: SchematicCanvas,
+    plan: DesignPlan,
+) -> int:
+    """Move repair glyphs off their pins onto a short stub, where safe.
+
+    WHAT THIS BUYS, measured rather than assumed. A repair glyph sits on
+    the pin's ELECTRICAL end, which is already outside the body, so it
+    never overlaps the symbol -- on the benchmark boards not one glyph of
+    60 was inside a body bbox either before or after. What it does is
+    relieve CROWDING: a glyph can sit 150 mils off a neighbouring body
+    with its own bar and text in that gap, and the stub pushes it clear
+    (measured +200 mils on every moved glyph of one board, mean +189 on
+    another).
+
+    That is a modest gain, so the pass is deliberately conservative: a
+    glyph is moved only when the stub is electrically safe AND the glyph
+    ends no closer to any body than it started. The second condition
+    currently rejects nothing on any benchmark board, and is kept anyway
+    because it is what makes this pass safe to run unattended:
+    ``_adaptive_stub_length`` only steers around the obstacles in the
+    pin's own path, so nothing else stops a stub carrying a glyph toward
+    a DIFFERENT part, and a cosmetic pass that crowds a glyph is worse
+    than one that does nothing. Enforced structurally rather than trusted
+    to keep holding on boards nobody has run yet.
+
+    A move is also refused when the glyph would land on a NET LABEL or
+    another glyph. That one is not theoretical: it rejects 13 of 49
+    candidate moves on the mcu board as the test suite builds it.
+    (Every count in this docstring is from the benchmark boards under
+    the suite's reduced force-directed sweep; production uses the full
+    sweep, places differently, and will not reproduce them exactly.) Net labels are never repositioned
+    by the text placer, so a glyph dropped on one stays there, whereas
+    designator/value text is re-placed afterwards and is therefore not a
+    reason to refuse a move.
+
+    Do NOT justify this by ``bends_per_power_net``. That number does drop
+    (2.5 -> 1.25 on one board) but only because straight 0-bend stubs
+    dilute an average over the rail's wires; no existing wire got
+    straighter. Clearance is the honest measure.
+
+    COSMETIC ONLY, and that is why it is a separate pass run once on the
+    chosen canvas instead of inside ``_repair_floating_power_pins``.
+    That repair executes for every best-of candidate, so any wire it drew
+    would enter the scored objective and steer placement: an earlier
+    version of this did exactly that and moved a part to the wrong side
+    of its IC. Connectivity is already guaranteed before this runs, so
+    nothing here can change it, only how it reads.
+
+    A repair glyph is identified by geometry rather than a tag: a power
+    port sitting exactly on a pin of its own net with no wire of that net
+    ending there. That is precisely what the repair leaves behind, and
+    re-deriving it keeps the two passes independent.
+
+    Returns how many glyphs were moved.
+    """
+    moved = 0
+    for sheet in {inst.sheet for inst in canvas.instances}:
+        pin_xy: dict[tuple[str, str], tuple[int, int]] = {}
+        pin_dir: dict[tuple[str, str], int] = {}
+        bboxes: list[tuple[int, int, int, int]] = []
+        for inst in canvas.instances_on(sheet):
+            for ep in inst.all_pin_endpoints():
+                pin_xy[(inst.refdes, ep.pin_id)] = (ep.x, ep.y)
+                # Outward direction, so the stub leaves the body rather
+                # than running back across it.
+                pin_dir[(inst.refdes, ep.pin_id)] = ep.orientation
+            bb = inst.world_bbox()
+            bboxes.append((int(bb.x_min), int(bb.y_min),
+                           int(bb.x_max), int(bb.y_max)))
+
+        # Which net owns each pin. A pin on no net at all still counts as
+        # foreign: bonding it into a power rail would be a short this
+        # pass invented.
+        pin_net: dict[tuple[int, int], str] = {}
+        for a_net in plan.nets:
+            for pr in a_net.pins:
+                pt = pin_xy.get((pr.refdes, pr.pin))
+                if pt is not None:
+                    pin_net[pt] = a_net.name
+
+        for net in plan.nets:
+            if not (_is_power_net(net) or _is_ground_net(net)):
+                continue
+            own_keys = [(pr.refdes, pr.pin) for pr in net.pins
+                        if (pr.refdes, pr.pin) in pin_xy]
+            own_pins = {pin_xy[k]: k for k in own_keys}
+            wire_ends = {
+                pt for w in canvas.wires if w.sheet == sheet
+                and w.net == net.name
+                for pt in ((w.x1, w.y1), (w.x2, w.y2))
+            }
+            for idx, port in enumerate(canvas.power_ports):
+                if port.sheet != sheet or port.text != net.name:
+                    continue
+                here = (port.x, port.y)
+                key = own_pins.get(here)
+                if key is None or here in wire_ends:
+                    continue  # not a repair glyph
+                dx, dy = _pin_direction_vector(pin_dir.get(key, 0))
+                if (dx, dy) == (0, 0):
+                    continue
+                length = _adaptive_stub_length(
+                    port.x, port.y, dx, dy, bboxes,
+                    base_length=_REPAIR_STUB_LEN_MILS)
+                ex = port.x + dx * length
+                ey = port.y + dy * length
+                foreign_points = {
+                    pt for pt, owner in pin_net.items()
+                    if owner != net.name
+                }
+                foreign_points |= {
+                    (p.x, p.y) for p in canvas.power_ports
+                    if p.sheet == sheet and p.text != net.name
+                }
+                foreign_wires = [
+                    (w.x1, w.y1, w.x2, w.y2) for w in canvas.wires
+                    if w.sheet == sheet and w.net != net.name
+                ]
+                if not _repair_stub_is_safe(port.x, port.y, ex, ey,
+                                            foreign_points, foreign_wires):
+                    continue
+                # Net labels are NOT moved by the text placer, so a glyph
+                # landing on one stays landed on it. Checked here because
+                # nothing downstream will clean it up.
+                if _glyph_would_hit_text(ex, ey, port.text, canvas, sheet,
+                                         skip_index=idx):
+                    continue
+                # And it must not make the drawing worse. Rejects nothing
+                # on the current benchmark boards; kept because the stub
+                # only steers around obstacles in the pin's own path, so
+                # nothing else prevents it carrying the glyph toward a
+                # different body.
+                if (_clearance_to_bodies(ex, ey, bboxes)
+                        < _clearance_to_bodies(port.x, port.y, bboxes)):
+                    continue
+                canvas.add_wires([WireSegment(
+                    x1=port.x, y1=port.y, x2=ex, y2=ey,
+                    sheet=sheet, net=net.name)])
+                # PowerPort is frozen, so the glyph is replaced in place
+                # rather than moved.
+                canvas.power_ports[idx] = replace(port, x=ex, y=ey)
+                # The pin is now a wire end, so a second pass would not
+                # mistake it for another unrepaired glyph.
+                wire_ends |= {here, (ex, ey)}
+                moved += 1
+    return moved
+
+
 def _repair_floating_power_pins(
     canvas: SchematicCanvas,
     sheet_name: str,
@@ -2185,6 +2479,12 @@ def _repair_floating_power_pins(
     now-redundant floating labels and any orphaned cluster glyph (a port left
     sitting on neither a pin nor a surviving spoke end), which would otherwise
     read as floating power objects in ERC. Fully-wired nets are left untouched.
+
+    Deliberately adds NO wire. This runs inside every best-of candidate, so
+    anything it draws lands in the scored objective and steers placement.
+    Moving the glyph off the pin onto a short stub is the nicer drawing, but it
+    is cosmetic, and it is applied once to the winning canvas by
+    ``upgrade_repair_ports_to_stubs`` rather than here.
     """
     pin_xy: dict[tuple[str, str], tuple[int, int]] = {}
     for inst in canvas.instances_on(sheet_name):
@@ -2194,11 +2494,11 @@ def _repair_floating_power_pins(
     for net in plan.nets:
         if not (_is_power_net(net) or _is_ground_net(net)):
             continue
-        net_pins = [
-            pin_xy[(pr.refdes, pr.pin)]
-            for pr in net.pins
+        net_pin_keys = [
+            (pr.refdes, pr.pin) for pr in net.pins
             if (pr.refdes, pr.pin) in pin_xy
         ]
+        net_pins = [pin_xy[k] for k in net_pin_keys]
         if not net_pins:
             continue
         wire_ends: set[tuple[int, int]] = set()
@@ -2212,16 +2512,17 @@ def _repair_floating_power_pins(
             if p.sheet == sheet_name and p.text == net.name
         }
         floating = [
-            pt for pt in net_pins
-            if pt not in wire_ends and pt not in port_pts
+            key for key in net_pin_keys
+            if pin_xy[key] not in wire_ends and pin_xy[key] not in port_pts
         ]
         if not floating:
             continue  # net is fully connected -- leave the working path alone
 
         style = _ground_style(net.name) if _is_ground_net(net) else "bar"
         canvas.add_power_ports([
-            PowerPort(text=net.name, x=px, y=py, style=style, sheet=sheet_name)
-            for (px, py) in floating
+            PowerPort(text=net.name, x=pin_xy[key][0], y=pin_xy[key][1],
+                      style=style, sheet=sheet_name)
+            for key in floating
         ])
         # This net's labels never bonded (power nets carry ports, not labels);
         # drop them so they do not linger as floating net labels.

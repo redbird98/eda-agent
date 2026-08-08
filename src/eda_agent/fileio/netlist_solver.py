@@ -4,8 +4,8 @@
 
 Altium does not store the compiled netlist in the ``.SchDoc``; it stores
 geometry (pins, wires, power ports, junctions) and derives connectivity at
-compile time. To review connectivity offline — floating pins, single-pin
-nets, pin-to-pin shorts — we must reconstruct that netlist from the geometry.
+compile time. To review connectivity offline: floating pins, single-pin
+nets, pin-to-pin shorts: we must reconstruct that netlist from the geometry.
 
 The model, validated against a live-Altium compiled netlist:
 
@@ -14,14 +14,14 @@ The model, validated against a live-Altium compiled netlist:
     port location, every net-label location, every junction location.
 
     Two POIs join when one lies on a wire segment that the other's wire
-    shares — concretely, every POI that lies on a wire's span is unioned
+    shares: concretely, every POI that lies on a wire's span is unioned
     with that wire's two endpoints. Wire endpoints of the same segment are
     unioned directly.
 
 The discipline that keeps this from over-merging (the failure mode of an
 earlier attempt): connectivity is asserted **only at POIs**, never at a bare
 geometric crossing of two wires. A four-way crossing with no junction dot has
-no POI at the crossing, so the two wires stay separate — exactly Altium's
+no POI at the crossing, so the two wires stay separate: exactly Altium's
 rule. Dropping a junction (RECORD=29) at the crossing adds a POI there, which
 unions them. T-junctions (a wire endpoint on another wire's span) and pin
 taps (a pin end on a span) connect automatically because the endpoint / pin
@@ -29,22 +29,22 @@ end is itself a POI.
 
 Net names: a net carrying a power port or net label takes that name; an
 otherwise-unnamed net is auto-named ``Net<D>_<p>`` after the pin ``p`` of its
-alphabetically-first component ``D`` — Altium's default auto-name form.
+alphabetically-first component ``D``: Altium's default auto-name form.
 
 Coordinates are exact integers (raw SchDoc units), so coincidence and
-on-segment tests are exact — no epsilon.
+on-segment tests are exact, no epsilon.
 
 Validated envelope: wire + power port + junction + net-label (by-name)
 connectivity, against a live-Altium compiled netlist (Blinker, 24/24) and
 against the design plan through the offline pipeline (buck, label-heavy,
 7/7 nets).
 
-Buses need no separate handling here: an Altium bus is a VISUAL grouping —
+Buses need no separate handling here: an Altium bus is a VISUAL grouping:
 its connectivity is carried by the per-pin net labels drawn at each bus
 entry, which the by-name rule already resolves. A bus-borne net connects iff
 its labels bind, exactly like any other label. What this solver cannot
 invent is connectivity a given emit never drew: if a net is left floating
-(e.g. a signal-net label placed off its pin's wire — a known pipeline
+(e.g. a signal-net label placed off its pin's wire: a known pipeline
 label-fallback case), the solver faithfully reports it disconnected. That is
 the intended ERC behavior, not a solver gap. Cross-sheet connectors (ports
 spanning sheets) are the one mechanism still outside scope.
@@ -114,9 +114,9 @@ def solve_nets(
         pins: ``[{component, pin, x, y}]`` where ``(x, y)`` is the pin's
             ELECTRICAL END (see :func:`pin_electrical_end`).
         wires: ``[{x1, y1, x2, y2}]`` straight segments.
-        power_ports: ``[{x, y, name}]`` — bind and name (GND, VCC, ...).
-        junctions: ``[{x, y}]`` — force a connection at a wire crossing.
-        net_labels: ``[{x, y, name}]`` — name a net.
+        power_ports: ``[{x, y, name}]``, bind and name (GND, VCC, ...).
+        junctions: ``[{x, y}]``, force a connection at a wire crossing.
+        net_labels: ``[{x, y, name}]``, name a net.
 
     Returns ``{nets: {name: [{component, pin}, ...]}, pin_nets:
     {"comp.pin": name}}``.

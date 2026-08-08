@@ -40,6 +40,18 @@ class _FakeBridge:
 
 
 class TestForceRecompileThreading:
+    """The flag has to reach Altium under the name the PASCAL reads.
+
+    Project.pas ForceRecompileIfRequested does
+    ExtractJsonValue(Params, 'force_recompile'), and the net and
+    connectivity handlers all call it. These tests previously asserted
+    "proj_force_recompile", the tool's own name, which nothing on the
+    Pascal side ever looks up: the flag was dead at all three call
+    sites and a caller asking for fresh data silently got the cached
+    compile. The tests passed throughout, because they were written
+    from the Python rather than from the contract it has to meet.
+    """
+
     @pytest.mark.asyncio
     async def test_get_nets_threads_force_flag(self, monkeypatch):
         fake = _FakeBridge({"pins": [{"component": "U1", "net": "VCC"}]})
@@ -51,11 +63,11 @@ class TestForceRecompileThreading:
 
         await tools["proj_get_nets"](force_recompile=True)
         assert fake.sent[0][0] == "project.get_nets"
-        assert fake.sent[0][1].get("proj_force_recompile") == "true"
+        assert fake.sent[0][1].get("force_recompile") == "true"
 
         # Default False must NOT send the flag (minimize payload).
         await tools["proj_get_nets"]()
-        assert "proj_force_recompile" not in fake.sent[1][1]
+        assert "force_recompile" not in fake.sent[1][1]
 
     @pytest.mark.asyncio
     async def test_get_connectivity_threads_force_flag(self, monkeypatch):
@@ -69,7 +81,7 @@ class TestForceRecompileThreading:
         await tools["proj_get_connectivity"](
             designator="U1", force_recompile=True
         )
-        assert fake.sent[0][1].get("proj_force_recompile") == "true"
+        assert fake.sent[0][1].get("force_recompile") == "true"
 
     @pytest.mark.asyncio
     async def test_get_connectivity_many_threads_force_flag(self, monkeypatch):
@@ -85,7 +97,7 @@ class TestForceRecompileThreading:
         await tools["proj_get_connectivity_many"](
             designators=["U1", "R1"], force_recompile=True
         )
-        assert fake.sent[0][1].get("proj_force_recompile") == "true"
+        assert fake.sent[0][1].get("force_recompile") == "true"
 
 
 class TestNewFreshnessTools:

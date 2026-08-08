@@ -128,7 +128,9 @@ class TestBatchDelete:
         sent = _install_fake_bridge(monkeypatch, "eda_agent.tools.generic")
         from eda_agent.tools import generic as g
         tools = _capture(g, "register_generic_tools")
-        await tools["obj_batch_delete"](operations=[
+        # Both filters are empty, so this really is a delete-all sweep
+        # and needs the same confirmation obj_delete demands.
+        await tools["obj_batch_delete"](confirm_delete_all=True, operations=[
             {"scope": "active_doc", "object_type": "eNoERC", "filter": ""},
             {"scope": "project", "object_type": "eJunction", "filter": ""},
         ])

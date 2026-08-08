@@ -9,7 +9,7 @@ what you need into your client.
 Drives an autonomous spec-to-board PCB design run with the eda-agent MCP
 server. See [autodesign/SKILL.md](autodesign/SKILL.md).
 
-**Claude Code** — copy it into your project (or user) skills directory:
+**Claude Code**: copy it into your project (or user) skills directory:
 
 ```bash
 mkdir -p .claude/skills/autodesign
@@ -18,6 +18,6 @@ cp skills/autodesign/SKILL.md .claude/skills/autodesign/SKILL.md
 
 Then `/autodesign` is available in that project.
 
-**Other clients** — the same protocol is available without any skill file:
+**Other clients**: the same protocol is available without any skill file:
 call the `design_autonomy_guide` tool, or invoke the `autonomous_design` MCP
 prompt. See [../docs/AUTONOMOUS_DESIGN.md](../docs/AUTONOMOUS_DESIGN.md).

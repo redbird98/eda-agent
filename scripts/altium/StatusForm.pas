@@ -610,7 +610,7 @@ Begin
         Try pnl_StatusDot.Color := COLOR_ACCENT_GREEN; Except End;
         Try lbl_Status.Caption := 'idle'; Except End;
         Try lbl_LastErr.Caption := ''; Except End;
-        { Button is always enabled — dashboard can run standalone. }
+        { Button is always enabled: dashboard can run standalone. }
         UpdateOpenWebState;
     Except End;
 End;

@@ -285,6 +285,24 @@ def register_render_tools(mcp):
             if isinstance(info, dict):
                 kind = str(info.get("document_kind")
                            or info.get("file_name") or "").lower()
+            # Libraries FIRST. DM_DocumentKind spells them 'PCBLIB' and
+            # 'SCHLIB', so a plain substring test reads "pcb" out of
+            # "pcblib" and sends a PcbLib down the PcbDoc geometry path,
+            # where the user gets an obscure geometry error instead of
+            # being told the active document is a library. This is not a
+            # rare state: every library-authoring call leaves a SchLib or
+            # PcbLib active, which is exactly when someone renders to
+            # check their work.
+            if "lib" in kind:
+                return {
+                    "ok": False,
+                    "reason": f"the active document is a LIBRARY "
+                    f"({kind or 'unknown'}), not a schematic or board. "
+                    f"Open the .SchDoc / .PcbDoc you want to review, or "
+                    f"pass target='schematic'/'pcb' explicitly to try "
+                    f"anyway.",
+                    "active_document": info,
+                }
             if "pcb" in kind:
                 t = "pcb"
             elif "sch" in kind:
@@ -385,7 +403,7 @@ def register_render_tools(mcp):
     ) -> dict[str, Any]:
         """Export the project BOM as a self-contained interactive HTML file.
 
-        Standalone HTML page — no external CSS / JS / Altium runtime
+        Standalone HTML page, no external CSS / JS / Altium runtime
         dependency. Open it in any browser; sortable columns, free-text
         filter, toggle between grouped (one row per value+footprint) and
         per-component layouts. A self-contained one-shot static export.

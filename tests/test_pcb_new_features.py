@@ -2,7 +2,7 @@
 # Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """Wiring tests for the production-feature tools: placement import, teardrops,
 silkscreen auto-placement, length tuning, panelization, and fab-package
-generation. No Altium — a recording fake bridge captures the dispatched
+generation. No Altium: a recording fake bridge captures the dispatched
 command + params (and, for the fab package, scripts the OutJob responses)."""
 
 from __future__ import annotations

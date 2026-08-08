@@ -246,6 +246,11 @@ Begin
         Else If PropName = 'LibReference'       Then Result := Obj.LibReference
         Else If PropName = 'SourceLibraryName'  Then Result := Obj.SourceLibraryName
         Else If PropName = 'DesignItemId'       Then Result := Obj.DesignItemId
+        // Which part of a multi-part symbol owns this primitive (0 = shared
+        // across all parts). Without it a caller querying a multi-part
+        // library symbol cannot tell which part a returned primitive is on.
+        Else If PropName = 'OwnerPartId'        Then Result := IntToStr(Obj.OwnerPartId)
+        Else If PropName = 'OwnerPartDisplayMode' Then Result := IntToStr(Obj.OwnerPartDisplayMode)
         Else If PropName = 'ComponentDescription' Then Result := Obj.ComponentDescription
         Else If PropName = 'UniqueId'    Then Result := Obj.UniqueId
 
@@ -1111,7 +1116,10 @@ Begin
     Else If Copy(Scope, 1, 14) = 'lib_component:' Then
     Begin
         { Target a named symbol inside the active SchLib. ScopePath carries }
-        { the lib-ref name (not a file path). Used by batch-op strings.     }
+        { the lib-ref name (not a file path), optionally suffixed '@N' to   }
+        { select part N of a multi-part symbol. The suffix is left on the   }
+        { string here and split by ApplyLibComponentScope, so ParseScope's  }
+        { signature stays as every other caller expects it.                 }
         ScopeType := 'lib_component';
         ScopePath := Copy(Scope, 15, Length(Scope));
     End
@@ -1127,10 +1135,39 @@ End;
 { request. Returns False if no such component exists in the active library.  }
 {..............................................................................}
 Function ApplyLibComponentScope(Var ScopeType : String; ScopePath : String) : Boolean;
+Var
+    AtPos, PartId, I : Integer;
+    CompName, PartStr : String;
 Begin
     Result := True;
     If ScopeType <> 'lib_component' Then Exit;
-    If SelectLibComponent(ScopePath) = Nil Then
+
+    { Optional '@N' suffix selects part N of a multi-part symbol. A SchLib  }
+    { iterator only yields the CURRENT part's primitives, so without this   }
+    { every query/modify/delete on a multi-part component could only ever   }
+    { reach part 1 and correcting parts 2..N meant a full rebuild.          }
+    { Scan from the RIGHT: a lib-ref may legitimately contain '@'.          }
+    CompName := ScopePath;
+    PartId := 1;
+    AtPos := 0;
+    For I := Length(ScopePath) DownTo 1 Do
+        If ScopePath[I] = '@' Then
+        Begin
+            AtPos := I;
+            Break;
+        End;
+    If AtPos > 1 Then
+    Begin
+        PartStr := Copy(ScopePath, AtPos + 1, Length(ScopePath));
+        If (PartStr <> '') And IsIntStr(PartStr) Then
+        Begin
+            PartId := StrToIntDef(PartStr, 1);
+            CompName := Copy(ScopePath, 1, AtPos - 1);
+            If PartId < 1 Then PartId := 1;
+        End;
+    End;
+
+    If SelectLibComponentPart(CompName, PartId) = Nil Then
         Result := False
     Else
         ScopeType := 'active_doc';
@@ -2224,15 +2261,29 @@ End;
 { Returns violation count and messages from the DM API.                      }
 {..............................................................................}
 
+{ Reports each violation WITH the objects it is about.                        }
+{                                                                             }
+{ A category and a sheet name are not actionable: "floating input pin" on a   }
+{ sheet with forty parts does not say which pin, and the only safe response   }
+{ to that is to do nothing. A NoERC marker placed by guesswork silently       }
+{ suppresses a real disconnection, which is strictly worse than the warning   }
+{ it clears.                                                                  }
+{                                                                             }
+{ IViolation.DM_RelatedObjects carries the offending objects. Everything read }
+{ from one is declared on IDMObject, the base interface every related object  }
+{ implements, so no call here can hit the undeclared-identifier crash that a  }
+{ narrower interface would risk. DM_PrimaryCrossProbeString is what Altium    }
+{ itself uses to jump to the object, so it identifies the exact pin or net.   }
 Function Gen_GetErcViolations(Params : String; RequestId : String) : String;
 Var
     Workspace : IWorkspace;
     Project : IProject;
     Violation : IViolation;
-    I, VCount, MaxItems : Integer;
-    JsonItems : String;
-    First : Boolean;
-    Desc : String;
+    RelObj : IDMObject;
+    I, J, VCount, MaxItems, RelCount : Integer;
+    JsonItems, RelItems : String;
+    First, FirstRel : Boolean;
+    Desc, Detail, Kind, DocName, Probe : String;
 Begin
     MaxItems := StrToIntDef(ExtractJsonValue(Params, 'limit'), 100);
 
@@ -2267,10 +2318,69 @@ Begin
             Desc := '(description unavailable)';
         End;
 
+        Try
+            Detail := Violation.DM_DetailString;
+        Except
+            Detail := '';
+        End;
+
+        { The objects the violation is actually about. Without these the
+          caller can see that something is wrong but never what, which
+          is the difference between a report and a to-do list. }
+        RelItems := '';
+        FirstRel := True;
+        RelCount := 0;
+        Try
+            RelCount := Violation.DM_RelatedObjectCount;
+        Except
+            RelCount := 0;
+        End;
+
+        For J := 0 To RelCount - 1 Do
+        Begin
+            Try
+                RelObj := Violation.DM_RelatedObjects(J);
+            Except
+                RelObj := Nil;
+            End;
+            If RelObj = Nil Then Continue;
+
+            Kind := '';
+            DocName := '';
+            Probe := '';
+            Try
+                Kind := RelObj.DM_ObjectKindString;
+            Except
+                Kind := '';
+            End;
+            Try
+                DocName := RelObj.DM_OwnerDocumentName;
+            Except
+                DocName := '';
+            End;
+            Try
+                { What Altium uses to cross-probe to this exact object.
+                  This is the field that turns "a floating pin somewhere
+                  on this sheet" into a designator and pin number. }
+                Probe := RelObj.DM_PrimaryCrossProbeString;
+            Except
+                Probe := '';
+            End;
+
+            If Not FirstRel Then RelItems := RelItems + ',';
+            FirstRel := False;
+            RelItems := RelItems + '{"kind":"' + EscapeJsonString(Kind) +
+                '","document":"' + EscapeJsonString(DocName) +
+                '","cross_probe":"' + EscapeJsonString(Probe) + '"}';
+        End;
+
         If Not First Then JsonItems := JsonItems + ',';
         First := False;
         JsonItems := JsonItems + '{"index":' + IntToStr(I) +
-            ',"description":"' + EscapeJsonString(Desc) + '"}';
+            ',"description":"' + EscapeJsonString(Desc) +
+            '","detail":"' + EscapeJsonString(Detail) +
+            '","related_object_count":' + IntToStr(RelCount) +
+            ',"related_objects":[' + RelItems + ']}';
     End;
 
     Result := BuildSuccessResponse(RequestId,
@@ -3382,6 +3492,83 @@ Begin
 End;
 
 {..............................................................................}
+{ InferNetLabelStyle - the sheet's own net-label convention, by majority.      }
+{ Every net label a tool adds must match the labels already on the target      }
+{ sheet: FontId (which carries font face AND size in the font table) and       }
+{ Color. Iterates the existing eNetLabel objects and returns the most common   }
+{ (FontId, Color) pair. Returns False when the sheet has no net labels yet,   }
+{ callers then keep their historical defaults so a fresh sheet is unchanged.  }
+{ Majority, not first-seen: one off-style label from an old edit must not      }
+{ define the convention.                                                       }
+{..............................................................................}
+
+Function InferNetLabelStyle(SchDoc : ISch_Document;
+    Var OutFontId : Integer; Var OutColor : Integer) : Boolean;
+Var
+    Iterator : ISch_Iterator;
+    Obj : ISch_GraphicalObject;
+    Keys, Counts : TStringList;
+    Key : String;
+    Idx, I, N, BestN, FId, Col, ColonPos : Integer;
+Begin
+    Result := False;
+    OutFontId := 0;
+    OutColor := 0;
+    If SchDoc = Nil Then Exit;
+
+    Keys := TStringList.Create;
+    Counts := TStringList.Create;
+    Try
+        Iterator := SchDoc.SchIterator_Create;
+        Try
+            Iterator.AddFilter_ObjectSet(MkSet(eNetLabel));
+            Obj := Iterator.FirstSchObject;
+            While Obj <> Nil Do
+            Begin
+                FId := 0;
+                Col := 0;
+                Try FId := Obj.FontId; Except End;
+                Try Col := Obj.Color; Except End;
+                If FId > 0 Then
+                Begin
+                    Key := IntToStr(FId) + ':' + IntToStr(Col);
+                    Idx := Keys.IndexOf(Key);
+                    If Idx < 0 Then
+                    Begin
+                        Keys.Add(Key);
+                        Counts.Add('1');
+                    End
+                    Else
+                        Counts[Idx] := IntToStr(StrToIntDef(Counts[Idx], 0) + 1);
+                End;
+                Obj := Iterator.NextSchObject;
+            End;
+        Finally
+            SchDoc.SchIterator_Destroy(Iterator);
+        End;
+
+        BestN := 0;
+        For I := 0 To Keys.Count - 1 Do
+        Begin
+            N := StrToIntDef(Counts[I], 0);
+            If N > BestN Then
+            Begin
+                BestN := N;
+                Key := Keys[I];
+                ColonPos := Pos(':', Key);
+                OutFontId := StrToIntDef(Copy(Key, 1, ColonPos - 1), 0);
+                OutColor := StrToIntDef(
+                    Copy(Key, ColonPos + 1, Length(Key)), 0);
+            End;
+        End;
+        Result := BestN > 0;
+    Finally
+        Keys.Free;
+        Counts.Free;
+    End;
+End;
+
+{..............................................................................}
 { Place a net label at coordinates on active schematic                        }
 { Params: text, x, y, orientation (0/1/2/3)                                  }
 {..............................................................................}
@@ -3394,6 +3581,8 @@ Var
     NetLabel : ISch_NetLabel;
     Loc : TLocation;
     SrvDoc : IServerDocument;
+    InfFont, InfColor : Integer;
+    StyleFound : Boolean;
 Begin
     Text := ExtractJsonValue(Params, 'text');
     SheetPath := ExtractJsonValue(Params, 'sheet_path');
@@ -3442,7 +3631,17 @@ Begin
     NetLabel.Location := Loc;
     NetLabel.Text := Text;
     NetLabel.Orientation := Orientation;
-    NetLabel.Color := 0;
+    { Follow the sheet's own net-label convention (font, size via the
+      font table, colour). Historical default only on a sheet that has
+      no net labels yet. }
+    StyleFound := InferNetLabelStyle(SchDoc, InfFont, InfColor);
+    If StyleFound Then
+    Begin
+        Try NetLabel.FontId := InfFont; Except End;
+        NetLabel.Color := InfColor;
+    End
+    Else
+        NetLabel.Color := 0;
 
     SchServer.ProcessControl.PreProcess(SchDoc, '');
     SchDoc.RegisterSchObjectInContainer(NetLabel);
@@ -6005,6 +6204,8 @@ Var
     SchDoc : ISch_Document;
     NetLabel : ISch_NetLabel;
     Loc : TLocation;
+    InfFont, InfColor : Integer;
+    StyleFound : Boolean;
 Begin
     LabelsStr := ExtractJsonValue(Params, 'labels');
     If LabelsStr = '' Then
@@ -6025,6 +6226,9 @@ Begin
     Failed := 0;
     OpCount := 0;
     Remaining := LabelsStr;
+
+    { Sheet convention once per batch, applied to every label below. }
+    StyleFound := InferNetLabelStyle(SchDoc, InfFont, InfColor);
 
     SchServer.ProcessControl.PreProcess(SchDoc, '');
     Try
@@ -6063,7 +6267,13 @@ Begin
             NetLabel.Text := Text;
             NetLabel.Orientation := Orientation;
             Try NetLabel.Justification := Justification; Except End;
-            NetLabel.Color := 0;
+            If StyleFound Then
+            Begin
+                Try NetLabel.FontId := InfFont; Except End;
+                NetLabel.Color := InfColor;
+            End
+            Else
+                NetLabel.Color := 0;
 
             SchDoc.RegisterSchObjectInContainer(NetLabel);
             SchRegisterObject(SchDoc, NetLabel);
@@ -8270,6 +8480,8 @@ Var
     Found : Boolean;
     Wire : ISch_Wire;
     NetLabel : ISch_NetLabel;
+    InfFont, InfColor : Integer;
+    StyleFound : Boolean;
 Begin
     SchDoc := SchServer.GetCurrentSchDocument;
     If SchDoc = Nil Then
@@ -8288,6 +8500,8 @@ Begin
 
     Stubbed := 0;
     Failed := 0;
+    { Sheet convention once, applied to every stub label below. }
+    StyleFound := InferNetLabelStyle(SchDoc, InfFont, InfColor);
     SchServer.ProcessControl.PreProcess(SchDoc, '');
     Try
         Remaining := PinsStr;
@@ -8376,6 +8590,11 @@ Begin
             Begin
                 NetLabel.Text := Lbl;
                 NetLabel.Location := Point(MilsToCoord(EX), MilsToCoord(EY));
+                If StyleFound Then
+                Begin
+                    Try NetLabel.FontId := InfFont; Except End;
+                    NetLabel.Color := InfColor;
+                End;
                 SchDoc.RegisterSchObjectInContainer(NetLabel);
                 SchRegisterObject(SchDoc, NetLabel);
             End;

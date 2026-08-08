@@ -6,8 +6,8 @@ This closes the loop with committed fixtures only (the benchmark plans): emit
 a plan through the offline pipeline, then reconstruct its netlist with the
 solver and assert it matches the plan's intended connectivity. Because the
 pipeline (the writer) and the solver (the reader) are independent and both
-agree with the plan (a third, independent spec), a match validates all three
-— including by-name / net-label connectivity on a label-heavy board (the
+agree with the plan (a third, independent spec), a match validates all three,
+including by-name / net-label connectivity on a label-heavy board (the
 buck emits 9 labels), which live Altium alone could not cover here.
 """
 
@@ -62,7 +62,7 @@ def _emit_and_solve(plan_name: str):
 # full envelope (wire + power port + junction + net-label / by-name) on a
 # label-heavy board. The mcu / blinker555 plans are NOT asserted here because
 # best_of layout is non-deterministic in which variant wins, and some variants
-# leave a signal-net label floating (a known pipeline label-fallback case) —
+# leave a signal-net label floating (a known pipeline label-fallback case);
 # the solver then correctly reports that net disconnected, so a strict
 # plan-equals-solver assertion would be flaky through no fault of the solver.
 # (mcu's bus is handled via its per-pin labels; buses need no special support.)
@@ -70,7 +70,7 @@ def _emit_and_solve(plan_name: str):
 def test_solver_reconstructs_pipeline_netlist(plan_name):
     plan_groups, solver_groups, solved = _emit_and_solve(plan_name)
     # Compare by pin-membership (grouping), not name: the pipeline leaves some
-    # short local nets unlabeled, which the solver auto-names — the grouping
+    # short local nets unlabeled, which the solver auto-names: the grouping
     # is the connectivity that matters.
     plan_sets = {frozenset(v) for v in plan_groups.values()}
     solver_sets = {frozenset(v) for v in solver_groups.values()}

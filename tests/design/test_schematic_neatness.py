@@ -66,17 +66,39 @@ def test_labeled_nets_consistent_with_fraction():
     assert r.label_fallback_frac == pytest.approx(len(r.labeled_nets) / len(multi))
 
 
-def test_signal_bends_lower_than_power_bends():
-    # Signal nets route near-minimally; the bend cost is the power/ground
-    # spokes (many rail pins each L-routing to a port). Verified on buck/blinker.
+def test_bends_stay_within_the_professional_bound():
+    """Both bend budgets stay inside this module's own thresholds.
+
+    This replaces an earlier ``signal <= power`` comparison. That form
+    was a proxy: it held only while power routing was the bendy part, so
+    IMPROVING power routing broke it. It had already been relaxed once
+    (``<`` to ``<=``) when signal routing caught up, and the repair-port
+    stub upgrade broke it again by pulling the 555 board's power bends
+    from 2.0 to 1.0 -- which is the direction ``flags()`` explicitly asks
+    for ("with straight stubs ~1", "straight stubs would cut this").
+
+    A test that fails when the code gets better is measuring the wrong
+    thing, so this asserts the property directly instead: each bend
+    budget within the bound the module itself uses to decide something is
+    wrong. Absolute bounds cannot be satisfied by degrading the other
+    side of a comparison.
+
+    No absolute POWER bound is asserted here. Under the shrunk FD sweep
+    the test conftest uses for speed, buck settles at 4.67 bends/rail-net
+    where the production sweep gives 3.67, so any bound tight enough to
+    be meaningful would be failing on a fixture artifact rather than on
+    the code. Power bends are covered directly instead by
+    ``test_stub_upgrade_*`` in test_pipeline, which measures the same
+    board with and without the pass.
+    """
     for name in ("buck", "blinker555"):
         canvas, plan = _canvas(name)
         r = neatness_report(canvas, plan)
-        # <= not <: signal routing has improved to the point of TYING
-        # power-spoke bends on the 555 board (2.0 vs 2.0). The invariant
-        # being protected is "signal nets route near-minimally, the bend
-        # budget is dominated by power spokes" -- equality satisfies it.
-        assert r.bends_per_signal_net <= r.bends_per_power_net
+        # The same number flags() uses, so the test and the reported
+        # quality bar cannot drift apart.
+        assert r.bends_per_signal_net <= 3.0, (
+            f"{name}: signal nets no longer route near-minimally "
+            f"({r.bends_per_signal_net} bends/net)")
 
 
 def test_deterministic():
