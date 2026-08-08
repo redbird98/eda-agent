@@ -611,7 +611,7 @@ object StatusForm: TStatusForm
       Width = 280
       Height = 13
       AutoSize = False
-      Caption = 'python -m eda_agent.server dashboard --port 8766'
+      Caption = 'python -m eda_agent.server dashboard --port 8877'
       Font.Charset = DEFAULT_CHARSET
       Font.Color = $00D4D4D4
       Font.Height = -11

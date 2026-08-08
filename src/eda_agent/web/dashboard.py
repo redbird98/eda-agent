@@ -6,7 +6,7 @@ Companion to the in-Altium status form. Run with:
 
     eda-agent dashboard
 
-then open ``http://127.0.0.1:8766`` (or click the "Open Dashboard"
+then open ``http://127.0.0.1:8877`` (or click the "Open Dashboard"
 button on the Altium-side status form, which writes a sentinel the
 MCP server's keep-alive thread picks up and launches the browser).
 
@@ -1805,7 +1805,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         description="Local web dashboard for the EDA Agent MCP bridge.",
     )
     parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=8766)
+    parser.add_argument("--port", type=int, default=8877)
     parser.add_argument(
         "--workspace", type=Path, default=None,
         help="Workspace directory (default: from get_config()).",

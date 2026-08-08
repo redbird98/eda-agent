@@ -128,7 +128,7 @@ def _probe_port_owner(host: str, port: int) -> Optional[int]:
 
     Used at startup to detect the orphan-MCP-server situation: a previous
     eda-agent instance failed to exit on stdio EOF and is still holding
-    port 8766, so this new instance's Flask thread will silently fail to
+    port 8877, so this new instance's Flask thread will silently fail to
     bind. Surfacing the owning pid + a kill hint turns a confusing
     "dashboard not loading new endpoints" experience into one obvious fix.
     """
@@ -172,13 +172,13 @@ def _spawn_dashboard_background(host: str, port: int) -> "Optional[object]":
       1. Auto-spawned in-process when MCP starts (this function) -- the
          common case when the user opens Claude with the MCP server.
          Dies when MCP exits.
-      2. Manually via `eda-agent dashboard --port 8766` in a terminal --
+      2. Manually via `eda-agent dashboard --port 8877` in a terminal --
          a standalone process the user controls.
 
     Returns the Werkzeug server handle so the caller can ``.shutdown()``
     it on stdio EOF. Werkzeug's request-handler threads aren't daemonic,
     so without the explicit shutdown the process can't exit and the
-    next /mcp reconnect ends up with port 8766 still held by the orphan.
+    next /mcp reconnect ends up with port 8877 still held by the orphan.
     """
     import os
     import threading
@@ -256,7 +256,7 @@ def serve_mcp(no_dashboard: bool = False) -> int:
         logger.info("headless mode -- dashboard not started")
         dash = None
     else:
-        dash = _spawn_dashboard_background(host="127.0.0.1", port=8766)
+        dash = _spawn_dashboard_background(host="127.0.0.1", port=8877)
 
     try:
         mcp.run(transport="stdio")
@@ -264,7 +264,7 @@ def serve_mcp(no_dashboard: bool = False) -> int:
         # Shut down the in-process Werkzeug server so the process can
         # actually exit. Werkzeug's request-handler threads aren't
         # daemonic, so without this they keep the process alive past
-        # stdio-EOF and the next /mcp reconnect ends up with port 8766
+        # stdio-EOF and the next /mcp reconnect ends up with port 8877
         # still held by the orphan.
         if dash and isinstance(dash, dict):
             srv = dash.get("srv")
@@ -569,14 +569,14 @@ def main() -> int:
     dash_p = subparsers.add_parser(
         "dashboard",
         help=(
-            "Launch the local web dashboard. Open http://127.0.0.1:8766 "
+            "Launch the local web dashboard. Open http://127.0.0.1:8877 "
             "to see live MCP activity, performance, and health. The "
             "in-Altium status form has an 'Open Dashboard' button that "
             "auto-launches this server's URL via a workspace sentinel."
         ),
     )
     dash_p.add_argument("--host", default="127.0.0.1")
-    dash_p.add_argument("--port", type=int, default=8766)
+    dash_p.add_argument("--port", type=int, default=8877)
     dash_p.add_argument("--debug", action="store_true")
 
     # stop-dashboard -- terminate the dashboard process by PID file

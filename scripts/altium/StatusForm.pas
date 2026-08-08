@@ -703,14 +703,14 @@ Begin
     End;
     Try
         SentinelPath := WorkspaceDir + 'open_dashboard.url';
-        WriteFileContent(SentinelPath, 'http://127.0.0.1:8766/');
+        WriteFileContent(SentinelPath, 'http://127.0.0.1:8877/');
         Try lbl_LastErr.Caption := ''; Except End;
     Except End;
 End;
 
 
 { Copy the dashboard standalone-launch command to the Windows clipboard. }
-{ The status form's footer shows `eda-agent dashboard --port 8766` and  }
+{ The status form's footer shows `eda-agent dashboard --port 8877` and  }
 { a Copy button so the user can paste it into a terminal to run the     }
 { dashboard without needing Claude / any MCP client open.                }
 Procedure btn_CopyCmdClick(Sender : TObject);
@@ -720,7 +720,7 @@ Begin
         { whether the user has added Python's Scripts dir to PATH. The }
         { `eda-agent` console script is installed there by pip but the }
         { directory isn't on PATH by default on Windows.                }
-        Clipboard.AsText := 'python -m eda_agent.server dashboard --port 8766';
+        Clipboard.AsText := 'python -m eda_agent.server dashboard --port 8877';
         Try btn_CopyCmd.Caption := 'Copied'; Except End;
     Except End;
 End;
