@@ -51,7 +51,7 @@ with open(OUTPUT, 'w', encoding='utf-8') as out:
     out.write(header)
     for fname in FILES:
         path = os.path.join(SCRIPT_DIR, fname)
-        with open(path, 'r', encoding='utf-8') as f:
+        with open(path, 'r', encoding='utf-8-sig') as f:
             content = f.read()
         out.write(f'{{=== {fname} ===}}\n')
         out.write(content)
