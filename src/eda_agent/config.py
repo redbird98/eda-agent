@@ -124,7 +124,7 @@ class MCPRuntimeConfig(BaseModel):
 
     # Python-side polling
     py_poll_interval_seconds: float = 0.01
-    py_poll_timeout_seconds: float = 10.0
+    py_poll_timeout_seconds: float = 5.0
     py_keepalive_interval_seconds: int = 30
 
 
