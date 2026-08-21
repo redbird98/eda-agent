@@ -517,8 +517,12 @@ class AltiumBridge:
         self._ensure_workspace_fast()
         request_path = self._request_path(request.id)
         tmp_path = request_path.with_suffix(".json.tmp")
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(request.to_dict(), f, indent=2)
+        # LOCAL PATCH 2026-08-22: write requests as GBK. The Pascal side reads
+        # with default ANSI (GBK on zh-CN Windows) and AD25 DelphiScript has no
+        # TEncoding, so the bridge code page is the SYSTEM one, symmetrically:
+        # requests GBK out, responses GBK in.
+        with open(tmp_path, "w", encoding="gbk") as f:
+            json.dump(request.to_dict(), f, indent=2, ensure_ascii=False)
         tmp_path.replace(request_path)
         logger.debug("Published request %s: %s", request.id, request.command)
 
@@ -591,10 +595,10 @@ class AltiumBridge:
                         f"after={first_appearance*1000:.0f}ms polls={poll_count}",
                     )
                 try:
-                    # LOCAL PATCH 2026-08-22: utf-8-sig tolerates the BOM that
-                    # Delphi's TEncoding.UTF8 SaveToFile writes; the Pascal side
-                    # now writes explicit UTF-8 so Chinese paths survive the bridge.
-                    with open(response_path, "r", encoding="utf-8-sig") as f:
+                    # LOCAL PATCH 2026-08-22: responses arrive as GBK (Pascal
+                    # TStringList.SaveToFile default ANSI on zh-CN Windows);
+                    # reading them as GBK restores Chinese paths/names.
+                    with open(response_path, "r", encoding="gbk") as f:
                         data = json.load(f)
                 except (json.JSONDecodeError, IOError, UnicodeDecodeError) as e:
                     parse_errors += 1

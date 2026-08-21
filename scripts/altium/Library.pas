@@ -2521,7 +2521,9 @@ Begin
     DoneKeys := '';
     Edits := TStringList.Create;
     Try
-        Edits.LoadFromFile(EditsPath, TEncoding.UTF8);
+        { LOCAL PATCH 2026-08-22: default ANSI read (batch files are written }
+        { as GBK by the Python side); TEncoding.UTF8 is not in AD25 scripts. }
+        Edits.LoadFromFile(EditsPath);
 
         PCBServer.PreProcess;
         Try

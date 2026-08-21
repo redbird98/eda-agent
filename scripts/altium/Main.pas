@@ -638,11 +638,12 @@ Begin
         SL := TStringList.Create;
         Try
             Try
-                { LOCAL PATCH 2026-08-22: explicit UTF-8. Default ANSI (GBK on }
-                { zh-CN Windows) mojibakes Chinese names in both directions    }
-                { (Python uses UTF-8), which broke set_active_document lookups }
-                { and every Chinese project/comment/footprint name.            }
-                SL.LoadFromFile(FilePath, TEncoding.UTF8);
+                { LOCAL PATCH 2026-08-22: default ANSI read on purpose. Python  }
+                { writes requests as GBK (see altium_bridge.py), so both sides  }
+                { speak the zh-CN system code page and Chinese paths survive.   }
+                { TEncoding.UTF8 was tried first but AD25 DelphiScript rejects  }
+                { it at compile time (blank error box on this line).            }
+                SL.LoadFromFile(FilePath);
                 Content := SL.Text;
                 Ok := True;
             Except
@@ -681,10 +682,10 @@ Begin
         Try
             Try
                 SL.Text := Content;
-                { LOCAL PATCH 2026-08-22: explicit UTF-8, paired with the     }
-                { LoadFromFile patch above. Python reads with utf-8-sig so    }
-                { the BOM Delphi writes is tolerated.                         }
-                SL.SaveToFile(FilePath, TEncoding.UTF8);
+                { LOCAL PATCH 2026-08-22: default ANSI write on purpose;       }
+                { Python reads responses as GBK (see altium_bridge.py).        }
+                { TEncoding.UTF8 is not available in AD25 DelphiScript.        }
+                SL.SaveToFile(FilePath);
                 Ok := True;
             Except
                 Ok := False;
