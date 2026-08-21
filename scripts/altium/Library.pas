@@ -2521,7 +2521,7 @@ Begin
     DoneKeys := '';
     Edits := TStringList.Create;
     Try
-        Edits.LoadFromFile(EditsPath);
+        Edits.LoadFromFile(EditsPath, TEncoding.UTF8);
 
         PCBServer.PreProcess;
         Try

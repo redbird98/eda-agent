@@ -591,7 +591,10 @@ class AltiumBridge:
                         f"after={first_appearance*1000:.0f}ms polls={poll_count}",
                     )
                 try:
-                    with open(response_path, "r", encoding="utf-8") as f:
+                    # LOCAL PATCH 2026-08-22: utf-8-sig tolerates the BOM that
+                    # Delphi's TEncoding.UTF8 SaveToFile writes; the Pascal side
+                    # now writes explicit UTF-8 so Chinese paths survive the bridge.
+                    with open(response_path, "r", encoding="utf-8-sig") as f:
                         data = json.load(f)
                 except (json.JSONDecodeError, IOError, UnicodeDecodeError) as e:
                     parse_errors += 1

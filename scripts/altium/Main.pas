@@ -638,7 +638,11 @@ Begin
         SL := TStringList.Create;
         Try
             Try
-                SL.LoadFromFile(FilePath);
+                { LOCAL PATCH 2026-08-22: explicit UTF-8. Default ANSI (GBK on }
+                { zh-CN Windows) mojibakes Chinese names in both directions    }
+                { (Python uses UTF-8), which broke set_active_document lookups }
+                { and every Chinese project/comment/footprint name.            }
+                SL.LoadFromFile(FilePath, TEncoding.UTF8);
                 Content := SL.Text;
                 Ok := True;
             Except
@@ -677,7 +681,10 @@ Begin
         Try
             Try
                 SL.Text := Content;
-                SL.SaveToFile(FilePath);
+                { LOCAL PATCH 2026-08-22: explicit UTF-8, paired with the     }
+                { LoadFromFile patch above. Python reads with utf-8-sig so    }
+                { the BOM Delphi writes is tolerated.                         }
+                SL.SaveToFile(FilePath, TEncoding.UTF8);
                 Ok := True;
             Except
                 Ok := False;
