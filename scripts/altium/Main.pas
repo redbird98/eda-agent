@@ -106,8 +106,8 @@ End;
 { unambiguous even when a single operation's property list contains '|'.       }
 {                                                                               }
 { Defined in Main.pas so Library.pas and Generic.pas can both use them,       }
-{ the Altium project compiles files in DesignN order (Main â†’ ... â†’ Library â†’  }
-{ ... â†’ Generic) and a callee must come earlier than its caller.               }
+{ the Altium project compiles files in DesignN order (Main -> ... -> Library ->  }
+{ ... -> Generic) and a callee must come earlier than its caller.               }
 {..............................................................................}
 
 Function NextBatchOp(Var Remaining : String) : String;
