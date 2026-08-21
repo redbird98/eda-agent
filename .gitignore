@@ -97,3 +97,10 @@ tests/integration/fixtures/schematic_snapshot.*
 
 # Atomic-write temp leftovers (editors / Dropbox)
 *.tmp.*
+
+# Built EasyEDA extension entry point; produced by
+# extensions/easyeda/build.py, same treatment as the Altium bundle.
+extensions/easyeda/dist/
+
+extensions/easyeda/verified.json
+extensions/easyeda/*.eext

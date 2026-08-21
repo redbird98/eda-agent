@@ -132,7 +132,7 @@ def test_assign_layers_anchors_input_at_zero() -> None:
 
 def test_assign_layers_no_wasted_column_when_output_at_natural_max() -> None:
     """J1 -> R1 -> R2 -> J2: J2 naturally lands at BFS layer 3 (its
-    distance from J1). Before the 2026-05-15 fix the output-anchor
+    distance from J1). Before the output-anchor fix the
     rule promoted it to max+1=4, creating an empty column 3-to-4 gap.
     Now J2 stays at 3 when no other part is already at 3."""
     plan = _plan(

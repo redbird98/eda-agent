@@ -189,18 +189,23 @@ async def test_a_restore_dry_run_is_refused_the_same_way(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_a_separator_in_a_designator_cannot_add_a_component(
+async def test_a_separator_in_a_designator_is_refused_not_stripped(
     monkeypatch
 ):
     """The list rides ONE field, pipe-delimited. A designator carrying a
     pipe would split into two names and strip paste off a component
-    nobody selected."""
+    nobody selected. The first fix STRIPPED the pipe, which prevents
+    the split but can produce a DIFFERENT valid name: 'R|1' became
+    'R1', a real component. Refusing names what happened; nothing is
+    sent."""
     bridge = _Bridge()
     tool = _capture_tool(monkeypatch, bridge)
-    await tool(designators=["R5|U1", "C12"])
+    result = await tool(designators=["R5|U1", "C12"])
 
-    sent = bridge.sent("pcb.apply_dnp_paste_exclusion")["designators"]
-    assert sent.split("|") == ["R5U1", "C12"], sent
+    assert result["ok"] is False
+    assert "R5|U1" in result["reason"]
+    assert bridge.commands() == [], (
+        "the bridge was called despite the refusal")
 
 
 @pytest.mark.asyncio
@@ -262,22 +267,15 @@ async def test_the_bridge_reply_is_not_overwritten(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_a_name_that_is_only_separators_leaves_no_empty_segment(
-    monkeypatch
-):
-    """Blanks have to be dropped AFTER the separators are stripped too.
-
-    A name of only pipes is not blank, so it survives the first filter,
-    and stripping its separators leaves "". Joining that produced a
-    stray delimiter. The handler derives components_requested by
-    counting pipes, so a run that matched every real component would
-    report one more requested than matched and read as a near miss.
-    """
+async def test_a_name_that_is_only_separators_is_refused(monkeypatch):
+    """Under the old strip, a name of only pipes reduced to "" and left
+    a stray delimiter in the payload, which skewed the handler's
+    pipe-count of components_requested. Under refusal that hazard is
+    unreachable: any pipe-carrying name refuses the whole call."""
     bridge = _Bridge()
     tool = _capture_tool(monkeypatch, bridge)
-    await tool(designators=["R5", "||", "C12"])
+    result = await tool(designators=["R5", "||", "C12"])
 
-    sent = bridge.sent("pcb.apply_dnp_paste_exclusion")["designators"]
-    assert sent == "R5|C12", sent
-    assert "" not in sent.split("|"), (
-        f"an empty segment reached the payload: {sent!r}")
+    assert result["ok"] is False
+    assert bridge.commands() == [], (
+        "the bridge was called despite the refusal")

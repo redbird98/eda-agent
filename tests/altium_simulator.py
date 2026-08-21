@@ -1091,16 +1091,14 @@ class AltiumSimulator:
             doc_count = len([d for d in project.documents if d.document_kind == "SCH"])
             comp_count = len(project.components)
             pin_count = sum(len(c.pins) for c in project.components)
-            # Estimate net count from unique net names
-            nets = set()
-            for c in project.components:
-                for p in c.pins:
-                    nets.add(p["net"])
-            net_count = len(nets)
+            # Mirrors Proj_GetDesignStats: sheets/documents/components/
+            # pins, and NOTHING else. This used to add a "nets" count the
+            # Pascal never emits, so a test asserting nets passed here
+            # and failed live (found by the shape comparison, task #39).
             data = ('{"sheets":' + str(doc_count) +
+                    ',"documents":' + str(len(project.documents)) +
                     ',"components":' + str(comp_count) +
-                    ',"pins":' + str(pin_count) +
-                    ',"nets":' + str(net_count) + '}')
+                    ',"pins":' + str(pin_count) + '}')
             return _build_success_response(rid, data)
 
         elif action == "get_board_info":
@@ -1112,9 +1110,21 @@ class AltiumSimulator:
             return _build_success_response(rid, data)
 
         elif action == "annotate":
+            # Mirrors Proj_Annotate's normal-order reply: success/order/
+            # renamed/skipped_locked/documents_processed/programmatic.
+            # This used to answer {"annotated":true,...}, a key the
+            # Pascal never emits (found by the shape comparison, #39).
             order = params.get("order", "down_then_across")
+            sch_docs = 0
+            project = self._get_project(params)
+            if project is not None:
+                sch_docs = len([d for d in project.documents
+                                if d.document_kind == "SCH"])
             return _build_success_response(
-                rid, '{"annotated":true,"order":"' + order + '"}'
+                rid, '{"success":true,"order":"' + order + '"'
+                     ',"renamed":0,"skipped_locked":0'
+                     ',"documents_processed":' + str(sch_docs) +
+                     ',"programmatic":true}'
             )
 
         elif action == "generate_output":
@@ -1355,10 +1365,18 @@ class AltiumSimulator:
             return _build_success_response(rid, data)
 
         elif action == "search":
+            # Mirrors Lib_Search: query/search_type/count/limit/
+            # truncated/results, and no "success" key (the Pascal never
+            # emits one here; found by the shape comparison, #39).
             query = params.get("query", "")
+            search_type = params.get("search_type", "")
+            limit = int(params.get("limit", "100") or "100")
             return _build_success_response(
                 rid,
-                '{"success":true,"query":"' + _escape_json_string(query) + '"}'
+                '{"query":"' + _escape_json_string(query) +
+                '","search_type":"' + _escape_json_string(search_type) +
+                '","count":0,"limit":' + str(limit) +
+                ',"truncated":false,"results":[]}'
             )
 
         elif action == "get_component_details":

@@ -2,9 +2,21 @@
 # Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """Tests for thermal-via array sizing (Fourier conduction R = L/kA).
 
-Hand-checked reference: a 0.3 mm drill with 25 um (1 oz) plating through a
-1.6 mm board, unfilled barrel -> annulus ~0.0255 mm^2 -> ~163 K/W per via,
+Hand-checked reference: a 0.3 mm DRILL with 25 um (1 oz) plating through a
+1.6 mm board, unfilled barrel -> annulus ~0.0216 mm^2 -> ~192 K/W per via,
 which is in the published ~100-200 K/W range for a single thermal via.
+
+PLATING GROWS INWARD FROM THE DRILL WALL. The drill removes material and
+copper is deposited on the wall of the hole it leaves, so the finished
+hole is SMALLER than the drill and the barrel lies between
+(r_drill - t) and r_drill.
+
+These expectations previously assumed the annulus sat OUTSIDE the drill
+radius, r_drill to r_drill + t, which places copper in space the drill
+had already cleared. That overstated the barrel by 18 percent and
+understated thermal resistance by the same factor, so every via count
+came out low: 17 vias where 20 are needed. The numbers here are derived
+from the geometry, not read back from the implementation.
 """
 
 import math
@@ -25,15 +37,17 @@ from eda_agent.design.thermal_vias import (
 # --------------------------------------------------------------------------- #
 def test_barrel_area_is_annulus_when_unfilled():
     a = via_barrel_area_mm2(0.3, 25.0)
-    # pi * ((0.175)^2 - (0.15)^2)
-    assert a == pytest.approx(math.pi * (0.175 ** 2 - 0.15 ** 2), rel=1e-9)
-    assert a == pytest.approx(0.02553, abs=1e-4)
+    # Copper between the finished hole and the drill wall:
+    # pi * (0.15^2 - 0.125^2), r_inner = r_drill - 25um.
+    assert a == pytest.approx(math.pi * (0.15 ** 2 - 0.125 ** 2), rel=1e-9)
+    assert a == pytest.approx(0.02160, abs=1e-4)
 
 
 def test_copper_fill_uses_full_circle():
     annulus = via_barrel_area_mm2(0.3, 25.0)
     filled = via_barrel_area_mm2(0.3, 25.0, filled_copper=True)
-    assert filled == pytest.approx(math.pi * 0.175 ** 2, rel=1e-9)
+    # A filled via is copper across the DRILLED hole, not beyond it.
+    assert filled == pytest.approx(math.pi * 0.15 ** 2, rel=1e-9)
     assert filled > annulus
 
 
@@ -53,7 +67,8 @@ def test_barrel_area_rejects_bad_input():
 # --------------------------------------------------------------------------- #
 def test_single_via_matches_hand_calc():
     r = single_via_thermal_resistance(0.3, 25.0, 1.6)
-    assert r == pytest.approx(163, abs=3)
+    # 1.6e-3 m / (385 W/mK * 2.15984e-8 m^2)
+    assert r == pytest.approx(192, abs=3)
 
 
 def test_thicker_board_higher_resistance():
@@ -119,7 +134,7 @@ def test_assess_from_power_and_delta_t():
     # 2 W, 20 C budget -> target 10 K/W -> 17 vias (~163/10).
     rep = assess_thermal_vias(0.3, 25.0, 1.6, power_w=2.0, delta_t_c=20.0)
     assert rep.target_k_per_w == pytest.approx(10.0)
-    assert rep.via_count == 17
+    assert rep.via_count == 20   # ceil(192.41 / 10)
     assert rep.array_k_per_w <= 10.0
     # The realized rise sits at or under the budget.
     assert rep.temp_rise_c is not None and rep.temp_rise_c <= 20.0
@@ -127,7 +142,7 @@ def test_assess_from_power_and_delta_t():
 
 def test_assess_from_explicit_target():
     rep = assess_thermal_vias(0.3, 25.0, 1.6, target_k_per_w=10.0)
-    assert rep.via_count == 17
+    assert rep.via_count == 20   # ceil(192.41 / 10)
     assert rep.temp_rise_c is None  # no power given
 
 
@@ -148,7 +163,7 @@ def test_assess_composes_with_required_theta_ja():
     board_budget = theta_total - 40.0  # ~26.67 K/W
     rep = assess_thermal_vias(0.3, 25.0, 1.6, target_k_per_w=board_budget)
     assert rep.array_k_per_w <= board_budget
-    assert rep.via_count == 7  # ceil(162.8 / 26.67)
+    assert rep.via_count == 8  # ceil(192.41 / 26.67)
 
 
 def test_assess_requires_some_target():

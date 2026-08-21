@@ -249,7 +249,7 @@ def _power_port_orientation(pin_orientation: int, is_ground: bool) -> int:
 def _label_justification(pin_orientation: int) -> int:
     """Justification for a net label at a pin's stub end.
 
-    HARD RULE (user, 2026-07-23): a net label on a LEFT-facing pin must
+    HARD RULE, set by the user: a net label on a LEFT-facing pin must
     read to the LEFT of the pin, never overlap it. The anchor stays on
     the stub (it is the electrical hotspot); justification decides which
     way the text grows. Left-facing pin (orientation 2) -> bottom-right

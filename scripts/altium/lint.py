@@ -147,6 +147,24 @@ RULE_BAD_HEX = LineRule(
 )
 
 # Inc on array element -- the DelphiScript parser refuses `Inc(arr[i])`.
+# Subscripting the RESULT of a call. DelphiScript accepts an index only on
+# a variable, so `UpperCase(Ch)[1]` is rejected by the compiler with
+# ") or ] expected" rather than failing at run time. It reached a user's
+# editor as a broken deploy, which is exactly what this gate exists to
+# stop. Assign to a local first, then index the local.
+#
+# The interface PROPERTIES that legitimately take an index are written
+# `Obj.Prop[i]` with a dot before the name, and the leading (?<![.\w])
+# keeps those out. A bare `Foo(x)[1]` is the shape that breaks.
+RULE_INDEX_ON_CALL_RESULT = LineRule(
+    name="index-on-call-result",
+    pattern=re.compile(r"(?<![.\w])[A-Za-z_][A-Za-z0-9_]*\s*\([^()]*\)\s*\["),
+    severity="error",
+    memory="delphiscript_record_field_write_needs_materialized.md",
+    description=("indexing a function result is a compile error; assign to "
+                 "a local first, then index the local."),
+)
+
 RULE_INC_ARRAY = LineRule(
     name="inc-on-array-element",
     pattern=re.compile(r"\bInc\s*\(\s*[A-Za-z_][A-Za-z0-9_]*\s*\["),
@@ -435,6 +453,7 @@ LINE_RULES = [
     RULE_TYPECAST,
     RULE_BAD_HEX,
     RULE_INC_ARRAY,
+    RULE_INDEX_ON_CALL_RESULT,
     RULE_RESERVED_IDENT,
     RULE_TYPED_CONSTANT,
     RULE_UNDECLARED_DELPHI_CONST,
@@ -918,11 +937,76 @@ def lint_file(path: str) -> list[Finding]:
     findings.extend(_scan_case_on_enum(rel, raw_lines))
     findings.extend(_scan_if_then_try(rel, raw_lines))
     findings.extend(_scan_reserved_in_var_block(rel, raw_lines))
+    findings.extend(_scan_param_redeclared_as_local(rel, raw_lines))
     findings.extend(_scan_dollar_i(rel, text))
     findings.extend(_scan_call_before_definition(rel, raw_lines))
     # Comment-brace check uses raw text (it tracks comment depth itself).
     findings.extend(_scan_comment_brace(rel, text))
 
+    return findings
+
+
+def _scan_call_order_across_files(targets: list) -> list:
+    """Calls that precede their definition IN THE CONCATENATION.
+
+    The per-file rule only knows the routines defined in the file it is
+    reading, so a call into a file that comes LATER in the build order is
+    invisible to it: the name is simply not in its table and the line
+    passes. That is not a theoretical gap. Library.pas called
+    ObjectTypeFromStringPCB, which lived in PCBGeneric.pas, one file later
+    in PAS_FILES. Every file linted clean, the build succeeded, and the
+    deployed script took the scripting engine down with an access
+    violation rather than a compile error, because DelphiScript has no
+    forward declarations and an unresolved identifier is only discovered
+    when the line runs.
+
+    Altium compiles the concatenation, so that is what this checks. Line
+    numbers are reported against the ORIGINAL file, since that is where
+    the fix goes.
+    """
+    order = []
+    for path in targets:
+        if not os.path.exists(path):
+            continue
+        with open(path, "r", encoding="utf-8") as handle:
+            lines = handle.read().split("\n")
+        rel = os.path.basename(path)
+        for i, raw in enumerate(lines, 1):
+            order.append((rel, i, raw, strip_comments_and_strings(raw)))
+
+    def_at = {}
+    for pos, (rel, i, raw, line) in enumerate(order):
+        m = _DEF_RE.match(line)
+        if m:
+            key = m.group(1).lower()
+            if key not in def_at:
+                def_at[key] = pos
+    if not def_at:
+        return []
+
+    call_re = re.compile(
+        r"(?<![.\w])(" + "|".join(re.escape(n) for n in def_at) + r")\s*\(",
+        re.IGNORECASE,
+    )
+    findings = []
+    for pos, (rel, i, raw, line) in enumerate(order):
+        header = _DEF_RE.match(line)
+        header_key = header.group(1).lower() if header else None
+        for m in call_re.finditer(line):
+            key = m.group(1).lower()
+            if key == header_key or key in _DELPHI_BUILTINS:
+                continue
+            if pos < def_at[key]:
+                where = order[def_at[key]][0]
+                if where == rel:
+                    continue          # the per-file rule already reports it
+                findings.append(Finding(
+                    file=rel, line=i, col=m.start(1) + 1,
+                    rule="call-before-definition-across-files",
+                    severity="error",
+                    snippet=raw.rstrip() + f"   [{key} is defined in {where}]",
+                    memory="delphiscript_call_before_definition.md",
+                ))
     return findings
 
 
@@ -944,6 +1028,10 @@ def run_lint(files: Optional[Iterable[str]] = None, verbose: bool = True) -> int
             else:
                 warns += 1
 
+    for f in _scan_call_order_across_files(targets):
+        by_file.setdefault(f.file, []).append(f)
+        errors += 1
+
     if verbose:
         for fname in sorted(by_file):
             for f in by_file[fname]:
@@ -952,6 +1040,77 @@ def run_lint(files: Optional[Iterable[str]] = None, verbose: bool = True) -> int
         print(f"\nlint: scanned {scanned} files, "
               f"{errors} error(s), {warns} warning(s)")
     return errors
+
+
+#: A routine's own parameter, declared again as a local.
+#:
+#: DelphiScript rejects this outright with "Identifier redeclared", and it
+#: happens naturally when a function grows a parameter it used to compute
+#: for itself: the Var line that used to hold it is easy to leave behind.
+#: The compiler catches it, but only after a deploy and a script reload, so
+#: the cost is a whole round trip through Altium for a one-word fix.
+_ROUTINE_HEAD = re.compile(
+    r"^\s*(?:Function|Procedure)\s+\w+\s*\(", re.IGNORECASE)
+
+
+def _scan_param_redeclared_as_local(path: str, lines: list[str]) -> list[Finding]:
+    """Parameters that the routine also declares in its Var block."""
+    findings: list[Finding] = []
+    i = 0
+    while i < len(lines):
+        if not _ROUTINE_HEAD.match(strip_comments_and_strings(lines[i])):
+            i += 1
+            continue
+
+        # The signature can wrap, so collect until the closing paren.
+        head, depth, j = "", 0, i
+        while j < len(lines):
+            piece = strip_comments_and_strings(lines[j])
+            head += piece
+            depth += piece.count("(") - piece.count(")")
+            j += 1
+            if depth <= 0 and "(" in head:
+                break
+
+        inner = head[head.index("(") + 1:head.rindex(")")] if ")" in head else ""
+        params = set()
+        for part in inner.split(";"):
+            for name in part.split(":")[0].split(","):
+                name = name.strip().lstrip("&")
+                # `Var`/`Const` prefixes on a by-reference parameter.
+                name = re.sub(r"^(?:var|const|out)\s+", "", name,
+                              flags=re.IGNORECASE).strip()
+                if name.isidentifier():
+                    params.add(name.lower())
+        if not params:
+            i = j
+            continue
+
+        # Locals, up to the routine's own Begin.
+        in_vars = False
+        while j < len(lines):
+            line = strip_comments_and_strings(lines[j])
+            if re.match(r"^\s*Begin\b", line, re.IGNORECASE):
+                break
+            if _VAR_OR_CONST_HEADER.match(line):
+                in_vars = True
+                j += 1
+                continue
+            if in_vars and ":" in line:
+                for name in line.split(":")[0].split(","):
+                    name = name.strip()
+                    if name.lower() in params:
+                        findings.append(Finding(
+                            file=path, line=j + 1,
+                            col=line.lower().index(name.lower()) + 1,
+                            rule="parameter-redeclared-as-local",
+                            severity="error",
+                            snippet=lines[j],
+                            memory="delphiscript_reserved_words.md",
+                        ))
+            j += 1
+        i = j
+    return findings
 
 
 if __name__ == "__main__":

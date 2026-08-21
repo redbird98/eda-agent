@@ -427,6 +427,24 @@ def register_review_tools(mcp):
             s for s in ordered if s in result and not s.startswith("_")
         ]
 
+        # A review that fetched NOTHING must say so. _sections_fetched
+        # being empty is already honest, but it is an absence, and an
+        # absence is the easiest thing for a reader to skim past: the
+        # equivalent aggregator on the EasyEDA side reported a board as
+        # having no violations when not one audit had been able to read
+        # it. Stated here rather than left to inference.
+        #
+        # Deliberately NOT adding an `ok` key. Whether this tool should
+        # carry the ok/reason envelope is the open question in the
+        # failure-shape task, and answering it here by hand would settle
+        # a published contract as a side effect of a different fix.
+        if not result["_sections_fetched"]:
+            result["_nothing_fetched"] = (
+                "not one section could be fetched, so this is not a "
+                "clean or empty design: nothing was read. See "
+                "_sections_failed for why."
+            )
+
         return result
 
     @mcp.tool()

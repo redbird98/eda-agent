@@ -38,6 +38,8 @@ import re
 
 import pytest
 
+from tests import documentation_set
+
 _ROOT = pathlib.Path(__file__).resolve().parents[1]
 _README = _ROOT / "README.md"
 
@@ -82,7 +84,12 @@ def _registered_tools() -> set[str]:
 
 
 #: A catalog section, the same anchor test_readme_tool_counts.py uses.
-_SECTION = re.compile(r"^### [A-Za-z][A-Za-z\s]*? \(\d+ tools\)")
+#: Two heading forms, because the catalog moved. The README wrote
+#: "### Library (67 tools)" by hand; the generated reference writes
+#: "## library (67)". Matching only the first silently scoped the scan
+#: to nothing once the hand-written copy was deleted, and the guard
+#: below is what caught that.
+_SECTION = re.compile(r"^#{2,3} [A-Za-z][A-Za-z\s]*? \(\d+( tools)?\)\s*$")
 _ANY_HEADING = re.compile(r"^#{1,4}\s")
 
 
@@ -97,7 +104,7 @@ def _catalog_names() -> list[str]:
     """
     names: list[str] = []
     in_catalog = False
-    for line in _README.read_text(encoding="utf-8").splitlines():
+    for line in documentation_set.all_text().splitlines():
         if _ANY_HEADING.match(line):
             in_catalog = bool(_SECTION.match(line))
             continue
@@ -113,7 +120,7 @@ def test_the_catalog_rows_were_found():
     """Guard the guard: a table reformat must not silently check zero."""
     names = _catalog_names()
     assert len(names) > 150, (
-        f"only {len(names)} tool names parsed out of the README catalog; "
+        f"only {len(names)} tool names parsed out of the catalog; "
         "the table format changed and this test is no longer reading it")
 
 
@@ -142,3 +149,43 @@ def test_a_registered_tool_is_recognised():
         "tests/test_bridge_handlers_reachable.py; if that changed, this "
         "assertion should be updated deliberately rather than deleted"
     )
+
+
+def test_the_readme_documents_every_backend_the_code_offers():
+    """The backend list is stated in the README and in BACKENDS.
+
+    Nothing connects them. A backend added to the code but missing from
+    the docs is invisible to anyone deciding whether this project drives
+    their EDA tool, which is the one question the README exists to
+    answer.
+    """
+    from eda_agent.tools import BACKENDS
+
+    docs = documentation_set.prose_text()
+
+    for backend in BACKENDS:
+        assert f"`{backend}`" in docs, (
+            f"backend {backend!r} is selectable but no documentation file "
+            f"names it")
+
+
+def test_the_readme_names_the_easyeda_environment_variables():
+    """A variable nobody can find is a feature nobody can enable."""
+    import pathlib
+    import re
+
+    from eda_agent.bridge import easyeda_bridge
+
+    docs = documentation_set.prose_text()
+
+    source = pathlib.Path(easyeda_bridge.__file__).read_text(encoding="utf-8")
+    variables = set(re.findall(r'environ\.get\(\s*"(EDA_AGENT_\w+)"', source))
+    assert variables, "no environment variables parsed; the pattern drifted"
+
+    for name in variables:
+        # Word boundary, not substring: documenting EDA_AGENT_EASYEDA_PORTS
+        # would satisfy a plain `in` check while leaving the real
+        # variable unset.
+        assert re.search(rf"\b{re.escape(name)}\b", docs), (
+            f"{name} is read by the bridge but named in no documentation "
+            f"file")

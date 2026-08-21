@@ -2,7 +2,7 @@
 # Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """The live-Altium tests must not modify the design they connect to.
 
-``tests/integration/`` binds to a real Altium. Since 2026-08-05 it is
+``tests/integration/`` binds to a real Altium. It is
 gated at collection on ``EDA_AGENT_INTEGRATION=1``, so a plain
 ``pytest`` no longer reaches a live session at all; see
 ``tests/test_integration_tests_are_opt_in.py``. This file covers the

@@ -116,12 +116,28 @@ def test_live_sources_have_no_call_before_def(lint):
     """The shipped .pas files must be clean (regression lock for Utils.pas)."""
     scripts_dir = REPO_ROOT / "scripts" / "altium"
     offenders = []
+    scanned, missing = 0, []
     for name in lint.PAS_FILES:
         p = scripts_dir / name
         if not p.exists():
+            missing.append(name)
             continue
         raw = p.read_text(encoding="utf-8", errors="replace").split("\n")
+        scanned += 1
         offenders += lint._scan_call_before_definition(name, raw)
+
+    # Absence used to be tolerated silently: every file could be
+    # renamed and this would still report the sources clean, because
+    # the loop simply skipped what it could not find. A regression lock
+    # that unlocks itself when the thing it locks moves is worse than
+    # none, since it keeps reporting success.
+    assert not missing, (
+        f"these units are named in PAS_FILES but not on disk, so they "
+        f"were never linted: {missing}")
+    assert scanned >= 8, (
+        f"only {scanned} units were linted; PAS_FILES has shrunk and "
+        f"this regression lock covers almost nothing")
+
     assert not offenders, (
         "call-before-definition in live sources:\n"
         + "\n".join(f"{o.file}:{o.line}  {o.snippet.strip()}" for o in offenders)

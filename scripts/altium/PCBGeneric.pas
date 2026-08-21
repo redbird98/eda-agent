@@ -5,21 +5,9 @@
 { Parallel to Generic.pas but for PCBServer / IPCB_* objects.               }
 {..............................................................................}
 
-Function ObjectTypeFromStringPCB(TypeStr : String) : Integer;
-Begin
-    Result := -1;
-    If TypeStr = 'eTrackObject'         Then Result := eTrackObject
-    Else If TypeStr = 'ePadObject'      Then Result := ePadObject
-    Else If TypeStr = 'eViaObject'      Then Result := eViaObject
-    Else If TypeStr = 'eComponentObject' Then Result := eComponentObject
-    Else If TypeStr = 'eArcObject'      Then Result := eArcObject
-    Else If TypeStr = 'eFillObject'     Then Result := eFillObject
-    Else If TypeStr = 'eTextObject'     Then Result := eTextObject
-    Else If TypeStr = 'ePolyObject'     Then Result := ePolyObject
-    Else If TypeStr = 'eRegionObject'   Then Result := eRegionObject
-    Else If TypeStr = 'eRuleObject'     Then Result := eRuleObject
-    Else If TypeStr = 'eDimensionObject' Then Result := eDimensionObject;
-End;
+{ ObjectTypeFromStringPCB moved to Utils.pas: Library.pas builds BEFORE
+  this file and needs it, and a call to a function defined later in the
+  concatenation resolves to nothing at runtime. }
 
 {..............................................................................}
 { PCB Property Getter, late-bound, returns '' on unsupported properties     }
@@ -372,9 +360,32 @@ Function ProcessActivePCBDoc(ObjTypeInt : Integer;
 Var
     Board : IPCB_Board;
     TotalMatched : Integer;
-    JsonItems : String;
+    JsonItems, Why : String;
 Begin
-    Board := GetPCBBoardAnywhere;
+    { A READ MAY WANDER; AN EDIT MAY NOT.                                   }
+    {                                                                        }
+    { GetPCBBoardAnywhere opens the first board it can find when none is     }
+    { focused, and hides the focus change afterwards. For a query that is    }
+    { the focus-independent access this project advertises. For a delete it  }
+    { is a misfire: with a library in front and two boards open, primitives  }
+    { would be removed from whichever board the project walk reached first,  }
+    { and nothing in the reply would say which.                              }
+    {                                                                        }
+    { There is no library-scoped primitive delete, so a caller working in a  }
+    { PcbLib has no correct tool here and the wrong one used to look like    }
+    { it worked.                                                             }
+    If (Mode = 'modify') Or (Mode = 'delete') Or (Mode = 'create') Then
+    Begin
+        Board := GetPCBBoardForMutation(Why);
+        If Board = Nil Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'AMBIGUOUS_TARGET', Why);
+            Exit;
+        End;
+    End
+    Else
+        Board := GetPCBBoardAnywhere;
+
     If Board = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_PCB', 'No PCB document is active');

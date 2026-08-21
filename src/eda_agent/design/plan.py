@@ -21,7 +21,23 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 
 _REFDES_PATTERN = r"^[A-Z]+[0-9]+[A-Z]?$"
-_NET_PATTERN = r"^[A-Za-z_][A-Za-z0-9_+\-/]*$"
+
+#: A net name. The leading class admits + and - as well as a letter or
+#: underscore, because a supply rail conventionally carries its sign:
+#: +3V3, +5V, -12V. Measured on a live board, four of its seventy nets
+#: were named that way and every one was refused.
+#:
+#: This adds no new CHARACTER to a net name. Both signs were already
+#: legal in the body, so anything downstream that copes with VCC+ copes
+#: with +VCC; only the position changes.
+#:
+#: Still deliberately narrow. The hierarchy prefix EasyEDA puts on a
+#: net inside a block, "$1I81\I2C_SCL", uses $ and backslash and is NOT
+#: admitted here: those are quoting and escaping characters, this
+#: pattern guards what gets written into a schematic, and the prefix
+#: identifies a sheet instance rather than the net. Strip it when
+#: importing a live netlist into a plan.
+_NET_PATTERN = r"^[A-Za-z_+\-][A-Za-z0-9_+\-/]*$"
 
 
 class PartStatus(str, Enum):

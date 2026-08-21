@@ -98,53 +98,16 @@ class FakeBridge:
 def isolated_bridge(monkeypatch, tmp_path):
     """Install the fake everywhere, and a tripwire behind it.
 
-    Also redirects ``workspace_dir`` at a temp directory. Faking the
-    bridge is not enough on its own: several tools write their output
-    from the PYTHON side using whatever the bridge returned, so a smoke
-    run put netlist.net and board_stackup.csv into the real workspace
-    and overwrote bom.html there. The bridge is only one of the two
-    ways out of the process.
+    The wiring lives in ``tests.conftest.install_bridge_fake`` so that
+    every bulk-invoke test shares ONE proven isolation instead of
+    re-deriving it; re-derived isolation is how both incidents happened.
+    The proof tests below exercise the shared helper, so any test using
+    it inherits a checked guarantee, not an asserted one.
     """
-    from eda_agent import config as config_module
-    from eda_agent.bridge import altium_bridge as ab
-
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    real_get_config = config_module.get_config
-
-    def sandboxed_config():
-        cfg = real_get_config()
-        object.__setattr__(cfg, "workspace_dir", workspace)
-        return cfg
-
-    monkeypatch.setattr(config_module, "get_config", sandboxed_config)
-    for mod_name in ("project", "render", "generic", "library", "pcb"):
-        try:
-            mod = importlib.import_module(f"eda_agent.tools.{mod_name}")
-        except ImportError:  # pragma: no cover
-            continue
-        if hasattr(mod, "get_config"):
-            monkeypatch.setattr(mod, "get_config", sandboxed_config)
-
-    def tripwire(*_args, **_kwargs):
-        raise AssertionError(TRIPWIRE)
-
-    monkeypatch.setattr(ab.AltiumBridge, "__init__", tripwire)
-    monkeypatch.setattr(ab.AltiumBridge, "send_command", tripwire)
-    monkeypatch.setattr(ab.AltiumBridge, "send_command_async", tripwire)
-    monkeypatch.setattr(ab, "_bridge", None, raising=False)
+    from tests.conftest import install_bridge_fake
 
     fake = FakeBridge()
-    monkeypatch.setattr(ab, "get_bridge", lambda: fake)
-
-    import eda_agent.bridge as bridge_pkg
-    monkeypatch.setattr(bridge_pkg, "get_bridge", lambda: fake)
-
-    import eda_agent.tools as tools_pkg
-    for mod_info in pkgutil.iter_modules(tools_pkg.__path__):
-        mod = importlib.import_module(f"eda_agent.tools.{mod_info.name}")
-        if hasattr(mod, "get_bridge"):
-            monkeypatch.setattr(mod, "get_bridge", lambda: fake)
+    install_bridge_fake(monkeypatch, tmp_path, fake)
     return fake
 
 
@@ -200,36 +163,61 @@ _WRAPPER_FAULTS = (TypeError, NameError, AttributeError, UnboundLocalError,
                    IndexError, ZeroDivisionError)
 
 
-def _no_argument_bridge_tools():
+def _no_argument_bridge_tools(backend="altium"):
     """Registered tools that take no required argument and use the bridge.
 
     Offline tools are excluded on purpose. They are the ones that touch
     the network and the local filesystem (part_search queries providers,
     the session and job tools read state), and a fake bridge does not
     isolate any of that. Their logic is covered at module level.
+
+    RESTORES THE ACTIVE BACKEND, because register_backend records it in
+    a process global and leaving easyeda selected would change what
+    every later test resolves against.
     """
     import asyncio
+    from eda_agent.core import backends
     from eda_agent.server import register_backend
     from eda_agent.tools.metadata import tool_metadata
     from eda_agent.tools.registry import ToolRegistry
 
-    registry = ToolRegistry()
-    register_backend(registry, "altium", "full")
-    tools = asyncio.run(registry.list_tools())
+    previous = backends._REGISTERED
+    try:
+        registry = ToolRegistry()
+        register_backend(registry, backend, "full")
+        tools = asyncio.run(registry.list_tools())
+    finally:
+        backends.set_active_backend(previous or "")
     names = [t.name for t in tools
              if not (t.inputSchema or {}).get("required")
              and tool_metadata(t.name)["maturity"] != "offline"]
     return registry, sorted(names)
 
 
-def test_no_argument_tools_survive_being_called(isolated_bridge):
+#: The smallest count each backend must produce. A registry that
+#: returned almost nothing would make the whole check vacuous, and this
+#: file has no other way to notice.
+_FLOOR = {"altium": 150, "easyeda": 100, "kicad": 20}
+
+
+@pytest.mark.parametrize("backend", sorted(_FLOOR))
+def test_no_argument_tools_survive_being_called(isolated_bridge, backend):
+    """EVERY BACKEND, not just Altium.
+
+    This covered altium alone, which left 247 EasyEDA wrappers with no
+    Python-level exercise at all. That is not theoretical: a bulk edit
+    once gave three EasyEDA search tools a reference to a parameter
+    they did not declare, and the module still imported cleanly because
+    the failure is at CALL time. Calling each tool once finds that in a
+    second.
+    """
     import asyncio
 
-    registry, names = _no_argument_bridge_tools()
-    assert len(names) > 150, (
-        f"only {len(names)} no-argument bridge tools found; the registry "
-        f"or the schema shape changed and this guard is not covering "
-        f"what it thinks")
+    registry, names = _no_argument_bridge_tools(backend)
+    assert len(names) > _FLOOR[backend], (
+        f"only {len(names)} no-argument bridge tools found on {backend}; "
+        f"the registry or the schema shape changed and this guard is not "
+        f"covering what it thinks")
 
     faults = []
 

@@ -704,8 +704,54 @@ def register_kicad_tools(mcp) -> None:
         if include_erc:
             await _section("erc", run_kicad_cli_erc(cli, sch))
 
-        return {"ok": True, "sections_run": sorted(sections),
-                "sections_failed": failed, "sections": sections}
+        # sections_run is measured here, not derived from a list of
+        # what COULD run, so this never claimed a section had run when
+        # it had not. What it did claim was success: with every section
+        # failing, the reply was ok:True with an empty sections_run,
+        # and a client that reads the envelope before the detail is
+        # told the review worked. The same shape on the EasyEDA side
+        # reported a board as having no violations when nothing had
+        # examined it.
+        # What each section CARRIED, not just that it ran. The same
+        # distinction the EasyEDA review needed twice: a review of a
+        # design whose every section came back empty reports the same
+        # "5 sections run" as a review of a full board, and only one of
+        # those means anything. Bookkeeping keys are excluded and a dict
+        # of scalars counts as one record rather than as its key count,
+        # which is what made the EasyEDA version report the section that
+        # measured nothing as the richest.
+        _NOT_DATA = {"ok", "reason", "note", "error", "errors", "command",
+                     "unavailable", "sections_failed", "warning"}
+        rows: dict = {}
+        for name, section in sections.items():
+            if not isinstance(section, dict):
+                continue
+            for key, value in section.items():
+                if key in _NOT_DATA:
+                    continue
+                if isinstance(value, list):
+                    rows[name] = rows.get(name, 0) + len(value)
+                elif isinstance(value, dict):
+                    rows[name] = rows.get(name, 0) + sum(
+                        1 for item in value.values()
+                        if isinstance(item, (dict, list)) and item)
+        rows = {name: count for name, count in rows.items() if count}
+
+        out = {"ok": bool(sections), "sections_run": sorted(sections),
+               "sections_with_data": sorted(rows), "rows_by_section": rows,
+               "sections_failed": failed, "sections": sections}
+        if sections and not rows:
+            out["scope_warning"] = (
+                "every section came back EMPTY. That is what an empty "
+                "design looks like and also what reading the wrong "
+                "project looks like, so this is not evidence the design "
+                "is clean.")
+        if not sections:
+            out["reason"] = (
+                "not one section of the review could be produced, so this "
+                "is not a clean design: nothing was examined. See "
+                "'sections_failed' for why.")
+        return out
 
     @mcp.tool()
     async def kicad_review_schematic() -> dict[str, Any]:
@@ -959,10 +1005,24 @@ def register_kicad_tools(mcp) -> None:
             result = await run_cli(cli, [str(a) for a in (args or [])])
         except Exception as e:
             return {"ok": False, "reason": str(e)}
-        return {"ok": result["returncode"] == 0,
-                "returncode": result["returncode"],
-                "stdout": result.get("stdout", "")[:4000],
-                "stderr": result.get("stderr", "")[:2000]}
+        ok = result["returncode"] == 0
+        out: dict[str, Any] = {
+            "ok": ok,
+            "returncode": result["returncode"],
+            "stdout": result.get("stdout", "")[:4000],
+            "stderr": result.get("stderr", "")[:2000],
+        }
+        if not ok:
+            # Every refusal carries a reason a caller can act on. The
+            # stderr is still there in full; this names the failure
+            # rather than leaving ok:False with nothing to read first.
+            stderr_head = (result.get("stderr", "") or "").strip()
+            stderr_head = stderr_head.splitlines()[0] if stderr_head else ""
+            out["reason"] = (
+                f"kicad-cli exited with code {result['returncode']}"
+                + (f": {stderr_head[:200]}" if stderr_head else
+                   "; it printed nothing on stderr"))
+        return out
 
     @mcp.tool()
     async def kicad_run_jobset(jobset_path: str,

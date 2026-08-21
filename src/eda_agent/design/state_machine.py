@@ -76,11 +76,11 @@ STAGE_PLAYBOOKS = {
         "exit_gate": "A complete DesignPlan exists with every part and net.",
     },
     "plan_verification": {
-        "goal": "Vet the plan offline before any Altium round-trip.",
+        "goal": "Vet the plan offline, before anything reaches the editor.",
         "tools": ["design_validate_plan", "design_review_plan",
                   "design_describe_circuits", "design_generate_bom"],
-        "exit_gate": "validate_plan ok:true; ERC-lite clean; circuit values "
-                     "match intent.",
+        "exit_gate": "design_validate_plan ok:true; ERC-lite clean; circuit "
+                     "values match intent.",
     },
     "library_readiness": {
         "goal": "Ensure every part has a verified symbol + footprint (+3D).",
@@ -97,10 +97,11 @@ STAGE_PLAYBOOKS = {
         "exit_gate": "ERC clean; visual-review rubric passes; no floating pins.",
     },
     "sch_to_pcb": {
-        "goal": "Transfer the netlist to a PCB without the modal ECO dialog.",
+        "goal": "Transfer the netlist to a PCB without a dialog someone has "
+                "to click.",
         "tools": ["pcb_place_components", "pcb_build_from_project",
                   "proj_compare_sch_pcb", "obj_crossref_net"],
-        "exit_gate": "compare_sch_pcb reports in_sync:true.",
+        "exit_gate": "proj_compare_sch_pcb reports in_sync:true.",
     },
     "rules_stackup": {
         "goal": "Set the layer stack and design rules from a fab profile.",

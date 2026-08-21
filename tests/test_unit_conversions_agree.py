@@ -88,14 +88,52 @@ def test_every_declared_factor_is_the_exact_one():
             "measurement.")
 
 
-def test_the_scan_still_finds_every_definition():
-    """Guard the guard: a new copy of the factor must not go unchecked.
+def test_the_copper_thickness_factor_is_defined_only_in_units():
+    """1 oz/ft^2 in mils, stated once.
 
-    The point of this file is that the constant is duplicated. If a
-    fifth copy appears, the tests above keep passing while the new one
-    drifts freely, so the count is pinned. Raise it here only after
-    adding the new module to the assertions above, or better, after
-    making it import an existing definition.
+    It was written three times in code (impedance_sizing, trace_sizing,
+    and inline in the current-capacity tool) and all three agreed by
+    luck, which is where the mils-to-mm factor was before it was
+    consolidated. Prose mentions in docstrings are documentation, not a
+    second source of truth, so only assignments and arithmetic count.
+    """
+    import ast
+    import pathlib
+
+    # AST, not a regex over lines. Docstrings say things like "1 oz =
+    # 1.378 mils", and a text scan reads that as a definition: the
+    # first version of this guard flagged four docstrings and no code.
+    # A numeric literal in the tree is unambiguous, because a docstring
+    # is a STRING constant and can never equal the float.
+    root = pathlib.Path(__file__).resolve().parents[1] / "src" / "eda_agent"
+    sites = []
+    for path in sorted(root.rglob("*.py")):
+        if path.name == "units.py":
+            continue
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8",
+                                            errors="replace"))
+        except SyntaxError:                       # pragma: no cover
+            continue
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Constant)
+                    and isinstance(node.value, float)
+                    and node.value == 1.378):
+                sites.append(f"{path.relative_to(root)}:{node.lineno}")
+
+    assert not sites, (
+        f"the copper-thickness factor is restated outside units.py at "
+        f"{sites}; import OZ_TO_MILS from eda_agent.units instead.")
+
+
+def test_the_factor_is_defined_only_in_units():
+    """No literal 0.0254 outside eda_agent/units.py.
+
+    This file used to pin the count of scattered copies at five; the
+    consolidation into ``eda_agent.units`` reduced the correct count to
+    zero-outside-units, which is also the stronger guard: any new
+    literal anywhere is a duplicate that can drift, and the fix is to
+    import ``MM_PER_MIL`` (or ``MILS_PER_MM``) instead of restating it.
     """
     import pathlib
     import re
@@ -103,6 +141,8 @@ def test_the_scan_still_finds_every_definition():
     root = pathlib.Path(__file__).resolve().parents[1] / "src" / "eda_agent"
     sites = []
     for path in sorted(root.rglob("*.py")):
+        if path.name == "units.py":
+            continue
         for lineno, line in enumerate(
                 path.read_text(encoding="utf-8",
                                errors="replace").splitlines(), 1):
@@ -111,11 +151,7 @@ def test_the_scan_still_finds_every_definition():
             if re.search(r"(?<![\d.])0\.0254(?![\d])", line):
                 sites.append(f"{path.relative_to(root)}:{lineno}")
 
-    # Five today: three importable module constants, one inline divisor
-    # in route/repair.py, and one FUNCTION-LOCAL `MM` inside
-    # lib_export_kicad_symbol, which cannot be imported and is covered
-    # behaviourally by tests/test_export_kicad_symbol.py instead.
-    assert len(sites) == 5, (
-        f"expected 5 places defining or using the mils-to-mm factor, "
-        f"found {len(sites)}: {sites}. A new one needs covering above, "
-        "or should import an existing definition instead.")
+    assert not sites, (
+        f"the mils-to-mm factor is restated outside units.py at {sites}; "
+        "import MM_PER_MIL from eda_agent.units instead of duplicating "
+        "the literal.")

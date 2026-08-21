@@ -701,3 +701,328 @@ Begin
         End;
     End;
 End;
+
+{..............................................................................}
+{ Mechanical layer KIND: the property that says what a mechanical layer is    }
+{ FOR, rather than what it is called. Courtyard, Assembly, 3D Body and the    }
+{ rest. A renamed layer still has no kind, and every feature that resolves a  }
+{ layer by purpose then skips it, so the outlines are drawn and nothing uses  }
+{ them.                                                                        }
+{                                                                              }
+{ Carried as an Integer. The enum identifiers are not declared in this script  }
+{ binding, and an undeclared identifier faults at RUN time on the user's board }
+{ rather than being caught when the script loads.                              }
+{                                                                              }
+{ The numbering is the layer stack manager's own. 31 to 36 are unassigned,     }
+{ which is why the map has a hole in it rather than an off-by-one.            }
+{..............................................................................}
+
+{ PCB object-type name to its TObjectId value, or -1 when unknown.            }
+{                                                                              }
+{ Lives HERE rather than beside the PCB iteration helpers because Library.pas  }
+{ builds before PCBGeneric.pas. Calling it from there resolved to nothing at   }
+{ runtime and took the scripting engine down with an access violation rather   }
+{ than a compile error, since DelphiScript has no forward declarations.        }
+
+Function ObjectTypeFromStringPCB(TypeStr : String) : Integer;
+Begin
+    Result := -1;
+    If TypeStr = 'eTrackObject'         Then Result := eTrackObject
+    Else If TypeStr = 'ePadObject'      Then Result := ePadObject
+    Else If TypeStr = 'eViaObject'      Then Result := eViaObject
+    Else If TypeStr = 'eComponentObject' Then Result := eComponentObject
+    Else If TypeStr = 'eArcObject'      Then Result := eArcObject
+    Else If TypeStr = 'eFillObject'     Then Result := eFillObject
+    Else If TypeStr = 'eTextObject'     Then Result := eTextObject
+    Else If TypeStr = 'ePolyObject'     Then Result := ePolyObject
+    Else If TypeStr = 'eRegionObject'   Then Result := eRegionObject
+    Else If TypeStr = 'eRuleObject'     Then Result := eRuleObject
+    Else If TypeStr = 'eDimensionObject' Then Result := eDimensionObject;
+End;
+
+Function MechKindToString(K : Integer) : String;
+Begin
+    Case K Of
+        0  : Result := 'Not Set';
+        1  : Result := 'Assembly Top';
+        2  : Result := 'Assembly Bottom';
+        3  : Result := 'Assembly Notes';
+        4  : Result := 'Board';
+        5  : Result := 'Coating Top';
+        6  : Result := 'Coating Bottom';
+        7  : Result := 'Component Center Top';
+        8  : Result := 'Component Center Bottom';
+        9  : Result := 'Component Outline Top';
+        10 : Result := 'Component Outline Bottom';
+        11 : Result := 'Courtyard Top';
+        12 : Result := 'Courtyard Bottom';
+        13 : Result := 'Designator Top';
+        14 : Result := 'Designator Bottom';
+        15 : Result := 'Dimensions';
+        16 : Result := 'Dimensions Top';
+        17 : Result := 'Dimensions Bottom';
+        18 : Result := 'Fab Notes';
+        19 : Result := 'Glue Points Top';
+        20 : Result := 'Glue Points Bottom';
+        21 : Result := 'Gold Plating Top';
+        22 : Result := 'Gold Plating Bottom';
+        23 : Result := 'Value Top';
+        24 : Result := 'Value Bottom';
+        25 : Result := 'V Cut';
+        26 : Result := '3D Body Top';
+        27 : Result := '3D Body Bottom';
+        28 : Result := 'Route Tool Path';
+        29 : Result := 'Sheet';
+        30 : Result := 'Board Shape';
+        37 : Result := 'Tenting Top';
+        38 : Result := 'Tenting Bottom';
+        39 : Result := 'Covering Top';
+        40 : Result := 'Covering Bottom';
+        41 : Result := 'Plugging Top';
+        42 : Result := 'Plugging Bottom';
+        43 : Result := 'Filling';
+        44 : Result := 'Capping';
+    Else
+        Result := 'Unknown';
+    End;
+End;
+
+{ A kind name or a bare number to its integer, or -1 when neither.            }
+{ Numbers are accepted so a kind added by a later Altium release can still be }
+{ set through this handler without waiting for the map above to catch up.     }
+
+Function MechKindFromString(S : String) : Integer;
+Var
+    U, Candidate : String;
+    I : Integer;
+Begin
+    Result := -1;
+    U := UpperCase(Trim(S));
+    If U = '' Then Exit;
+
+    If IsIntStr(U) Then
+    Begin
+        I := StrToIntDef(U, -1);
+        If (I >= 0) And (I <= 44) Then Result := I;
+        Exit;
+    End;
+
+    For I := 0 To 44 Do
+    Begin
+        Candidate := MechKindToString(I);
+        { 'Unknown' is what the map returns for the unassigned numbers, so    }
+        { matching against it would quietly resolve to the first hole.        }
+        If Candidate <> 'Unknown' Then
+        Begin
+            If UpperCase(Candidate) = U Then
+            Begin
+                Result := I;
+                Exit;
+            End;
+        End;
+    End;
+End;
+
+{ The kind currently on a mechanical layer, or -1 when the property is not    }
+{ readable. AD17 and AD18 have no mechanical layer kinds at all, and the read }
+{ faults there rather than returning zero.                                    }
+
+Function ReadMechKind(LayerObj : IPCB_LayerObject_V7) : Integer;
+Begin
+    Result := -1;
+    If LayerObj = Nil Then Exit;
+    Try
+        Result := LayerObj.Kind;
+    Except
+        Result := -1;
+    End;
+End;
+
+{..............................................................................}
+{ Mechanical layers above 16.                                                  }
+{                                                                              }
+{ GetLayerFromString knows Mechanical1 to Mechanical16, which is the legacy    }
+{ set. A V9 stack goes to 1024, and a real library was found keeping eleven of }
+{ its twelve named layers in the 17 to 28 range: Top 3D Body on Mechanical 21, }
+{ Top Courtyard on 25, and so on. Every one of those was unreachable, so a     }
+{ sweep applied the single layer that happened to sit below 16 and silently    }
+{ skipped the rest.                                                            }
+{                                                                              }
+{ LayerUtils.MechanicalLayer(n) is the accessor that covers the full range.    }
+{ It is guarded because this codebase has not used LayerUtils before, and an   }
+{ identifier this binding does not declare faults at RUN time rather than      }
+{ when the script loads.                                                       }
+{                                                                              }
+{ The identifiers encode as 16908288 + n, which is how Mechanical 21 reads as  }
+{ 16908309 in a library file. Written in decimal deliberately: an eight digit  }
+{ hex literal has silently aborted a unit in this dialect before.              }
+{..............................................................................}
+
+Function MechLayerIdBase : Integer;
+Begin
+    Result := 16908288;
+End;
+
+{ The mechanical layer NUMBER a caller meant, or -1.                          }
+{ Accepts "Mechanical21", "Mech21", "21", and the raw layer id.               }
+
+Function ParseMechLayerNumber(S : String) : Integer;
+Var
+    T : String;
+    I, Value : Integer;
+Begin
+    Result := -1;
+    T := UpperCase(Trim(S));
+    If T = '' Then Exit;
+
+    T := StringReplace(T, ' ', '', MkSet(rfReplaceAll));
+    If Copy(T, 1, 10) = 'MECHANICAL' Then
+        T := Copy(T, 11, Length(T))
+    Else If Copy(T, 1, 4) = 'MECH' Then
+        T := Copy(T, 5, Length(T));
+
+    If Not IsIntStr(T) Then Exit;
+    Value := StrToIntDef(T, -1);
+    If Value < 0 Then Exit;
+
+    { A raw layer id, as stored in the file. }
+    If Value > 1024 Then
+    Begin
+        If (Value > MechLayerIdBase) And (Value <= MechLayerIdBase + 1024) Then
+            Result := Value - MechLayerIdBase;
+        Exit;
+    End;
+
+    If (Value >= 1) And (Value <= 1024) Then Result := Value;
+End;
+
+{ The TLayer for a mechanical layer number, or eNoLayer.                      }
+
+Function MechLayerFromNumber(N : Integer) : TLayer;
+Begin
+    Result := eNoLayer;
+    If (N < 1) Or (N > 1024) Then Exit;
+    If N <= 16 Then
+    Begin
+        Result := GetLayerFromString('Mechanical' + IntToStr(N));
+        Exit;
+    End;
+    Try
+        Result := LayerUtils.MechanicalLayer(N);
+    Except
+        Result := eNoLayer;
+    End;
+End;
+
+{..............................................................................}
+{ Paired mechanical layer kinds.                                               }
+{                                                                              }
+{ Most kinds come as a Top and Bottom pair, and Altium refuses to set one      }
+{ unless the two layers are joined as a LAYER PAIR first. Measured on a real   }
+{ library: on a single layer in one call, "Fab Notes" and "Not Set" applied    }
+{ and "Component Outline Top" was refused, with nothing else holding that      }
+{ kind. Single kinds need no partner; paired ones do.                          }
+{                                                                              }
+{ Derived from the NAME rather than a second hardcoded table, so a kind added  }
+{ by a later Altium release pairs correctly without another list to update.    }
+{..............................................................................}
+
+Function MechKindIsPaired(K : Integer) : Boolean;
+Var
+    S : String;
+Begin
+    S := MechKindToString(K);
+    Result := (Pos(' Top', S) > 0) Or (Pos(' Bottom', S) > 0);
+End;
+
+{ The kind on the other side of a pair, or -1 when the kind is single. }
+
+Function MechKindPartner(K : Integer) : Integer;
+Var
+    S, Other : String;
+    P, I : Integer;
+Begin
+    Result := -1;
+    S := MechKindToString(K);
+    If S = 'Unknown' Then Exit;
+
+    P := Pos(' Top', S);
+    If P > 0 Then
+        Other := Copy(S, 1, P - 1) + ' Bottom'
+    Else
+    Begin
+        P := Pos(' Bottom', S);
+        If P = 0 Then Exit;
+        Other := Copy(S, 1, P - 1) + ' Top';
+    End;
+
+    For I := 0 To 44 Do
+        If MechKindToString(I) = Other Then
+        Begin
+            Result := I;
+            Exit;
+        End;
+End;
+
+{..............................................................................}
+{ Layer PAIR kinds are a SECOND enum, not the layer kinds renumbered.          }
+{                                                                              }
+{ A paired concept is held by the pair, not by either layer: the pair carries  }
+{ "Component Outline" while the two layers carry "Component Outline Top" and   }
+{ "Component Outline Bottom". The ids differ as well, so a layer kind used as  }
+{ a pair kind names a different concept. Writing the layer property leaves the }
+{ LayerKindMapping stream empty, which is why a paired kind read back          }
+{ unchanged however the layer write was attempted.                             }
+{                                                                              }
+{ There are no Top and Bottom entries here, and the numbering is its own.      }
+{..............................................................................}
+
+Function MechPairKindToString(K : Integer) : String;
+Begin
+    Result := 'Unknown';
+    If K = 0  Then Result := 'Not Set';
+    If K = 1  Then Result := 'Assembly';
+    If K = 2  Then Result := 'Coating';
+    If K = 3  Then Result := 'Component Center';
+    If K = 4  Then Result := 'Component Outline';
+    If K = 5  Then Result := 'Courtyard';
+    If K = 6  Then Result := 'Designator';
+    If K = 7  Then Result := 'Dimensions';
+    If K = 8  Then Result := 'Glue Points';
+    If K = 9  Then Result := 'Gold Plating';
+    If K = 10 Then Result := 'Value';
+    If K = 11 Then Result := '3D Body';
+    { Via protection, IPC-4761. }
+    If K = 15 Then Result := 'Tenting';
+    If K = 16 Then Result := 'Covering';
+    If K = 17 Then Result := 'Plugging';
+End;
+
+{ The pair kind that carries a paired layer kind.                              }
+{                                                                              }
+{ Matched on the name with the side suffix removed rather than through a       }
+{ third table, so the two enums cannot drift apart here. The reference does    }
+{ the same match but stops at 12, which silently drops Tenting, Covering and   }
+{ Plugging; those are 15 to 17, so the search has to reach 17.                 }
+
+Function MechPairKindFromLayerKind(K : Integer) : Integer;
+Var
+    S, Base : String;
+    P, I : Integer;
+Begin
+    Result := -1;
+    S := MechKindToString(K);
+    If S = 'Unknown' Then Exit;
+
+    P := Pos(' Top', S);
+    If P = 0 Then P := Pos(' Bottom', S);
+    If P = 0 Then Exit;
+    Base := Copy(S, 1, P - 1);
+
+    For I := 0 To 17 Do
+        If MechPairKindToString(I) = Base Then
+        Begin
+            Result := I;
+            Exit;
+        End;
+End;

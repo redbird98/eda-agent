@@ -681,12 +681,6 @@ Begin
     Try LastActivityTick := GetTickCount; Except End;
 End;
 
-Procedure btn_ResetPerfClick(Sender : TObject);
-Begin
-    ResetPerfStats;
-    Try mmo_Perf.Lines.Clear; Except End;
-End;
-
 
 { Open the web dashboard. Writes a sentinel file the Python dashboard polls }
 { and calls webbrowser.open() on. Sync round-trip would freeze the UI,      }
@@ -793,11 +787,6 @@ Procedure btn_RenewEnter(Sender : TObject);
 Begin Try btn_Renew.Color := $003A3C42; Except End; End;
 Procedure btn_RenewLeave(Sender : TObject);
 Begin Try btn_Renew.Color := $002A2C32; Except End; End;
-
-Procedure btn_ResetPerfEnter(Sender : TObject);
-Begin Try btn_ResetPerf.Color := $003A3C42; Except End; End;
-Procedure btn_ResetPerfLeave(Sender : TObject);
-Begin Try btn_ResetPerf.Color := $002A2C32; Except End; End;
 
 Procedure btn_OpenWebEnter(Sender : TObject);
 Begin

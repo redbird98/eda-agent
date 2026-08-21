@@ -161,7 +161,6 @@ Var
     I : Integer;
 Begin
     FilePath := ExtractJsonValue(Params, 'file_path');
-    FilePath := StringReplace(FilePath, '\\', '\', -1);
 
     // Only switch focus to a document that is ALREADY loaded.
     // RunProcess('WorkspaceManager:OpenObject') would load it but strip
@@ -345,14 +344,28 @@ Begin
     { active PCB / SCH document. RunProcess never raises on missing        }
     { context so the prior implementation reported success even when       }
     { nothing actually ran.                                                 }
+    { REDIRECTED, NOT DELEGATED. These used to call PCB_RunDRC and         }
+    { Gen_RunERC directly. Neither can be called from here: Application.pas }
+    { is compiled third and those live in PCB.pas and Generic.pas, seventh  }
+    { and eighth. DelphiScript has no forward declarations, so the calls    }
+    { resolved to nothing and firing either menu path through this handler  }
+    { took the scripting engine down with an access violation rather than   }
+    { reporting anything. Naming the tool gives the caller the same result  }
+    { by a route that works.                                                }
     If MenuPath = 'Tools|Design Rule Check' Then
     Begin
-        Result := PCB_RunDRC('{}', RequestId);
+        Result := BuildErrorResponse(RequestId, 'USE_DEDICATED_TOOL',
+            'Call pcb_run_drc instead. It validates that a PCB is actually '
+            + 'open and returns the violation list, where this would run '
+            + 'the menu item and report success even when nothing ran.');
         Exit;
     End;
     If MenuPath = 'Tools|Electrical Rules Check' Then
     Begin
-        Result := Gen_RunERC('{}', RequestId);
+        Result := BuildErrorResponse(RequestId, 'USE_DEDICATED_TOOL',
+            'Call run_erc instead. It validates the document context and '
+            + 'returns the violation list, where this would report success '
+            + 'for a menu item that did nothing.');
         Exit;
     End;
 
@@ -375,21 +388,64 @@ Begin
         ProcessName := 'Client:ManagePluginsAndUpdates'
     Else
     Begin
-        { For unknown paths, try Client.SendMessage with the menu path }
-        Try
-            Client.SendMessage('Client:RunMenu', 'MenuID=' + MenuPath, 1024, Nil);
-            Result := BuildSuccessResponse(RequestId, '{"success":true,"menu_path":"' + EscapeJsonString(MenuPath) + '","method":"SendMessage"}');
-            Exit;
-        Except
-            Result := BuildErrorResponse(RequestId, 'MENU_FAILED', 'Could not execute menu: ' + MenuPath + '. Use a known path or specify a process name via run_process instead.');
-            Exit;
-        End;
+        { Unmapped path. The old fallback passed the whole pipe-separated
+          path to Client:RunMenu as a MenuID, which is not what a MenuID
+          is. It reported success, and MEASURED 2026-08-17,
+          Tools|Update From Libraries returned in 0.11s having opened
+          nothing.
+
+          So this branch is not merely unverifiable, it is known not to
+          work, and a success here is a claim contradicted by the
+          measurement in the line above it. It refuses instead. That
+          only became the better answer once app_click_menu existed:
+          it drives the real menu bar, so it reaches the arbitrary
+          paths this branch was invented to guess at, and says what
+          the menu actually contained when an item is missing. }
+        Result := BuildErrorResponse(RequestId, 'UNMAPPED_MENU_PATH',
+            'This path is not one the bridge maps to a process, and the '
+            + 'old fallback that guessed a MenuID from it was measured '
+            + 'opening nothing while reporting success. Call '
+            + 'app_click_menu with the same path: it drives the real '
+            + 'menu bar, so it works for any item and tells you what '
+            + 'the menu held when the item is not there.');
+        Exit;
     End;
 
     ResetParameters;
     RunProcess(ProcessName);
 
-    Result := BuildSuccessResponse(RequestId, '{"success":true,"menu_path":"' + EscapeJsonString(MenuPath) + '","process":"' + EscapeJsonString(ProcessName) + '"}');
+    { DISPATCHED, not "succeeded". RunProcess is fire and forget: it       }
+    { returns nothing, raises nothing, and silently ignores a process id   }
+    { it does not know. The note above the WorkspaceManager:Compare call   }
+    { in Project.pas records the same trap being hit before, when          }
+    { 'PCB:UpdatePCBFromProject' turned out not to be a real id and the    }
+    { handler no-opped while reporting success.                            }
+    {                                                                       }
+    { MEASURED 2026-08-17 against a live, idle, responsive Altium:          }
+    {   Tools|Preferences  -> success in 0.11s, NO dialog. That path is     }
+    {                         mapped to Client:RunConfigurationDialog and   }
+    {                         opens a MODAL, so a handler that really       }
+    {                         launched it would have BLOCKED until the      }
+    {                         dialog closed, exactly as project.update_pcb  }
+    {                         does. Returning immediately proves no modal   }
+    {                         was raised.                                   }
+    {   View|Zoom Fit      -> success in 0.09s, no observable effect.       }
+    {                                                                       }
+    { So this cannot honestly claim the command ran. It reports what it     }
+    { attempted and says the outcome is unverified, and names the tool      }
+    { that CAN confirm one, app_click_menu, which drives the real menu bar  }
+    { and fails loudly when an item is not there.                           }
+    Result := BuildSuccessResponse(RequestId,
+        '{"success":true'
+        + ',"dispatched":true'
+        + ',"outcome_verified":false'
+        + ',"menu_path":"' + EscapeJsonString(MenuPath) + '"'
+        + ',"process":"' + EscapeJsonString(ProcessName) + '"'
+        + ',"note":"The process was dispatched. RunProcess cannot report '
+        + 'failure and silently ignores unknown ids, so this is NOT '
+        + 'evidence the command ran. Several mapped ids were measured '
+        + 'doing nothing. To invoke a menu item and know it happened, '
+        + 'use app_click_menu, which drives the menu bar itself."}');
 End;
 
 {..............................................................................}

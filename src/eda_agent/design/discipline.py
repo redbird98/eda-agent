@@ -116,8 +116,8 @@ these rules before producing a plan; they bound your choices.
    F# fuses, FB# ferrites. Number from 1 per refdes-letter, no gaps.
 
 10. **Sheets default to one called "main".** Multiple sheets only when
-    the spec obviously needs sectioning (>30 parts, or distinct
-    functional blocks).
+    the spec needs sectioning (>30 parts, or distinct functional
+    blocks).
 
 11. **Zones are optional** placement guidance for the executor. Use them
     to cluster decoupling near its IC, separate analog from digital, etc.
@@ -599,7 +599,7 @@ buck, an LDO, an MCU board, an audio amp, or a sensor frontend.
   nets with `is_power` / `is_ground` set are exempt because the power
   port carries the connection.
 
-## PCB placement discipline (post-ECO, layout phase)
+## PCB placement discipline (once the netlist is on the board)
 
 Once parts are on the PCB, moving them is a separate concern from the
 DesignPlan executor above. The same agent often drives both phases.
@@ -653,13 +653,152 @@ Apply these rules whenever calling `pcb_move_components`.
 """
 
 
+#: What runs a plan, per backend. The discipline text was written for
+#: Altium and says so in its opening paragraph; on another backend that
+#: sentence names the wrong editor AND the wrong tool, which is the
+#: first thing a planner reads.
+_EXECUTOR = {
+    "altium": ("Altium Designer", "design_execute_plan"),
+    "easyeda": ("EasyEDA Pro", "easyeda_emit_plan then easyeda_run_plan"),
+    "kicad": ("KiCad", "design_execute_plan"),
+}
+
+#: The first line of the schematic-to-PCB block, used as an anchor. The
+#: block runs from here to the start of rule 8.
+_ECO_ANCHOR = "6. **ECO (schematic → PCB) is not headless.**"
+_RULE_8_ANCHOR = "8. **Connectivity review uses the netlist, never the render.**"
+
+#: Rules 6 and 7 explain Altium's Engineering Change Order: a dialog a
+#: human must click, and the trick for populating a board without it.
+#: Every sentence is about a mechanism only Altium has, so swapping the
+#: tool names produces the worst possible result: an EasyEDA tool name
+#: wrapped in Altium mechanics, which reads as authoritative and
+#: describes nothing that exists. The block is replaced wholesale
+#: instead.
+#:
+#: What replaces it says only what has been measured. Whether these
+#: editors raise a dialog for the transfer has NOT been checked on a
+#: live session, so the text says to treat it as attended rather than
+#: guessing either way; claiming it is headless would be inventing a
+#: capability, and claiming it is modal would be inventing a
+#: limitation.
+_SCH_TO_PCB_BLOCK = {
+    "easyeda": """6. **Schematic to PCB transfer is `easyeda_import_schematic_changes`.**
+   Whether the editor raises a dialog for it has not been verified on a
+   live session, so treat the call as attended: do not put it in an
+   unattended run until someone has watched it once and recorded what
+   happened.
+
+7. **Placing a footprint is not the same as connecting it.**
+   `easyeda_place_pcb_components` puts geometry on the board. Do not
+   assume a placed part is a connected one: confirm with
+   `easyeda_compare_schematic_pcb`, and read the remaining opens with
+   `easyeda_get_unconnected_pins` before treating the transfer as done.
+""",
+    "kicad": """6. **Schematic to PCB transfer is `kicad_generate_pcb`.**
+   Whether it prompts has not been verified here, so treat the call as
+   attended until it has been.
+
+7. **Placing a footprint is not the same as connecting it.** Confirm
+   the board matches the schematic with `kicad_compare_sch_pcb`, and
+   read the remaining opens with `kicad_get_unconnected_pins`, rather
+   than assuming a placed part is a connected one.
+""",
+}
+
+
 def get_discipline() -> str:
-    """Return the discipline doc + the embedded DesignPlan JSON schema."""
+    """Return the discipline doc + the embedded DesignPlan JSON schema.
+
+    The opening paragraph is rewritten for the active backend. Only
+    that paragraph: the rest of the text names Altium tools inside
+    sentences that sometimes EXPLAIN why a tool is Altium-only, and
+    substituting there would produce prose contradicting itself. That
+    wider split is task #58; this fixes the sentence a planner reads
+    first, which otherwise tells an EasyEDA user their plan is going
+    into Altium.
+    """
+    from ..core.backends import active_backend_name
+
     schema_obj = DesignPlan.model_json_schema()
     schema_blob = json.dumps(schema_obj, indent=2)
 
+    backend = active_backend_name()
+    editor, executor = _EXECUTOR.get(backend, _EXECUTOR["altium"])
+    text = _DISCIPLINE
+    if backend != "altium":
+        # Substitute the tool names too, not just the framing. This is
+        # safe HERE and was checked rather than assumed: the document
+        # contains no sentence explaining that a tool is unavailable
+        # ("not offered", "Altium-only", "does not exist" and four more
+        # phrasings all return nothing), so every reference is a plain
+        # "use X to do Y" instruction where the equivalent reads
+        # correctly. The same substitution over autonomy.py's prose,
+        # which DOES explain unavailability, would produce text
+        # contradicting itself; that is still task #58.
+        #
+        # Only backticked names are touched, and only where the
+        # replacement is a tool this backend registers.
+        from .autonomy import _EQUIVALENTS, _registered_tools
+
+        # Two spellings, because the document uses both and only one
+        # was being caught. A name written with its call signature,
+        # `lib_create_standard_footprint(name, family, ...)`, is inside
+        # a backtick span but is not followed by one, so matching on
+        # the closing backtick alone skipped every worked example: the
+        # three one-call generators in rule 9 all survived untouched
+        # while the prose around them was adapted. Matching the opening
+        # parenthesis as well reaches them. Both forms keep a delimiter
+        # after the name, which is what stops a shorter key rewriting
+        # the front of a longer name: `lib_add_footprint_pad` and
+        # `lib_add_footprint_pads` are both real and both mapped.
+        #
+        # Naming the shorter-name hazard with an INVENTED example here
+        # broke a guard that scans this file for tool-shaped names and
+        # correctly reported it as a reference to a tool that does not
+        # exist. A comment in this file is part of the surface that
+        # guard reads, so examples in it have to be real.
+        available = _registered_tools(backend)
+        for altium_tool, swap in _EQUIVALENTS.items():
+            if swap in available:
+                text = text.replace(f"`{altium_tool}`", f"`{swap}`")
+                text = text.replace(f"`{altium_tool}(", f"`{swap}(")
+
+        # Rules 6 and 7 are replaced wholesale rather than translated.
+        # Slicing between two anchors that contain no tool names means
+        # the substitution above cannot have moved them, whichever
+        # order these two steps run in.
+        block = _SCH_TO_PCB_BLOCK.get(backend)
+        start = text.find(_ECO_ANCHOR)
+        end = text.find(_RULE_8_ANCHOR)
+        if block and 0 <= start < end:
+            text = text[:start] + block + "\n" + text[end:]
+        elif block:
+            # The anchors moved. Saying so beats shipping the Altium ECO
+            # rules to a backend that has no ECO, which is what a silent
+            # miss would do.
+            text += (
+                "\n\n> NOTE: rules 6 and 7 describe Altium's Engineering "
+                "Change Order, which this backend does not have, and they "
+                "could not be replaced automatically. Ignore them here.\n")
+
+        target = "the executor can instantiate in Altium Designer."
+        replaced = text.replace(
+            target,
+            f"the executor can instantiate in {editor} (via {executor}).",
+            1)
+        if replaced == text:
+            # A silent no-op is the failure mode here: the planner
+            # would read the Altium framing believing it was corrected.
+            # Say so in the text rather than pretending.
+            replaced = text + (
+                f"\n\n> NOTE: this document was written for Altium and "
+                f"its opening could not be adapted. The active backend "
+                f"is {editor}; a plan is run there with {executor}.\n")
+        text = replaced
+
     return (
-        _DISCIPLINE
+        text
         + "\n## DesignPlan JSON schema\n\nYour DesignPlan must validate "
         + "against this schema:\n\n```json\n"
         + schema_blob

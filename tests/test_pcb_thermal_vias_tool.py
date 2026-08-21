@@ -29,7 +29,7 @@ def _tool(monkeypatch):
 async def test_solve_count_from_power_budget(monkeypatch):
     out = await _tool(monkeypatch)(0.3, 1.6, power_w=2.0, delta_t_c=20.0)
     assert out["ok"] is True
-    assert out["via_count"] == 17
+    assert out["via_count"] == 20
     assert out["array_k_per_w"] <= 10.0
     assert out["temp_rise_c"] <= 20.0
 
@@ -37,7 +37,7 @@ async def test_solve_count_from_power_budget(monkeypatch):
 @pytest.mark.asyncio
 async def test_solve_count_from_target(monkeypatch):
     out = await _tool(monkeypatch)(0.3, 1.6, target_k_per_w=10.0)
-    assert out["via_count"] == 17
+    assert out["via_count"] == 20
     assert out["temp_rise_c"] is None
 
 

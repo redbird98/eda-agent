@@ -76,7 +76,91 @@ def test_readonly_queries_are_not_marked_silent():
         assert M.interaction_of(name) == M.READONLY, name
 
 
+def test_no_export_tool_claims_to_be_read_only(tool_names):
+    """An export writes a file, and readonly says it does not.
+
+    This is not a labelling nicety. The live sweep calls every tool
+    classified readonly with its default arguments, so a misfiled
+    export runs against a real installation and writes, or overwrites,
+    a file nobody asked it to touch.
+
+    easyeda_export_bom_html landed exactly there: the deriver filed it
+    under "design" because it reads design.snapshot, design is an
+    offline category, and offline falls back to readonly. It defaults
+    to writing bom.html into the workspace. part_fetch fell into the
+    same hole earlier for the same reason, which is why the rule is
+    checked here rather than left to whoever adds the next one.
+    """
+    offenders = sorted(
+        n for n in tool_names
+        if "_export_" in n and M.interaction_of(n) == M.READONLY)
+    assert not offenders, (
+        f"these write a file but are classified readonly, so the sweep "
+        f"would call them on a live install: {offenders}")
+
+
 def test_catalog_is_sorted_by_category_then_name(tool_names):
     recs = M.catalog(tool_names)
     keys = [(r["category"], r["name"]) for r in recs]
     assert keys == sorted(keys)
+
+
+def test_no_easyeda_tool_falls_back_to_the_flat_category():
+    """`tool_catalog` filters BY category, so one bucket is no index.
+
+    Every EasyEDA tool shares a prefix, so the prefix table would file
+    all of them under "easyeda". That is not a cosmetic difference: a
+    client with a tool-count limit browses by category to find anything
+    at all, and Altium's surface is browsable in thirteen headings while
+    this would be one of 128.
+
+    The category is derived from the command each tool sends, so a new
+    tool files itself. This catches the two ways that fails: a tool that
+    sends nothing and has no override, and a command namespace nobody
+    has mapped yet. Both land back in the flat bucket, and nothing else
+    would notice.
+    """
+    from eda_agent.tools import register_backend
+    from eda_agent.tools.metadata import category_of
+    from eda_agent.tools.registry import ToolRegistry
+
+    registry = ToolRegistry()
+    register_backend(registry, "easyeda", "full")
+    names = [n for n in registry.names if n.startswith("easyeda_")]
+
+    assert len(names) > 100, (
+        f"only {len(names)} easyeda tools registered; this guard is "
+        f"checking almost nothing")
+
+    unfiled = sorted(n for n in names if category_of(n) == "easyeda")
+    assert not unfiled, (
+        "these EasyEDA tools have no subject category, so they are "
+        "reachable through tool_catalog only by listing everything. Map "
+        "their command namespace in _EASYEDA_NAMESPACE_CATEGORY, or add "
+        "an entry to _EASYEDA_CATEGORY_OVERRIDE:\n  " + "\n  ".join(unfiled))
+
+
+def test_the_easyeda_categories_are_the_same_headings_altium_uses():
+    """A backend with headings of its own is a second thing to learn.
+
+    "pcb" has to mean pcb on either backend, or a client written against
+    one cannot browse the other.
+    """
+    from eda_agent.tools import register_backend
+    from eda_agent.tools.metadata import category_of
+    from eda_agent.tools.registry import ToolRegistry
+
+    altium = ToolRegistry()
+    register_backend(altium, "altium", "full")
+    known = {category_of(n) for n in altium.names}
+
+    easyeda = ToolRegistry()
+    register_backend(easyeda, "easyeda", "full")
+    used = {category_of(n) for n in easyeda.names
+            if n.startswith("easyeda_")}
+
+    invented = sorted(used - known)
+    assert not invented, (
+        f"the EasyEDA tools use categories Altium does not: {invented}. "
+        f"Either map them onto an existing heading or add the heading to "
+        f"both backends deliberately.")

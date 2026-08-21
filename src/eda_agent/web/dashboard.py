@@ -1331,7 +1331,10 @@ def create_app(workspace_dir: Optional[Path] = None) -> Flask:
     _READ_ONLY_EXACT = frozenset({
         "proj_compile", "proj_force_recompile", "proj_run_erc", "pcb_run_drc",
         "proj_run_output", "proj_cross_probe", "app_attach", "app_detach",
-        "app_set_intent", "app_run_menu", "obj_highlight_net",
+        # app_run_menu is NOT here: it dispatches an arbitrary menu path,
+        # and "File|Save All" writes to disk. Treating it as read-only
+        # left the project cache stale after it changed something.
+        "app_set_intent", "obj_highlight_net",
         "obj_clear_highlights", "obj_deselect_all", "obj_select", "obj_zoom",
         "obj_switch_view", "obj_refresh_document",
     })

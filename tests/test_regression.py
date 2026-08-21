@@ -133,12 +133,15 @@ class TestLibGetComponentsReturnType:
 # Batch-file encoding
 # =========================================================================
 
-class TestBatchFileLatin1Encoding:
-    """Batch files passed to library.batch_set_params must be Latin-1,
-    because that's the encoding Altium's script engine reads."""
+class TestBatchFileAnsiEncoding:
+    """Batch files are written in the system ANSI codepage ("mbcs"),
+    because Altium's AssignFile/ReadLn hands the script engine bytes in
+    exactly that codepage. ASCII content, as here, is identical in every
+    candidate encoding; the non-ASCII cases live at the tool layer in
+    test_batch_file_encoding.py, where the encoding is actually chosen."""
 
-    def test_batch_set_params_accepts_latin1_file(self, altium_sim, e2e_bridge):
-        """library.batch_set_params must accept a latin-1-encoded batch file."""
+    def test_batch_set_params_accepts_ansi_file(self, altium_sim, e2e_bridge):
+        """library.batch_set_params must accept an ANSI-encoded batch file."""
         batch_path = altium_sim.workspace_dir / "batch_params.txt"
         with open(batch_path, "w", encoding="latin-1") as f:
             f.write("RES_0402|Partnumber|RC0402FR-0710KL\n")

@@ -74,6 +74,10 @@ _CATEGORY_BY_PREFIX = (
     ("tool_", "meta"),
     ("part_", "parts"),
     ("kicad_", "kicad"),
+    # Before "easy" would ever be reached by a shorter prefix. Order
+    # matters here: the first match wins, so a new prefix that is a
+    # prefix of an existing one has to go above it.
+    ("easyeda_", "easyeda"),
 )
 
 # Tools every one of whose bridge commands the in-repo Altium simulator
@@ -166,6 +170,12 @@ INTERACTION_OVERRIDES = {
     "proj_sync_schematic": MODAL,    # Update-Schematic dialog
     "pcb_add_teardrops": MODAL,      # Teardrop dialog
     "pcb_remove_teardrops": MODAL,   # Teardrop dialog
+    # The wizard and its ECO, which block the loop for as long as they
+    # are up. This tool is the one that clicks them rather than a human,
+    # but that does not make it silent: while it runs, the bridge cannot
+    # answer, and anyone filtering for operations that keep the session
+    # responsive must not be handed this one.
+    "app_update_from_libraries": MODAL,
     # Succeeds but leaves the job incomplete.
     "pcb_place_components": PARTIAL,  # geometry only; needs pcb_build_from_project for nets
     # "diff" homograph: _READONLY_SUBSTRINGS carries "_diff_" for
@@ -232,6 +242,158 @@ _CATEGORY_BY_NAME = {
 }
 
 
+#: The EasyEDA tools all share one prefix, so the prefix table would
+#: file every one of them under a single "easyeda" heading. That is not
+#: cosmetic: ``tool_catalog`` filters BY category, and it is the way a
+#: client with a tool-count limit finds anything at all. One bucket of
+#: 128 is the same as no index, while Altium's surface is browsable in
+#: thirteen.
+#:
+#: The subject is already encoded in the command each tool sends, so it
+#: is read from there rather than restated as a table that would drift.
+_EASYEDA_NAMESPACE_CATEGORY = {
+    "pcb": "pcb",
+    "sch": "schematic",
+    "lib": "library",
+    "proj": "project",
+    # Altium files its exports under project (proj_export_*), so the
+    # same heading keeps one habit across backends.
+    "export": "project",
+    "design": "design",
+    "system": "application",
+    "sys": "application",
+    "editor": "application",
+    "dmt": "application",
+}
+
+#: EasyEDA tools whose category the command namespace gets wrong, or
+#: which send no command at all. Each one is a judgement, so each is
+#: written down rather than inferred.
+#:
+#: Tools NAMED `easyeda_audit_*` are not listed here. They were, all of
+#: them, which made the name the real rule and the list a hand-kept copy
+#: of it: a new audit read as a pcb tool until someone remembered to add
+#: a line. The prefix is applied directly below instead.
+_EASYEDA_CATEGORY_OVERRIDE = {
+    # Cross-checks that do NOT carry the audit prefix. They read through
+    # pcb/sch commands, but what they are FOR is finding defects, which
+    # is what audit means here.
+    "easyeda_compare_schematic_pcb": "audit",
+    "easyeda_get_unconnected_pins": "audit",
+    "easyeda_get_unrouted_nets": "audit",
+    # Sends no command of its own: it runs every audit and ranks what
+    # they found, so the deriver has no literal command to read. Filed
+    # under audit, which is where someone looking for "run the checks"
+    # will look for it.
+    "easyeda_review_board": "audit",
+    # Same shape, opposite job: it fetches the design DATA a review is
+    # judged from rather than running the checks, so the deriver has no
+    # single command to read here either. Filed under design, because
+    # what it returns is the design, not a verdict on it.
+    "easyeda_review_snapshot": "design",
+    # Sends no command because there is nothing to send: EasyEDA has no
+    # project-delete API at all, so the tool exists only to explain that
+    # and point at what CAN be deleted. The deriver reads the command
+    # namespace, and a tool that never calls one has nothing to read.
+    # Still filed under project, since that is where someone looking for
+    # it will look, and finding the explanation is the point.
+    "easyeda_delete_project": "project",
+    # Reads design.snapshot and renders a page, so the deriver files it
+    # under design, and design is an OFFLINE category. Both halves of
+    # that are wrong here and the second one is dangerous: offline falls
+    # back to READONLY, and the sweep calls readonly tools with their
+    # defaults. This one defaults to writing bom.html into the
+    # workspace, so it would overwrite a file nobody asked it to touch
+    # while claiming to be read-only.
+    #
+    # Same trap part_fetch fell into, recorded a few lines up. Filed
+    # under project with the other exports, including its own Altium
+    # twin proj_export_bom_html, which is live_only and silent.
+    "easyeda_export_bom_html": "project",
+    # Sends no command of its own: it runs the fabrication exports in
+    # turn and judges whether the result is sendable, so the deriver
+    # has no single literal command to read. Filed with its Altium
+    # twin, proj_generate_fab_package.
+    "easyeda_generate_fab_package": "project",
+    # Searches both documents, so the command it sends is chosen at run
+    # time. The deriver below reads a LITERAL first argument, which a
+    # computed one does not offer, and a tool with no derivable category
+    # falls back to the flat one. Filed where the Altium equivalent
+    # lives, proj_find_component.
+    "easyeda_find_component": "project",
+    # Sends nothing directly: it delegates to create_symbol, add_pins
+    # and add_rectangle, whose categories disagree with each other
+    # anyway (library, then schematic twice). What it MAKES is a library
+    # part, which is the heading a reader would look under.
+    #
+    # Any tool built out of other tools lands here for the same reason,
+    # and the guard in tests/test_tool_metadata.py names the offender
+    # rather than letting it fall back quietly.
+    "easyeda_create_ic_symbol": "library",
+    "easyeda_create_passive_symbol": "library",
+    "easyeda_create_standard_footprint": "library",
+    # Bundles five reads through a helper that takes the command as an
+    # argument, so there is no literal for the deriver to see. Every
+    # one of those reads is a pcb command.
+    "easyeda_get_board_statistics": "pcb",
+    # Reads the local measurement record, never the editor, so there is
+    # no command to derive from. Filed under application beside the
+    # other record-reading tool, list_checkpoints.
+    "easyeda_get_measured_shapes": "application",
+    # Pure computation over a plan; they send nothing.
+    "easyeda_emit_plan": "design",
+    "easyeda_emit_connections": "design",
+    # Sends nothing directly either: it dispatches to whichever tools an
+    # emitted plan names, so there is no command namespace to read.
+    "easyeda_run_plan": "design",
+    # Reads the local checkpoint store and never asks the editor, so
+    # there is no command to derive from. Filed where the Altium
+    # equivalent lives, app_list_checkpoints.
+    "easyeda_list_checkpoints": "application",
+}
+
+_easyeda_categories: dict[str, str] | None = None
+
+
+def _easyeda_category(name: str) -> "str | None":
+    """Category for one EasyEDA tool, from the command it sends.
+
+    Built once, by reading the tool module, so adding a tool files it
+    correctly with no list to update. A tool that sends nothing and has
+    no override returns None and falls back to the prefix.
+    """
+    global _easyeda_categories
+    if _easyeda_categories is None:
+        import ast
+        import pathlib
+
+        _easyeda_categories = {}
+        source = (pathlib.Path(__file__).with_name("easyeda.py")
+                  .read_text(encoding="utf-8"))
+        for node in ast.walk(ast.parse(source)):
+            if not (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and node.name.startswith("easyeda_")):
+                continue
+            for inner in ast.walk(node):
+                if not (isinstance(inner, ast.Call)
+                        and getattr(inner.func, "id", "") == "_call"):
+                    continue
+                if not inner.args or not isinstance(
+                        inner.args[0], ast.Constant):
+                    continue
+                namespace = str(inner.args[0].value).split(".", 1)[0]
+                category = _EASYEDA_NAMESPACE_CATEGORY.get(namespace)
+                if category:
+                    _easyeda_categories.setdefault(node.name, category)
+                break
+    if name.startswith("easyeda_audit_"):
+        # Ahead of the namespace, which would file these under whatever
+        # they happen to read: an audit of pads is not a pad tool.
+        return "audit"
+    return (_EASYEDA_CATEGORY_OVERRIDE.get(name)
+            or _easyeda_categories.get(name))
+
+
 def category_of(name: str) -> str:
     """Tool category from an explicit name, else the prefix.
 
@@ -241,6 +403,10 @@ def category_of(name: str) -> str:
     explicit = _CATEGORY_BY_NAME.get(name)
     if explicit:
         return explicit
+    if name.startswith("easyeda_"):
+        derived = _easyeda_category(name)
+        if derived:
+            return derived
     for prefix, cat in _CATEGORY_BY_PREFIX:
         if name.startswith(prefix):
             return cat

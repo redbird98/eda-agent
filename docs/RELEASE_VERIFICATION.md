@@ -1,4 +1,4 @@
-# Release verification: 2026.08.05.1
+# Release verification: 2026.08.20.1
 
 Everything below is Pascal that FPC and the linter have checked and that
 **Altium's DelphiScript engine has never executed**. The two are not the
@@ -39,6 +39,63 @@ a body, and DelphiScript resolves a property against the object in hand,
 so another interface accepting it proves nothing here. Only
 `StandoffHeight` is entirely unexercised.
 
+### What this release adds, and why it is a different kind of risk
+
+The steps above check whether an identifier exists. This release
+carries almost none of that risk: every Altium property and method it
+touches is already written somewhere in shipped code, so an undeclared
+identifier is close to ruled out by construction. The cross-document
+hints touch no Altium API at all, being string handling only.
+
+`Proj_UpdatePCB` now reads `DM_FocusedDocument` and `DM_DocumentKind`
+before comparing, and refuses while a schematic is focused. Both
+identifiers are already used across several units, so neither is new
+exposure. Everything else is string handling: the reply fields that
+used to overstate what had been checked, and the removal of the
+`Client:RunMenu` fallback in `App_ExecuteMenu`, which now refuses an
+unmapped path instead of guessing a MenuID.
+
+One thing here cannot be settled by running the steps below. The
+refusal is deliberately absent from `Proj_UpdateSchematic`, the
+opposite direction, because the focus Altium wants there has never been
+measured. If you exercise that direction, record what it does.
+
+Footprint height is the same shape of risk, which is to say almost
+none. `Lib_SetFootprintHeight` writes `Footprint.Height`, which the
+height sweep beside it has always written, and reads the library
+through the same iterator thirty-odd other handlers use. What is new is
+a DIRECTION: the sweep can now lower a height to the model, not only
+raise it. Check it by setting a footprint absurdly tall by hand, running
+the sweep in `match` mode, and confirming it comes back down. Confirm
+the reverse too, that `raise` leaves it alone, because a mode that
+ignores its argument would pass the first test on its own.
+
+The case worth being careful about is a footprint with NO 3D body. It
+must not be written at all. Writing the 0 that an absent model implies
+does not relax placement-collision DRC, it disables it for that part,
+and doing that across every unmodelled footprint would switch the rule
+off wholesale while reporting a clean sweep. Run `match` on a library
+where at least one footprint has no model, and check that footprint's
+height is untouched and that its name comes back under
+`without_model_names`.
+
+What it adds instead is **logic that decides what to touch**, which
+fails silently rather than loudly:
+
+| Added | What could go wrong | How you would know |
+|---|---|---|
+| `GetPCBBoardForMutation` | An edit refuses when it should proceed, or proceeds when two boards are open and none focused | Open two PcbDocs, focus neither, run `pcb_delete_object`. It must refuse and name both |
+| Board mechanical layers | A paired kind is written on the layer rather than the pair, which silently does nothing | Set a paired kind, then read it back with `pcb_get_mech_layer_names` |
+| `lib_delete_footprint_primitives` | Removes from the wrong footprint, or takes pads with it | Probe the footprint first, delete one layer, probe again and compare pad count |
+| Library parameter delete | Matches zero and reports success | Delete a named parameter from a library symbol, then read the symbol's parameters |
+| Multi-part scope suffix | Returns part one's pins under another part's name | `lib_get_pin_list` on a multi-part symbol with `@2` and `@3`, and compare the counts |
+| Cross-document hints | The hint is appended to an error it does not apply to, or doubles up on a message that already names a tool | Focus a SchDoc and run `pcb_delete_object`. The refusal must name the PCB tool once, and read as one sentence |
+
+None of these can halt the polling loop the way an undeclared
+identifier does, so they are safe to run in any order and safe to run
+last. The cost of getting one wrong is a wrong answer, not a dead
+bridge.
+
 ---
 
 ## Gather these before you start
@@ -70,7 +127,7 @@ objects you can delete afterwards.
 app_ping
 ```
 
-Expect `altium_script_version` = `2026.08.05.1`, `version_match` =
+Expect `altium_script_version` = `2026.08.20.1`, `version_match` =
 `true`, and `mcp_server_version` = `0.5.0`.
 
 Those are two different versions and they fail differently.
@@ -389,6 +446,107 @@ rather than measured. An undeclared identifier faults where `Try/Except`
 cannot catch it and halts the polling loop, so a dead loop right after
 calling this tool points at that call. `Gen_GetErcViolations` is in
 `scripts/altium/Generic.pas`.
+
+---
+
+## 9. Reading a symbol's pins no longer faults (task #34)
+
+Needs a SchLib open.
+
+```
+lib_get_pin_list(component_name="<a symbol in that library>")
+```
+
+Expect a pin list. Then call it again with no `component_name` and a
+symbol selected in the editor, which must also work.
+
+**This one is a fix for an observed crash, not a new feature.** The
+deployed script answered
+`Undeclared identifier: SchIterator_Create` and stopped the polling
+loop. The identical call appears ten times in `Library.pas` and works
+everywhere else; the difference was where the component came from.
+Every working reader fetches it through `GetState_SchComponentByLibRef`
+or a SchLib iterator, while this one used the editor's
+`CurrentSchComponent` directly. DelphiScript narrows an interface at
+iterator-return, and a component obtained any other way does not carry
+the methods.
+
+So this step is really asking one question: does resolving through the
+library make the iterator available? If it does, the explanation holds.
+
+`component_name` is the other half of the fix. Reading a symbol's pins
+used to depend on, and disturb, whatever the editor had selected, which
+is why exporting one symbol could change which symbol later calls saw.
+
+**If it fails with the same identifier**, the narrowing explanation is
+wrong. Say so rather than trying variations: that reasoning came from
+comparing call sites, not from proving the mechanism, and the next step
+would be to instrument rather than guess again.
+
+**If it fails with a different identifier**, that is a second undeclared
+name in the same function and the message will say which.
+
+---
+
+## Step 9: the multi-part scope suffix actually switches part
+
+Reported in GH #11 against a 4-part TPS23881B, with numbers. The `@N`
+suffix parsed and reached the part-switch code, and the switch itself
+did nothing: `Component.CurrentPartID := N` takes the value, the
+editor's part spinner does not move, and the SchLib iterator follows
+the DISPLAYED part. So `obj_query` returned part 1's pins whatever the
+scope said, and with the spinner moved by hand the suffix was ignored
+outright. Nothing errored in either direction.
+
+The fix drives the editor's own command, `SCH:NextComponentPart`, and
+reads `GetState_CurrentSchComponentPartId` back after each step. Both
+appear in two independent scripts under `reference/`, so neither is a
+guess, but neither has run from this codebase.
+
+Open a multi-part SchLib and, with the editor showing part 1:
+
+    obj_query  scope lib_component:<NAME>@2  kind ePin
+    obj_query  scope lib_component:<NAME>@3  kind ePin
+
+Each must return that part's own pin count, and every returned pin must
+carry the matching `OwnerPartId`. Then the sharper test: switch the
+spinner to part 3 by hand and query `@1`. It must return part 1.
+
+**Two ways this fails quietly.** If
+`GetState_CurrentSchComponentPartId` is undeclared, the polling loop
+halts, which is loud. If it returns -1 instead, the stepping is skipped
+by design and the behaviour is exactly the bug being fixed: the same
+wrong answer, no error. So a run that still returns part 1 is not
+evidence the command is wrong, it is evidence the part id could not be
+read. Report which.
+
+The loop is bounded by `PartCount` because the command wraps at the
+last part. A target that can never be reached leaves the editor moved
+but not where asked, so check the spinner afterwards.
+
+---
+
+## 10. UNC paths survive the trip (task #44)
+
+This release deletes the vestigial second unescape
+(`StringReplace(x, '\\', '\', -1)`) from all 94 path-taking handlers.
+`ExtractJsonValue` already unescapes the JSON, so the second pass was a
+no-op for local paths and stripped one leading backslash from UNC
+paths: `\\server\share\lib.SchLib` arrived as
+`\server\share\lib.SchLib` and failed as a missing file.
+
+No new identifiers are involved, only deletions, so the compile risk
+is nil; what needs proving is the behaviour. From a machine with any
+reachable share (an admin share like `\\localhost\C$\...` works):
+
+    lib_get_components  library_path \\localhost\C$\<path-to-any>.SchLib
+
+Before the fix this fails with a file-not-found flavoured error;
+after it, the library opens and lists components. Local absolute paths
+must keep working unchanged, which step 9's queries already exercise.
+
+`tests/test_no_double_unescape.py` pins the site count at zero from
+now on, so this is a one-time verification, not a recurring step.
 
 ---
 

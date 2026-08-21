@@ -1589,6 +1589,17 @@ def register_generic_tools(mcp):
             "sync_design_item_id": "true" if sync_design_item_id else "false",
         }
         if designators:
+            # The list rides a comma-separated field; a designator
+            # containing a comma would arrive as two designators, and a
+            # fragment like 'R1' can match a real component. Refuse
+            # rather than strip: stripping can produce a different
+            # valid designator.
+            bad = [d for d in designators if "," in str(d)]
+            if bad:
+                return {"ok": False, "reason":
+                        f"designators {bad} contain a comma, which is "
+                        "the wire-format separator; fragments could "
+                        "match other components, so the call is refused"}
             params["designators"] = ",".join(designators)
         return await bridge.send_command_async(
             "generic.clear_sch_source_library", params
@@ -2056,10 +2067,26 @@ def register_generic_tools(mcp):
         """
         op_strs: list[str] = []
         sweeping: list[str] = []
-        for op in operations:
+        for i, op in enumerate(operations):
             scope = op.get("scope", "active_doc")
             obj_type = op.get("object_type", "")
             filt = op.get("filter", "")
+            # ';' separates fields within an op and '~~' separates ops,
+            # so either inside a value reshapes the batch. The dangerous
+            # shape: a '~~' inside filter fabricates a NEW op the
+            # confirm_delete_all guard below never saw, and an
+            # unfiltered delete rides in unconfirmed. Refuse rather than
+            # strip: stripping can produce a different valid value.
+            for field, value in (("scope", scope),
+                                 ("object_type", obj_type),
+                                 ("filter", filt)):
+                if ";" in str(value) or "~~" in str(value):
+                    return {"ok": False, "reason":
+                            f"operations[{i}].{field} contains ';' or "
+                            "'~~', which are the batch delimiters; the "
+                            "wire format cannot carry them, so this "
+                            "batch is refused rather than reshaped",
+                            "operations_processed": 0}
             if not obj_type:
                 continue
             if not str(filt).strip():

@@ -231,25 +231,52 @@ def find_unconnected_ic_pins_from_bom(bom: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+#: Designator prefix to component class. Kept identical to
+#: componentClass() in the dashboard's index.html, and
+#: tests/test_designator_classes_agree.py fails if the two drift.
+#:
+#: Matched on the WHOLE letter prefix, so LED is a semiconductor rather
+#: than an inductor and SW is a connector rather than a switch nobody
+#: classified.
+_DESIGNATOR_CLASSES = {
+    "U": "ic", "IC": "ic", "A": "ic",
+    "J": "connector", "P": "connector", "X": "connector",
+    "CN": "connector", "SW": "connector", "S": "connector",
+    "D": "semi", "LED": "semi", "Q": "semi", "T": "semi",
+    "VR": "semi", "TVS": "semi",
+    "R": "passive", "C": "passive", "L": "passive", "FB": "passive",
+    "RN": "passive", "Y": "passive", "XTAL": "passive",
+}
+
+
 def _component_class_from_designator(des: str) -> str:
     """Mirror of the dashboard's componentClass() heuristic so MCP-side
     audits classify the same way the Components tab chips do."""
     if not des:
         return "other"
-    prefix = des[0].upper()
-    if prefix == "C":
-        return "passive"
-    if prefix == "R":
-        return "passive"
-    if prefix == "L":
-        return "passive"
-    if prefix == "U":
-        return "ic"
-    if prefix == "Q" or prefix == "D":
-        return "semi"
-    if prefix == "J" or prefix == "P" or prefix == "X":
-        return "connector"
-    return "other"
+
+    # THE WHOLE LETTER PREFIX, matched against one table.
+    #
+    # This used to try a three-entry multi-letter map and then fall
+    # through to des[0], and the claim above that it mirrors the
+    # dashboard was simply false: measured across 25 ordinary
+    # designators the two disagreed on TEN, twice landing in opposite
+    # categories. CN1 was a connector on the dashboard and a passive
+    # here; XTAL1 was a passive there and a connector here. Y1, the
+    # standard crystal prefix, was "other".
+    #
+    # A first-letter fallback cannot be made to agree, because the
+    # prefixes that matter are multi-letter and their first letters
+    # belong to other classes: LED starts with L, TVS with T, SW with S.
+    # So the fallback is gone and the table below is the whole rule,
+    # kept identical to componentClass() in the dashboard. A guard
+    # parses that function and compares the two, because a comment
+    # asserting they match is what failed last time.
+    import re as _re
+
+    match = _re.match(r"[A-Za-z]+", des)
+    prefix = match.group(0).upper() if match else ""
+    return _DESIGNATOR_CLASSES.get(prefix, "other")
 
 
 def register_audit_tools(mcp):

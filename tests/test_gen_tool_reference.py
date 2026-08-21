@@ -31,9 +31,45 @@ def tool_names():
     return [t.name for t in asyncio.run(m.list_tools())]
 
 
+def _names_for(backend: str) -> list[str]:
+    from eda_agent.tools import register_backend
+    from eda_agent.tools.registry import ToolRegistry
+
+    registry = ToolRegistry()
+    register_backend(registry, backend, "full")
+    return list(registry.names)
+
+
+@pytest.fixture(scope="module")
+def names_by_backend():
+    return {backend: _names_for(backend)
+            for backend in ("altium", "kicad", "easyeda")}
+
+
 def test_reference_lists_every_tool(reference, tool_names):
     for name in tool_names:
         assert f"`{name}`" in reference, f"{name} missing from the reference"
+
+
+def test_reference_lists_every_tool_on_every_backend(
+        reference, names_by_backend):
+    """The check above reads the ALTIUM surface only.
+
+    Which made "lists every tool" true of a third of them. The hole is
+    reachable rather than theoretical: if the generator stopped
+    including a backend, the staleness check below would fail and tell
+    the reader to regenerate, regenerating would make the committed file
+    match again, and every test would pass with a whole backend missing
+    from the documentation.
+    """
+    for backend, names in sorted(names_by_backend.items()):
+        assert len(names) > 40, (
+            f"only {len(names)} tools registered for {backend}; this "
+            f"guard is checking almost nothing")
+        missing = sorted(n for n in names if f"`{n}`" not in reference)
+        assert not missing, (
+            f"the {backend} backend has {len(missing)} tools absent from "
+            f"the reference: {missing[:10]}")
 
 
 def test_reference_has_legend_and_header(reference):
@@ -82,3 +118,41 @@ def test_the_committed_reference_is_current(reference):
         "Regenerate it with `python scripts/gen_tool_reference.py` and "
         "include the result in the same commit as the change that moved "
         "it.")
+
+
+def test_the_maturity_legend_claims_no_verification_it_cannot_show():
+    """A label that measures a REQUIREMENT must not read as a RESULT.
+
+    `live_only` is computed from what a tool needs, not from anything
+    anyone ran. The legend said "verified only on live Altium", which
+    claimed verification for 182 EasyEDA tools nobody had ever run, and
+    named the wrong EDA while doing it. A live EasyEDA session had 64
+    of 65 reads fail, so the sentence was false in both halves.
+
+    The same overstatement was already corrected once for the simulator
+    label, which is why this is a guard and not just a fix.
+
+    What IS measured is recorded per command in
+    extensions/easyeda/verified.json by a real session, and reported
+    through verified_live rather than through a badge.
+    """
+    import re
+
+    legend = re.search(r"\*\*Maturity\*\*: (.+?)\n", gen.build_reference())
+    assert legend, "the maturity legend is gone; this guard checks nothing"
+    text = legend.group(1)
+
+    live = re.search(r"`live_only` = ([^;.]+)", text)
+    assert live, f"no live_only entry in the legend: {text}"
+    wording = live.group(1).lower()
+
+    assert "verified" not in wording, (
+        f"the legend says live_only means {wording!r}. Nothing measures "
+        f"that: the label is derived from what the tool needs. Say what "
+        f"it requires, and leave verification to verified_live.")
+
+    # Naming one EDA is wrong the moment the reference covers more than
+    # one, which it does.
+    assert "altium" not in wording, (
+        f"the legend says live_only means {wording!r}, but most of the "
+        f"tools carrying that label are not Altium tools")

@@ -13,7 +13,13 @@ Const
     // returns, mismatch means Altium is running a stale compiled script
     // (DelphiScript caches compiled units until the script project is
     // reopened or Altium is restarted).
-    SCRIPT_VERSION = '2026.08.05.1';
+    SCRIPT_VERSION = '2026.08.20.1';
+
+    // How far up the mechanical layers a pair tidy looks. Altium allows 1024,
+    // and checking every combination of those is a million probes for a stack
+    // that in practice stops in the low tens. The bound is reported back so a
+    // pair above it is known to have been skipped rather than judged clean.
+    MechScanLimit = 64;
 
     // Wire protocol version. Bumped whenever the request/response JSON shape
     // changes incompatibly. Python and Pascal must agree; mismatch returns
@@ -398,6 +404,97 @@ Begin
     Try Client.ShowDocument(ServerDoc); Except End;
     Try Result := PCBServer.GetCurrentPCBBoard; Except End;
     If Result = Nil Then Result := GetPCBBoardAnywhere;
+End;
+
+{..............................................................................}
+{ GetPCBBoardForMutation - the board an EDIT is allowed to touch.              }
+{                                                                              }
+{ GetPCBBoardAnywhere WANDERS, and that is correct for a read. When no PcbDoc  }
+{ is focused it walks every open project, opens the first board it finds,      }
+{ reads it, and restores the previous view so the focus change is invisible.   }
+{ For a query that is a convenience. For a DELETE it is a misfire: with a      }
+{ library focused and two boards open, obj_delete would remove primitives from }
+{ whichever board the walk reached first, and hide the fact that it had        }
+{ switched documents to do it.                                                 }
+{                                                                              }
+{ So an edit gets a board only when the target is UNAMBIGUOUS: a PcbDoc is     }
+{ focused, or exactly one is open anywhere. Two open and none focused is       }
+{ refused, and the refusal names them, because picking one is a guess the      }
+{ caller has to make rather than one this should make silently.                }
+{                                                                              }
+{ Why carries the reason when the Result is Nil.                               }
+{..............................................................................}
+
+Function GetPCBBoardForMutation(Var Why : String) : IPCB_Board;
+Var
+    Workspace : IWorkspace;
+    Project : IProject;
+    Doc : IDocument;
+    Path, Candidates, OnePath : String;
+    I, P, Found : Integer;
+Begin
+    Result := Nil;
+    Why := '';
+
+    Workspace := GetWorkspace;
+    If Workspace = Nil Then
+    Begin
+        Why := 'No workspace is open.';
+        Exit;
+    End;
+
+    { A focused PcbDoc is unambiguous, whatever else is open. }
+    Doc := Workspace.DM_FocusedDocument;
+    If (Doc <> Nil) And (UpperCase(Doc.DM_DocumentKind) = 'PCB') Then
+    Begin
+        Result := PCBServer.GetCurrentPCBBoard;
+        If Result <> Nil Then Exit;
+    End;
+
+    Found := 0;
+    Candidates := '';
+    OnePath := '';
+    For P := 0 To Workspace.DM_ProjectCount - 1 Do
+    Begin
+        Project := Workspace.DM_Projects(P);
+        If Project = Nil Then Continue;
+        For I := 0 To Project.DM_LogicalDocumentCount - 1 Do
+        Begin
+            Doc := Project.DM_LogicalDocuments(I);
+            If Doc = Nil Then Continue;
+            Path := '';
+            Try Path := Doc.DM_FullPath; Except End;
+            If Path = '' Then Continue;
+            If (UpperCase(Doc.DM_DocumentKind) <> 'PCB') And
+               (Pos('.PCBDOC', UpperCase(Path)) <= 0) Then Continue;
+            Found := Found + 1;
+            OnePath := Path;
+            If Candidates <> '' Then Candidates := Candidates + ', ';
+            Candidates := Candidates + Path;
+        End;
+    End;
+
+    If Found = 0 Then
+    Begin
+        Why := 'No PCB document is open, so there is nothing to edit.';
+        Exit;
+    End;
+
+    If Found > 1 Then
+    Begin
+        Why := 'This edits a board, and ' + IntToStr(Found)
+            + ' are open with none of them focused: ' + Candidates
+            + '. Refusing rather than picking one. Focus the board you '
+            + 'mean, or name it with board_path. A library being in front '
+            + 'does NOT make this edit apply to the library.';
+        Exit;
+    End;
+
+    { Exactly one board open. Opening it is safe because there is no other }
+    { one it could have meant.                                             }
+    Result := ResolvePCBBoard(OnePath);
+    If Result = Nil Then
+        Why := 'The only open board, ' + OnePath + ', could not be opened.';
 End;
 
 { Save every modified IServerDocument the workspace knows about, both     }
@@ -852,12 +949,57 @@ Begin
               Data + ',"error":null}';
 End;
 
+{..............................................................................}
+{ CROSS-DOCUMENT HINTS                                                        }
+{                                                                              }
+{ "No PCB library is active" is true and unhelpful. It says what is missing    }
+{ and not that the SAME operation exists for the other document kind, so the   }
+{ reasonable conclusion from it is that the capability is absent. That         }
+{ conclusion has been drawn and reported more than once, and each time the     }
+{ tool was there under the other namespace.                                    }
+{                                                                              }
+{ The split is the thing worth stating: lib_ acts on .PcbLib and .SchLib, pcb_ }
+{ on .PcbDoc, sch_ and obj_ on .SchDoc. Attached here rather than at the 277   }
+{ call sites so it cannot be right in some of them and stale in the rest.      }
+{..............................................................................}
+
+Function MessageNamesATool(Msg : String) : Boolean;
+Begin
+    Result := (Pos('pcb_', Msg) > 0) Or (Pos('lib_', Msg) > 0)
+           Or (Pos('sch_', Msg) > 0) Or (Pos('proj_', Msg) > 0)
+           Or (Pos('obj_', Msg) > 0) Or (Pos('app_', Msg) > 0)
+           Or (Pos('run_', Msg) > 0);
+End;
+
+Function CrossDocumentHint(ErrorCode : String) : String;
+Begin
+    Result := '';
+    If (ErrorCode = 'NO_PCBLIB') Then
+        Result := 'This is the LIBRARY tool and needs a .PcbLib. The same '
+                + 'operation on an open board is in the pcb_ namespace.'
+    Else If (ErrorCode = 'NO_SCHLIB') Then
+        Result := 'This is the LIBRARY tool and needs a .SchLib. For a '
+                + 'sheet, the sch_ and obj_ tools act on the open .SchDoc.'
+    Else If (ErrorCode = 'NO_PCB') Or (ErrorCode = 'NO_BOARD') Then
+        Result := 'This tool acts on an open .PcbDoc. To edit a footprint '
+                + 'inside a .PcbLib, use the lib_ tools instead.'
+    Else If (ErrorCode = 'NO_SCHDOC') Or (ErrorCode = 'NO_SCHEMATIC') Then
+        Result := 'This tool acts on an open .SchDoc sheet. To edit a '
+                + 'symbol inside a .SchLib, use the lib_ tools instead.';
+End;
+
 Function BuildErrorResponseDetailed(RequestId : String; ErrorCode : String;
                                     ErrorMsg : String; DetailsJson : String) : String;
 Var
-    EscMsg, Ch, HexDigits : String;
+    EscMsg, Ch, HexDigits, Hint : String;
     I, O : Integer;
 Begin
+    { Only when the handler has not already pointed somewhere itself: a }
+    { specific pointer beats the generic one and must not be doubled.   }
+    Hint := CrossDocumentHint(ErrorCode);
+    If (Hint <> '') And (Not MessageNamesATool(ErrorMsg)) Then
+        ErrorMsg := ErrorMsg + ' ' + Hint;
+
     // Inline escape (EscapeJsonString is not yet declared in build order).
     // Must also \u00XX-escape control and non-ASCII bytes: one raw byte
     // >127 in an error message (an accented file path, say) makes the whole

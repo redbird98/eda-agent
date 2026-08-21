@@ -35,6 +35,24 @@ ROOT = Path(__file__).resolve().parents[1]
 PASCAL_DIR = ROOT / "scripts" / "altium"
 PY_DIR = ROOT / "src" / "eda_agent"
 
+#: Modules whose command literals belong to a DIFFERENT bridge. This
+#: scan asks which Pascal handlers Python calls, and it accepts any
+#: dotted literal by its tail, so an EasyEDA command that happens to end
+#: in the same word makes an Altium handler look reachable. That is how
+#: "pcb.place_component", sent to EasyEDA, marked Altium's Pascal
+#: place_component as called by something. Named by path rather than by
+#: the word "easyeda" appearing in a filename, because lib_easyeda_import
+#: is an Altium tool and its literals do count.
+_OTHER_BRIDGE_MODULES = {
+    ("tools", "easyeda.py"),
+    ("bridge", "easyeda_bridge.py"),
+}
+
+
+def _is_other_bridge(path: Path) -> bool:
+    return (path.parent.name, path.name) in _OTHER_BRIDGE_MODULES
+
+
 #: Handlers with no Python sender today. Shrink this; do not grow it
 #: without recording why the handler cannot be reached.
 KNOWN_UNREACHABLE = {
@@ -95,6 +113,8 @@ def _sent_command_tails() -> set[str]:
     """
     tails: set[str] = set()
     for path in PY_DIR.rglob("*.py"):
+        if _is_other_bridge(path):
+            continue
         try:
             tree = ast.parse(path.read_text(encoding="utf-8",
                                             errors="replace"))
@@ -127,6 +147,8 @@ def _python_string_constants() -> set[str]:
     """
     out: set[str] = set()
     for path in PY_DIR.rglob("*.py"):
+        if _is_other_bridge(path):
+            continue
         try:
             tree = ast.parse(path.read_text(encoding="utf-8",
                                             errors="replace"))
@@ -304,6 +326,11 @@ def test_the_duplicate_action_names_are_still_duplicated():
         "get_components": ["Library.pas", "PCB.pas"],
         "get_nets": ["PCB.pas", "Project.pas"],
         "run_process": ["Application.pas", "Generic.pas"],
+        # The same operation on the two document kinds that have
+        # mechanical layers. A library and a board resolve their target
+        # differently, so they cannot share a handler, and the caller
+        # names the one it means through the category.
+        "set_mech_layers": ["Library.pas", "PCB.pas"],
         "save_all": ["Application.pas", "Project.pas"],
     }, (f"the set of action names dispatched in two modules changed: "
         f"{duplicated}")
@@ -318,6 +345,8 @@ def _sent_commands() -> dict[str, str]:
     """
     sent: dict[str, str] = {}
     for path in PY_DIR.rglob("*.py"):
+        if _is_other_bridge(path):
+            continue
         try:
             tree = ast.parse(path.read_text(encoding="utf-8",
                                             errors="replace"))

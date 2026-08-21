@@ -20,4 +20,6 @@ Then `/autodesign` is available in that project.
 
 **Other clients**: the same protocol is available without any skill file:
 call the `design_autonomy_guide` tool, or invoke the `autonomous_design` MCP
-prompt. See [../docs/AUTONOMOUS_DESIGN.md](../docs/AUTONOMOUS_DESIGN.md).
+prompt. Both need the design harness, which the Altium and EasyEDA backends
+register and the KiCad backend does not.
+See [../docs/AUTONOMOUS_DESIGN.md](../docs/AUTONOMOUS_DESIGN.md).

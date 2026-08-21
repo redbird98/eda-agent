@@ -63,9 +63,19 @@ def test_blocks_specs_cover_every_block():
 
 
 def test_every_block_in_readme_and_tool_docstring():
+    """The block list is stated in the README and in the docstrings.
+
+    It used to live in the README's tool table. That table was a
+    hand-curated copy of a generated file and was deleted, and the
+    generated reference truncates the docstring before the block names,
+    so the list would have disappeared from the documentation entirely.
+    It is small and genuinely useful, so it moved to the feature list
+    rather than being dropped.
+    """
     readme = _read("README.md")
     row = next(l for l in readme.splitlines()
-               if "design_add_circuit_block" in l and "Fold a canonical" in l)
+               if "design_add_circuit_block" in l
+               and "Canonical circuit blocks" in l)
     design_py = _read("src/eda_agent/tools/design.py")
     for block in _BLOCKS:
         assert f"`{block}`" in row, f"{block} missing from README block list"

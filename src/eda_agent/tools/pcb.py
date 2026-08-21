@@ -297,6 +297,20 @@ def _encode_bindings_param(bindings: list[dict[str, Any]]) -> str:
     return "~~".join(ops)
 
 
+#: The signature defaults of pcb_calc_termination's unit-suffixed
+#: arguments, kept here so the alias handling can tell "the caller did
+#: not pass this" from "the caller passed exactly the default". Without
+#: that distinction a conflicting alias cannot be detected at all, and
+#: the choice is between silently preferring one value and refusing
+#: every call that supplies a terse spelling.
+_TERMINATION_DEFAULTS = {
+    "z0_ohms": 50.0,
+    "dielectric_constant": 4.2,
+    "driver_impedance_ohms": 0.0,
+    "dielectric_height_mils": 0.0,
+}
+
+
 def register_pcb_tools(mcp):
     """Register PCB tools with the MCP server."""
 
@@ -624,6 +638,17 @@ def register_pcb_tools(mcp):
         """
         if not names:
             return {"ok": False, "reason": "names list is empty"}
+        # The list rides a pipe-separated field, and this tool MUTATES
+        # rule state: 'A|B' would arrive as two patterns, and with the
+        # trailing-* wildcard a fragment can plausibly match real rules.
+        # Refuse rather than strip: stripping produces a different
+        # valid pattern.
+        bad = [n for n in names if "|" in str(n)]
+        if bad:
+            return {"ok": False, "reason":
+                    f"rule names {bad} contain '|', which is the "
+                    "wire-format separator; fragments could match other "
+                    "rules, so the call is refused"}
         bridge = get_bridge()
         return await bridge.send_command_async(
             "pcb.set_rules_enabled",
@@ -759,6 +784,17 @@ def register_pcb_tools(mcp):
             desig = str(m.get("designator", "")).strip()
             if not desig:
                 continue
+            # Moves are comma-packed then pipe-joined, and this MOVES
+            # components: a designator carrying either delimiter would
+            # re-shape into a different move whose fragment can match a
+            # real part. Refuse rather than strip ('R|1' stripped is
+            # 'R1', a real component).
+            if "," in desig or "|" in desig:
+                return {"ok": False, "reason":
+                        f"designator {desig!r} contains ',' or '|', "
+                        "which are the wire-format separators; a "
+                        "fragment could move another component, so the "
+                        "call is refused", "moves_applied": 0}
             x_str = (
                 str(round(m["x"])) if "x" in m and m["x"] is not None else ""
             )
@@ -2360,22 +2396,50 @@ def register_pcb_tools(mcp):
             return {"ok": False,
                     "reason": "spacing_mils must be > 0 for differential geometries"}
 
-        t = copper_oz * 1.378
+        # The two forward formulas live in design/impedance_sizing.py,
+        # where trace_width_for_impedance already inverts them. They
+        # were inlined here as well, character for character, so the
+        # IPC-2141 constants were stated twice with nothing enforcing
+        # agreement: the same defect as the mils-to-mm factor in task
+        # #43, and the reason calc.py can now offer this tool without
+        # becoming a third copy.
+        from ..design.impedance_sizing import z0_microstrip, z0_stripline
+        from ..units import OZ_TO_MILS
+
         w = float(width_mils)
         h = float(dielectric_height_mils)
         er = float(dielectric_constant)
+        t = copper_oz * OZ_TO_MILS          # copper thickness, mils
 
         if geometry.startswith("microstrip"):
-            # IPC-2141 microstrip.
-            z0 = (87.0 / math.sqrt(er + 1.41)) * \
-                 math.log(5.98 * h / (0.8 * w + t))
+            z0 = z0_microstrip(w, h, er, copper_oz=copper_oz)
             er_eff = (er + 1.0) / 2.0
         else:
             # Symmetric stripline (trace centered between two planes,
             # h is the FULL dielectric thickness between planes).
-            z0 = (60.0 / math.sqrt(er)) * \
-                 math.log(4.0 * h / (0.67 * math.pi * (0.8 * w + t)))
+            z0 = z0_stripline(w, h, er, copper_oz=copper_oz)
             er_eff = er
+
+        # The same validity check the other copy of this tool applies.
+        #
+        # Shared rather than restated for the reason the constants above
+        # are shared: this tool exists twice, here for Altium and in
+        # tools/calc.py for KiCad and EasyEDA. Guarding only one of them
+        # left this one still returning a NEGATIVE impedance as a
+        # success, which is precisely the drift the comment above warns
+        # about.
+        from ..design.impedance_sizing import impedance_validity
+
+        checked = impedance_validity(z0, w, h, er)
+        if not checked["usable"]:
+            return {
+                "ok": False,
+                "reason": checked["reason"],
+                "geometry": geometry,
+                "width_mils": w,
+                "dielectric_height_mils": h,
+                "width_to_height_ratio": checked["width_to_height_ratio"],
+            }
 
         # Propagation delay: c0 = 11.8 in/ns in vacuum;
         # tpd = sqrt(er_eff) / c0 = sqrt(er_eff) * 1000 / 11.8 ps/in
@@ -2390,17 +2454,22 @@ def register_pcb_tools(mcp):
             "thickness_mils": round(t, 3),
             "z0_ohms": round(z0, 1),
             "propagation_delay_ps_per_inch": round(tpd, 2),
+            "width_to_height_ratio": checked["width_to_height_ratio"],
         }
+        if checked["outside_validity_range"]:
+            out["outside_validity_range"] = True
+            out["accuracy_warning"] = checked["warning"]
         if is_diff:
+            # Same reasoning as the Z0 formulas above: the coupling
+            # factor was stated here AND in impedance_sizing, where the
+            # inverse solver uses it. Two copies of a Wadell
+            # approximation is two chances to edit one of them.
+            from ..design.impedance_sizing import diff_coupling_factor
+
             s = float(spacing_mils)
             out["spacing_mils"] = s
-            if geometry == "microstrip_diff":
-                # Wadell microstrip diff approximation.
-                zdiff = 2.0 * z0 * (1.0 - 0.48 * math.exp(-0.96 * s / h))
-            else:
-                # Stripline diff approximation.
-                zdiff = 2.0 * z0 * (1.0 - 0.347 * math.exp(-2.9 * s / h))
-            out["zdiff_ohms"] = round(zdiff, 1)
+            out["zdiff_ohms"] = round(
+                2.0 * z0 * diff_coupling_factor(geometry, s, h), 1)
         return out
 
     @mcp.tool()
@@ -2468,15 +2537,19 @@ def register_pcb_tools(mcp):
     async def pcb_calc_termination(
         length_mils: float,
         rise_time_ns: float,
-        z0_ohms: float = 50.0,
-        dielectric_constant: float = 4.2,
+        z0_ohms: Optional[float] = None,
+        dielectric_constant: Optional[float] = None,
         geometry: str = "microstrip",
-        driver_impedance_ohms: float = 0.0,
+        driver_impedance_ohms: Optional[float] = None,
         vcc: float = 0.0,
         width_mils: float = 0.0,
-        dielectric_height_mils: float = 0.0,
+        dielectric_height_mils: Optional[float] = None,
         length_fraction: float = 1.0 / 6.0,
         multi_load: bool = False,
+        z0: Optional[float] = None,
+        er: Optional[float] = None,
+        driver_impedance: Optional[float] = None,
+        height_mils: Optional[float] = None,
     ) -> dict[str, Any]:
         """Decide if a net needs termination and size the resistor(s).
 
@@ -2515,6 +2588,49 @@ def register_pcb_tools(mcp):
         """
         from ..design.signal_integrity import recommend_termination
         try:
+            # The terse spellings are what the EasyEDA and KiCad builds
+            # take, so accepting both here means one call works on any
+            # backend.
+            #
+            # Preferring the alias unconditionally was the first attempt
+            # and it is wrong: a caller passing z0_ohms=75 and z0=50
+            # would have silently been given 50 and told it succeeded.
+            # These name ONE quantity, so disagreement is a mistake in
+            # the call and the only safe answer is to say so.
+            # The defaults moved OUT of the signature and into
+            # _TERMINATION_DEFAULTS so that "not supplied" is
+            # distinguishable from "supplied, and happens to equal the
+            # default". Detecting the conflict any other way needs a
+            # comparison against the default value, and that silently
+            # misses the case where the caller passed exactly it: the
+            # first version of this passed every test except the one
+            # that supplied dielectric_constant=4.2 alongside a
+            # disagreeing er, which is precisely the call a client
+            # written for another backend makes. Behaviour is unchanged
+            # for every caller; only the advertised default moves into
+            # the docstring.
+            resolved = {}
+            for terse, terse_name, verbose, verbose_name in (
+                    (z0, "z0", z0_ohms, "z0_ohms"),
+                    (er, "er", dielectric_constant, "dielectric_constant"),
+                    (driver_impedance, "driver_impedance",
+                     driver_impedance_ohms, "driver_impedance_ohms"),
+                    (height_mils, "height_mils",
+                     dielectric_height_mils, "dielectric_height_mils")):
+                if (terse is not None and verbose is not None
+                        and terse != verbose):
+                    return {"ok": False, "reason": (
+                        f"{verbose_name}={verbose} and {terse_name}="
+                        f"{terse} were both given and disagree; they are "
+                        f"the same quantity, so pass one")}
+                given = verbose if verbose is not None else terse
+                resolved[verbose_name] = (
+                    given if given is not None
+                    else _TERMINATION_DEFAULTS[verbose_name])
+            z0_ohms = resolved["z0_ohms"]
+            dielectric_constant = resolved["dielectric_constant"]
+            driver_impedance_ohms = resolved["driver_impedance_ohms"]
+            dielectric_height_mils = resolved["dielectric_height_mils"]
             adv = recommend_termination(
                 length_mils, rise_time_ns, z0_ohms, dielectric_constant,
                 geometry=geometry,
@@ -2620,6 +2736,20 @@ def register_pcb_tools(mcp):
             "t_pd_ps_per_mil": round(res["t_pd_ps_per_mil"], 4),
             "skew_budget_ps": res["skew_budget_ps"],
             "tolerance_mils": round(tol, 2) if tol is not None else None,
+            # Which geometry produced the delay. A stripline uses er
+            # directly and a microstrip an effective er near half of it,
+            # so the two differ by roughly a quarter on every length
+            # converted here. This defaults to stripline while
+            # pcb_calc_termination defaults to microstrip, and neither
+            # reply used to say so.
+            "geometry": geometry,
+            "dielectric_constant": dielectric_constant,
+            "geometry_note": (
+                f"delay computed for {geometry}. A stripline uses er "
+                f"directly and a microstrip uses an effective er near "
+                f"half of it, so the two differ by roughly a quarter. "
+                f"Pass geometry explicitly if this board is not "
+                f"{geometry}."),
         }
         rep = res.get("report")
         if rep is not None:
@@ -2650,7 +2780,8 @@ def register_pcb_tools(mcp):
     @mcp.tool()
     async def pcb_calc_thermal_vias(
         drill_mm: float,
-        board_thickness_mm: float,
+        board_thickness_mm: Optional[float] = None,
+        length_mm: Optional[float] = None,
         plating_um: float = 25.0,
         filled_copper: bool = False,
         k_cu: float = 385.0,
@@ -2674,7 +2805,9 @@ def register_pcb_tools(mcp):
 
         Args:
             drill_mm: Finished via drill diameter.
-            board_thickness_mm: Conduction length -- top layer to the heat-
+            board_thickness_mm: Conduction length -- top layer to the heat- The EasyEDA and KiCad builds
+                spell this ``length_mm``; either is accepted.
+            length_mm: Alias for ``board_thickness_mm``.
                 spreading plane (full thickness for a bottom plane).
             plating_um: Barrel plating thickness (default 25 = 1 oz).
             filled_copper: True for a copper-filled via (full-circle copper),
@@ -2691,7 +2824,11 @@ def register_pcb_tools(mcp):
             "target_k_per_w", "temp_rise_c", "barrel_area_mm2", "summary"}``.
         """
         from ..design.thermal_vias import assess_thermal_vias
+        from .calc import _either
         try:
+            board_thickness_mm = _either(
+                "board_thickness_mm", board_thickness_mm,
+                "length_mm", length_mm)
             rep = assess_thermal_vias(
                 drill_mm, plating_um, board_thickness_mm,
                 filled_copper=filled_copper, k_cu=k_cu,
@@ -2781,7 +2918,9 @@ def register_pcb_tools(mcp):
             return {"ok": False,
                     "reason": "layer must be 'external' or 'internal'"}
 
-        thickness_mils = copper_oz * 1.378
+        from ..units import OZ_TO_MILS
+
+        thickness_mils = copper_oz * OZ_TO_MILS
         k = 0.024 if layer_norm == "internal" else 0.048
         b = 0.44
         c = 0.725
@@ -2808,12 +2947,13 @@ def register_pcb_tools(mcp):
 
     @mcp.tool()
     async def pcb_calc_trace_width_for_current(
-        current_amps: float,
+        current_amps: Optional[float] = None,
         copper_oz: float = 1.0,
         delta_t_c: float = 10.0,
         layer: str = "external",
         margin: float = 0.2,
         length_mils: float = 0.0,
+        current_a: Optional[float] = None,
     ) -> dict[str, Any]:
         """Minimum track WIDTH to carry a target current (inverse IPC-2221).
 
@@ -2826,7 +2966,11 @@ def register_pcb_tools(mcp):
         external / ``0.024`` internal, ``h = copper_oz * 1.378 mils``.
 
         Args:
-            current_amps: Target current the track must carry.
+            current_amps: Target current the track must carry. The
+                EasyEDA and KiCad builds spell this ``current_a``;
+                either is accepted here, so one call works on any
+                backend.
+            current_a: Alias for ``current_amps``.
             copper_oz: Copper weight, oz/ft^2 (0.5 / 1.0 / 2.0 / 3.0).
             delta_t_c: Allowed temperature rise above ambient (10 degC is a
                 common conservative budget; 20-30 degC for tight boards).
@@ -2843,7 +2987,10 @@ def register_pcb_tools(mcp):
             or ``{"ok": False, "reason": ...}``.
         """
         from ..design.trace_sizing import trace_width_for_current
+        from .calc import _either
         try:
+            current_amps = _either("current_amps", current_amps,
+                                   "current_a", current_a)
             r = trace_width_for_current(
                 current_amps, copper_oz=copper_oz, delta_t_c=delta_t_c,
                 layer=layer, margin=margin, length_mils=length_mils)
@@ -3069,16 +3216,17 @@ def register_pcb_tools(mcp):
 
         # The designator list rides ONE field, so a designator containing
         # the separator would silently split into two names and treat a
-        # component nobody asked for.
-        #
-        # Blanks are filtered again AFTER stripping separators, not just
-        # before. A name that is only separator characters survives the
-        # earlier filter and reduces to "" here, which would put a stray
-        # "|" in the payload; the handler counts pipes to report
-        # components_requested, so a run that matched everything would
-        # look like it had missed one.
-        safe = [s for s in (payload_safe(n).replace("|", "") for n in names)
-                if s]
+        # component nobody asked for. This used to STRIP the separator,
+        # which prevents the split but can produce a DIFFERENT valid
+        # name: 'R|1' became 'R1', a real component, whose paste this
+        # tool then changes. Refusing tells the caller what happened.
+        bad = [n for n in names if "|" in payload_safe(n)]
+        if bad:
+            return {"ok": False, "reason":
+                    f"designators {bad} contain '|', which is the "
+                    "wire-format separator; stripping it could target a "
+                    "different real component, so the call is refused"}
+        safe = [s for s in (payload_safe(n) for n in names) if s]
         result = await bridge.send_command_async(
             "pcb.apply_dnp_paste_exclusion",
             {
@@ -3232,6 +3380,16 @@ def register_pcb_tools(mcp):
         bridge = get_bridge()
         params: dict[str, str] = {}
         if designator_filter:
+            # A '|' inside a designator splits into two filter entries,
+            # and a fragment like 'R1' matches a real component whose
+            # library pin this tool then clears. Refuse rather than
+            # strip.
+            bad = [d for d in designator_filter if "|" in str(d)]
+            if bad:
+                return {"ok": False, "reason":
+                        f"designators {bad} contain '|', which is the "
+                        "wire-format separator; fragments could match "
+                        "other components, so the call is refused"}
             params["designator_filter"] = "|".join(
                 str(d) for d in designator_filter)
         return await bridge.send_command_async(
@@ -3312,6 +3470,16 @@ def register_pcb_tools(mcp):
         """
         if not nets:
             return {"ok": False, "reason": "nets list is empty"}
+        # A '|' inside a net name splits into two names, and net-name
+        # fragments ('VCC', 'GND') are the most likely of all fragments
+        # to match real objects; this tool then flips their Moveable
+        # state. Refuse rather than strip.
+        bad = [n for n in nets if "|" in str(n)]
+        if bad:
+            return {"ok": False, "reason":
+                    f"net names {bad} contain '|', which is the "
+                    "wire-format separator; fragments could match other "
+                    "nets, so the call is refused"}
         bridge = get_bridge()
         return await bridge.send_command_async(
             "pcb.lock_net_routing",
@@ -4340,19 +4508,209 @@ def register_pcb_tools(mcp):
         )
 
     @mcp.tool()
-    async def pcb_get_mech_layer_names() -> dict[str, Any]:
-        """List the enabled mechanical layers on the active board with names.
+    async def pcb_get_mech_layer_names(
+        count_primitives: bool = True,
+    ) -> dict[str, Any]:
+        """Every enabled mechanical layer on the board, and what is on it.
 
-        Returns each displayed/enabled mechanical layer's internal layer id
-        and its custom name (e.g. "Assembly Top", "Courtyard"), so an agent
-        can target the right mechanical layer by name rather than guessing
-        "Mechanical 1".
+        WHAT IS ON THE LAYER IS THE PART YOU CANNOT GET ELSEWHERE. A
+        PcbLib header carries USEDBYPRIMS; a PcbDoc does not, so on a
+        board there is no way to ask which mechanical layers the
+        geometry occupies. This counts, because moving kinds around on a
+        board you cannot inspect is how an assembly drawing gets
+        orphaned. ``primitive_count`` of 0 is a layer that is genuinely
+        spare; -1 means the count was not attempted or failed.
+
+        ENABLED, NOT DISPLAYED. This used to list only layers the view
+        happened to be showing, so a layer carrying the whole fab
+        drawing was missing from the answer whenever it was toggled off.
+        Display is a view setting and is reported separately as
+        ``displayed``.
+
+        Each entry carries its ``kind``, which is what the layer is FOR
+        rather than what it is called. Read it before setting one: a
+        kind belongs to a single layer, so assigning it moves it, and a
+        PAIRED kind is held by the layer pair. ``kind_id`` of -1 means
+        this Altium build has no mechanical layer kinds.
+
+        Args:
+            count_primitives: Count what sits on each layer. The board is
+                walked once per enabled layer, so pass False when only
+                the names are wanted.
 
         Returns:
-            Dict with ``mechanical_layers`` (each: layer, name) and ``count``.
+            Dict with ``mechanical_layers`` (each: layer, number, name,
+            enabled, displayed, kind, kind_id, primitive_count),
+            ``count``, ``occupied_count``, ``counted_primitives`` and
+            ``scanned_to``, the layer number the scan stopped at.
         """
         bridge = get_bridge()
-        return await bridge.send_command_async("pcb.get_mech_layer_names", {})
+        return await bridge.send_command_async(
+            "pcb.get_mech_layer_names",
+            {"count_primitives": "true" if count_primitives else "false"})
+
+    @mcp.tool()
+    async def pcb_set_mech_layers(
+        layers: list[dict[str, Any]],
+        tidy_pairs: bool = False,
+        timeout: float = 180.0,
+    ) -> dict[str, Any]:
+        """Name, enable and kind the mechanical layers of the open BOARD.
+
+        The board counterpart of ``lib_set_mech_layers``, which takes a
+        library by path and refuses a PcbDoc. Without this a board could
+        only have kinds set, one layer per call through
+        ``pcb_set_mech_layer_kind``, and could not be renamed at all
+        above Mechanical16.
+
+        Every change is READ BACK. A layer whose name, enable or kind did
+        not take is reported against that layer rather than folded into
+        an overall pass.
+
+        PAIRED KINDS. Any kind ending in Top or Bottom is held by the
+        layer PAIR rather than by either layer, under a shorter name with
+        the side dropped, so "Courtyard Top" is stored as the pair kind
+        "Courtyard". Give both sides in the same call and the two are
+        joined and the pair given the kind. Single kinds such as "Fab
+        Notes" need no partner.
+
+        READ THE BOARD FIRST. ``pcb_get_mech_layer_names`` reports
+        ``primitive_count`` per layer, and a kind moved off a layer that
+        is carrying geometry orphans that geometry from whatever resolves
+        the layer by purpose.
+
+        Args:
+            layers: One dict per layer. Keys: ``layer`` (required, e.g.
+                "Mechanical13"), and any of ``name``, ``enabled``
+                (bool), ``kind`` (e.g. "Courtyard Top"). A layer with
+                none of the three is reported as nothing asked for.
+            tidy_pairs: Remove layer pairs no kind justifies. Off by
+                default, because it REMOVES pairs.
+            timeout: Seconds.
+
+        Returns:
+            Dict with ``document``, ``layers`` (each: layer, changed,
+            problem), ``changed``, ``failed``, ``kinds_displaced``,
+            ``pairs_removed``, ``pairs_tidied`` and ``pairs_scanned_to``.
+        """
+        from .library import _encode_layer_ops
+
+        encoded = _encode_layer_ops(layers)
+        if isinstance(encoded, dict):
+            return encoded
+
+        params: dict[str, Any] = {"layers": encoded}
+        if tidy_pairs:
+            params["tidy_pairs"] = "true"
+
+        bridge = get_bridge()
+        result = await bridge.send_command_async(
+            "pcb.set_mech_layers", params, timeout=timeout,
+        )
+        return result or {}
+
+    @mcp.tool()
+    async def pcb_get_layer_display() -> dict[str, Any]:
+        """Visibility and colour for every layer on the active board.
+
+        Covers signal, plane, mechanical, mask, paste, silk, keepout and
+        multilayer. Each entry gives the internal ``layer`` id, the user's
+        ``name`` for it, whether it is ``visible``, and its colour both as
+        Altium's raw integer and as ``color_hex``.
+
+        Read this before recolouring: Altium stores a colour as a Windows
+        TColor, which is byte-reversed against the #RRGGBB people write,
+        and getting that backwards produces a plausible wrong colour
+        rather than an error.
+
+        Returns:
+            Dict with ``layers``, ``count`` and ``visible_count``.
+        """
+        bridge = get_bridge()
+        return await bridge.send_command_async("pcb.get_layer_display", {})
+
+    @mcp.tool()
+    async def pcb_set_layer_color(layer: str, color: str) -> dict[str, Any]:
+        """Recolour one layer.
+
+        The colour is given as ``#RRGGBB``. Altium holds it internally as
+        a byte-reversed TColor, and that conversion happens on the Altium
+        side so no caller has to know about it.
+
+        The write is READ BACK before reporting success, because a
+        refused assignment raises nothing and would otherwise be reported
+        as having worked.
+
+        Colour is a display setting rather than a property of the board,
+        so it follows the installation rather than travelling with the
+        file.
+
+        Args:
+            layer: Layer name, e.g. "TopOverlay" or "Mechanical13".
+            color: Colour as "#RRGGBB".
+
+        Returns:
+            Dict with ``layer``, ``color`` and ``color_hex``.
+        """
+        bridge = get_bridge()
+        return await bridge.send_command_async(
+            "pcb.set_layer_color", {"layer": layer, "color": color}
+        )
+
+    @mcp.tool()
+    async def pcb_set_mech_layer_kind(
+        layer: str, kind: str, partner_layer: str = ""
+    ) -> dict[str, Any]:
+        """Set what a mechanical layer is FOR, not what it is called.
+
+        Renaming a layer "Courtyard Top" does not make it one. The KIND is
+        a separate property, and it is what every feature resolving a layer
+        by purpose reads: courtyard checking, assembly drawings, 3D body
+        placement and the IPC-4761 via treatments. A layer with no kind is
+        skipped by all of them, so the outlines get drawn and nothing uses
+        them.
+
+        A SINGLE kind such as "Fab Notes" belongs to ONE layer at a time.
+        If another layer already holds it, that layer is cleared first and
+        named in ``cleared_from``, because leaving two layers claiming one
+        purpose is a state the stack manager does not intend.
+
+        A PAIRED kind, meaning any name ending in Top or Bottom, works
+        differently: it is held by the layer PAIR rather than by either
+        layer, under a separate set of names with the side dropped. So
+        "Courtyard Top" is stored as the pair kind "Courtyard" across the
+        two layers, and ``partner_layer`` is required to say which layer
+        carries the other side. Writing it without a partner is refused
+        rather than silently doing nothing.
+
+        The write is READ BACK before reporting success. A refused
+        assignment raises nothing here, so trusting it would report success
+        for having changed nothing.
+
+        Args:
+            layer: Mechanical layer, e.g. "Mechanical13".
+            kind: A kind name such as "Courtyard Top", "Assembly Top",
+                "3D Body Top", "Component Outline Top", "Fab Notes" or
+                "Not Set". A bare number is also accepted, so a kind added
+                by a later Altium release can be set without waiting for
+                the name map to catch up. Read the current assignment with
+                ``pcb_get_mech_layer_names``.
+            partner_layer: The mechanical layer carrying the other side,
+                required when ``kind`` ends in Top or Bottom and ignored
+                otherwise. The two layers are joined as a pair, which is
+                what the kind is then written to.
+
+        Returns:
+            Dict with ``layer``, ``kind``, ``kind_id``, ``paired``,
+            ``pair_kind``, ``partner_layer`` and ``cleared_from``.
+        """
+        bridge = get_bridge()
+        params: dict[str, Any] = {"layer": layer, "kind": kind}
+        if partner_layer:
+            params["partner_layer"] = partner_layer
+        return await bridge.send_command_async(
+            "pcb.set_mech_layer_kind", params
+        )
 
     @mcp.tool()
     async def pcb_delete_object(

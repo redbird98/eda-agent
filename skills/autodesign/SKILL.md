@@ -1,6 +1,6 @@
 ---
 name: autodesign
-description: Drive an autonomous spec-to-board PCB design with the eda-agent MCP server (Altium). Apply when the user asks to design a board/schematic from a requirement, wants an end-to-end autonomous design run, or mentions the design harness, design_next_action, design sessions, or spec-to-board. Requires the eda-agent MCP server connected to a running Altium Designer.
+description: Drive an autonomous spec-to-board PCB design with the eda-agent MCP server (Altium Designer or EasyEDA Pro). Apply when the user asks to design a board/schematic from a requirement, wants an end-to-end autonomous design run, or mentions the design harness, design_next_action, design sessions, or spec-to-board. Requires the eda-agent MCP server connected to a running Altium Designer or EasyEDA Pro; the KiCad backend does not register the design harness.
 ---
 
 # Autonomous PCB design (eda-agent)
@@ -13,8 +13,11 @@ pipeline, because the integrity lives server-side.
 
 ## Before you start
 
-- Confirm the eda-agent MCP server is connected and Altium is running
-  (`app_get_status`). If not, tell the user how to start it; don't guess.
+- Confirm the editor is actually answering, with `app_ping` on Altium or
+  `easyeda_ping` on EasyEDA. Ping, not `app_get_status`: status reports
+  that the process exists and that something once called attach, and
+  neither of those proves the bridge replies. If it does not answer, tell
+  the user how to start it; don't guess.
 - Read `design_get_discipline` once: the hard rules and the DesignPlan
   schema. Or call `design_autonomy_guide` for the full protocol + the 13
   stages with their tools and exit gates.
@@ -23,8 +26,9 @@ pipeline, because the integrity lives server-side.
 
 1. `design_session_start(requirement)` opens the durable journal. Keep the
    returned `session_id`; every later call takes it.
-2. If a project is open or will be modified, `app_checkpoint("before
-   autonomous run")` so the whole run is revertible in one step.
+2. If a project is open or will be modified, checkpoint first so the whole
+   run is revertible in one step: `app_checkpoint("before autonomous run")`
+   on Altium, `easyeda_checkpoint` on EasyEDA.
 3. Loop: `design_next_action(session_id)` and act on `status`:
    - **proceed / retry**: do the stage using its `suggested_tools` until the
      `exit_gate` is met, then

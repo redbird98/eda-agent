@@ -872,7 +872,7 @@ def register_project_tools(mcp):
         rejects them with ``IMAGE_FORMAT_UNSUPPORTED`` and points the
         caller at ``proj_run_outjob`` instead.
 
-        Under the hood the PDF path uses Altium's
+        The PDF path uses Altium's
         ``WorkspaceManager:Print`` server process with ``FileName=`` - the
         same machinery as ``proj_export_pdf``. No OutJob is loaded. The print
         runs against ``Client.CurrentView`` (the focused document), so
@@ -1846,8 +1846,24 @@ def register_project_tools(mcp):
              The modal ECO dialog opens here.
           3. After the user accepts, recompiles and reports the after-state
              delta (how many components were added/removed).
-          4. If counts did not change, ``dialog_may_have_opened:true`` flags
-             that the dialog was dismissed without applying.
+
+        Refuses with WRONG_FOCUS while a schematic is the active document.
+        MEASURED 2026-08-17: Altium answers the compare with a modal reading
+        "Cannot compare a source document against its owner project" and
+        changes nothing, and this tool used to report success anyway, three
+        times in a row, with the error still on screen. Focus the PCB with
+        ``app_set_active_document`` first.
+
+        What the result does NOT tell you: whether the dialog was accepted.
+        ``dialog_outcome_verified`` is always false, because the handler
+        returns as soon as the modal closes and cannot see which button was
+        pressed. ``components_added_to_pcb`` and its siblings are recounts,
+        so they catch a change in component PRESENCE and miss everything
+        else an ECO carries: footprint swaps, designator and parameter
+        edits, net changes. Unchanged counts therefore mean "nothing was
+        added or removed", not "nothing happened". To learn what the dialog
+        actually says, call ``app_list_open_dialogs``, which reads Altium
+        over Win32 and so answers while the modal is blocking the bridge.
 
         For unattended board population without a schematic, use
         ``pcb_place_components`` instead (places geometry only: see its note
@@ -1855,8 +1871,9 @@ def register_project_tools(mcp):
 
         Returns:
             Dictionary with success, pcb_path, before/after mapping counts,
-            components_added_to_pcb, components_removed_from_pcb, in_sync,
-            and dialog_may_have_opened flag.
+            components_added_to_pcb, components_removed_from_pcb,
+            components_in_sync (component presence only, see above), and
+            dialog_outcome_verified.
         """
         bridge = get_bridge()
         result = await bridge.send_command_async("project.update_pcb", {})

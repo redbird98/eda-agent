@@ -143,6 +143,45 @@ def register_design_tools(mcp) -> None:
 
     # --- session journal (autonomy-harness durable state) ----------------
 
+    def _adapt_action(action: dict) -> dict:
+        """Translate one next_action reply for the active backend.
+
+        The state machine is deliberately pure: it knows the pipeline,
+        not which editor is attached, and adapting inside it would put
+        a backend import in the one module that is fully unit-testable
+        without one. So the translation happens here, at the boundary
+        where the reply is handed to a client.
+
+        This is the tool an autonomous run calls on every iteration, so
+        an Altium-only name in its reply is not a cosmetic wart: the
+        client does what the reply says. Before this, `goal`,
+        `guidance`, `exit_gate` and `suggested_tools` all reached an
+        EasyEDA client naming tools it does not register.
+        """
+        from ..core.backends import active_backend_name
+        from ..design.autonomy import (_EQUIVALENTS, _adapt_lines,
+                                       _registered_tools)
+
+        backend = active_backend_name()
+        if backend == "altium":
+            return action
+
+        available = _registered_tools(backend)
+        keys = [k for k in ("goal", "guidance", "exit_gate", "open_question")
+                if action.get(k)]
+        adapted = _adapt_lines([action[k] for k in keys], backend, available)
+        for key, line in zip(keys, adapted):
+            action[key] = line
+
+        # The tool list is names, not prose, so the "(not available on
+        # this backend)" annotation _adapt_lines adds to a sentence
+        # would corrupt it into an uncallable name.
+        action["suggested_tools"] = [
+            _EQUIVALENTS[t] if _EQUIVALENTS.get(t) in available else t
+            for t in action.get("suggested_tools") or []
+        ]
+        return action
+
     def _session_store():
         from ..config import get_config
         from ..design.session import SessionStore
@@ -276,7 +315,7 @@ def register_design_tools(mcp) -> None:
             return {"error": "no design sessions found; start one with design_session_start"}
         from ..design.state_machine import next_action as _next_action
         action = _next_action(journal.state())
-        return asdict(action)
+        return _adapt_action(asdict(action))
 
     @mcp.tool()
     async def design_autonomy_guide() -> dict[str, Any]:
@@ -2027,6 +2066,10 @@ def register_design_tools(mcp) -> None:
             Dict with ok, rows_appended, refdes_moved, refdes_unchanged,
             log_path, notes.
         """
+        if not project_path:
+            return {"ok": False, "reason":
+                    "project_path is required: the same .PrjPcb path "
+                    "passed to design_execute_plan"}
         return learn_from_layout(project_path)
 
     @mcp.tool()
