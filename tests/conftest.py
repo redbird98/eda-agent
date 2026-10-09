@@ -7,14 +7,44 @@ by reimplementing them in Python and testing against identical inputs/outputs.
 Any divergence between the Python reimplementation and expected behavior IS a bug.
 """
 
+import atexit
 import inspect
 import os
 import json
 import pytest
 import re
+import shutil
 import tempfile
+import threading
 from pathlib import Path
 from unittest.mock import patch
+
+
+# THE WHOLE SESSION GETS A SCRATCH IPC WORKSPACE, AND IT IS SET HERE, BEFORE
+# ANYTHING IMPORTS eda_agent. ``eda_agent.config`` builds its global config
+# at import time, so a fixture would run too late. The real workspace is
+# the directory a running Altium polls, and any code that reaches the
+# global bridge writes its requests there.
+#
+# That happened. On 2026-09-23 a parallel run sent four read-only queries
+# to a live session, from a test that passes bridge=None, in a worker
+# where no earlier test had happened to swap the global config for a temp
+# one. In a single-process run test_bridge.py does that swap first and
+# leaks it forward, which is the only reason it had never shown.
+#
+# Only the integration tests may reach the real workspace, and only when
+# opted in. A nested pytest keeps the workspace its parent test chose:
+# test_integration_tests_are_opt_in points one at an empty directory and
+# asserts it stays empty, which a fresh override would make vacuous. A
+# workspace inherited WITHOUT the marker is not trusted, because that is a
+# user's own EDA_AGENT_WORKSPACE, which is their real one.
+_NESTED_MARKER = "EDA_AGENT_TEST_WORKSPACE_ISOLATED"
+if os.environ.get("EDA_AGENT_INTEGRATION") != "1":
+    if os.environ.get(_NESTED_MARKER) != "1":
+        _scratch_ws = tempfile.mkdtemp(prefix="eda-agent-test-ws-")
+        os.environ["EDA_AGENT_WORKSPACE"] = _scratch_ws
+        os.environ[_NESTED_MARKER] = "1"
+        atexit.register(shutil.rmtree, _scratch_ws, True)
 
 from tests.altium_simulator import AltiumSimulator, SIM_PROTOCOL_VERSION
 
@@ -30,6 +60,68 @@ MUTATING_COMMAND_VERBS = (
     "move_", "clear_", "apply_", "rename_", "batch_", "update_", "install_",
     "link_", "import_", "save_", "fix_", "repair_", "convert_", "split_",
 )
+
+
+def install_bridge_fake(monkeypatch, tmp_path, fake):
+    """Fail-closed isolation for any test that bulk-invokes Altium tools.
+
+    Grew out of two incidents, two days apart, of a bulk sweep escaping
+    its fake and reaching the live workspace. Both escape routes are
+    closed here, and any new bulk-invoke test MUST use this rather than
+    patching on its own:
+
+    * the fake is installed on the ``_bridge`` SINGLETON GLOBAL, the one
+      point every import path resolves through. Patching the
+      ``get_bridge`` NAME is not enough: tool modules bind it at import
+      time, and design/ and core/ resolve their own late imports. The
+      name-level patches below are belt-and-braces, not the mechanism.
+      Constructing a real ``AltiumBridge`` becomes a loud failure.
+    * ``workspace_dir`` is redirected at a temp directory, because
+      several tools write output from the PYTHON side using whatever the
+      bridge returned, which is how one incident overwrote real files
+      with a perfectly faked bridge.
+
+    Returns the temp workspace path, so callers can assert against it.
+    """
+    import importlib
+    import pkgutil
+
+    from eda_agent import config as config_module
+    from eda_agent.bridge import altium_bridge as ab
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(exist_ok=True)
+    real_get_config = config_module.get_config
+
+    def sandboxed_config():
+        cfg = real_get_config()
+        object.__setattr__(cfg, "workspace_dir", workspace)
+        return cfg
+
+    monkeypatch.setattr(config_module, "get_config", sandboxed_config)
+
+    def tripwire(*_args, **_kwargs):
+        raise AssertionError(
+            "a REAL AltiumBridge was constructed or used; isolation leaked")
+
+    monkeypatch.setattr(ab.AltiumBridge, "__init__", tripwire)
+    monkeypatch.setattr(ab.AltiumBridge, "send_command", tripwire)
+    monkeypatch.setattr(ab.AltiumBridge, "send_command_async", tripwire)
+    monkeypatch.setattr(ab, "_bridge", fake, raising=False)
+    monkeypatch.setattr(ab, "get_bridge", lambda: fake)
+
+    import eda_agent.bridge as bridge_pkg
+    monkeypatch.setattr(bridge_pkg, "get_bridge", lambda: fake)
+
+    import eda_agent.tools as tools_pkg
+    for mod_info in pkgutil.iter_modules(tools_pkg.__path__):
+        mod = importlib.import_module(f"eda_agent.tools.{mod_info.name}")
+        if hasattr(mod, "get_bridge"):
+            monkeypatch.setattr(mod, "get_bridge", lambda: fake)
+        if hasattr(mod, "get_config"):
+            monkeypatch.setattr(mod, "get_config", sandboxed_config)
+
+    return workspace
 
 
 def wait_until(predicate, timeout: float = 5.0, interval: float = 0.005,
@@ -72,6 +164,16 @@ _LOCAL_ONLY_FIXTURES = ("main.SchDoc", "EDAAgentTest.PcbDoc",
 _AGGREGATOR_FIXTURES = ("EDAAgentTest.PrjPcb", "EDAAgentTest.PrjPcbStructure")
 
 
+def pytest_addoption(parser):
+    parser.addoption(
+        "--bare-machine", action="store_true", default=False,
+        help=("Simulate a machine with no EDA tool installed, which is "
+              "what CI is. Disables the auto-detection of local KiCad "
+              "and Altium libraries so a test that silently depends on "
+              "a developer's install fails HERE rather than after a "
+              "push."))
+
+
 def pytest_collection_modifyitems(config, items):
     """Skip tests that need a local-only binary fixture when it is absent."""
     missing = [n for n in _LOCAL_ONLY_FIXTURES if not (_FIXTURE_DIR / n).exists()]
@@ -111,6 +213,40 @@ def pytest_collection_modifyitems(config, items):
             needs = True
         if needs:
             item.add_marker(skip)
+
+
+@pytest.fixture(autouse=True)
+def _restore_active_backend():
+    """Undo any backend a test registers, so the next one starts clean.
+
+    ``register_backend`` records which backend it registered in a
+    process-global, and 16 test files call it without putting the
+    previous value back. Nothing sets ``EDA_AGENT_BACKEND`` in CI or
+    here, so ``active_backend_name`` falls back to that global and a
+    leak is not masked: a later test can resolve against a backend it
+    never asked for and still pass, or fail for a reason that has
+    nothing to do with the file it is in.
+
+    That is not hypothetical. A pair of files enumerating all three
+    backends flipped the active one to easyeda and broke
+    ``tests/design/test_autonomy.py``, which neither imports nor
+    mentions them.
+
+    THIS DOES NOT COVER MODULE-LEVEL REGISTRATION. Fixtures run per
+    test; a ``register_backend`` call at module scope runs during
+    COLLECTION, before any fixture exists, and poisons the whole
+    session whatever the order. Helpers that register at import time
+    must still restore for themselves, which is why the two in
+    ``test_tool_guide_names_real_tools`` and ``test_server_instructions``
+    do so rather than relying on this.
+    """
+    from eda_agent.core import backends
+
+    previous = backends._REGISTERED
+    try:
+        yield
+    finally:
+        backends._REGISTERED = previous
 
 
 @pytest.fixture
@@ -274,6 +410,36 @@ def _isolate_workspace_pointer(tmp_path_factory):
     os.environ.pop("EDA_AGENT_POINTER_FILE", None)
 
 
+#: The name AltiumBridge gives its keep-alive thread.
+KEEPALIVE_THREAD_NAME = "altium-keepalive"
+
+
+def _keepalive_threads() -> set[int]:
+    return {t.ident for t in threading.enumerate()
+            if t.name == KEEPALIVE_THREAD_NAME and t.is_alive()}
+
+
+@pytest.fixture(autouse=True)
+def _no_bridge_left_pinging():
+    """A test that starts a bridge's keep-alive must stop it.
+
+    Any ``send_command`` starts one, and it pings every 30 seconds for as
+    long as the process lives, against whichever workspace that bridge was
+    built with. Ten tests left one running. Nine pinged temp directories
+    that no longer existed; the tenth was a bridge resolved from the
+    global config, and its presence is how the live contact recorded
+    above was found. Autouse, so it tears down after every fixture the
+    test asked for, including the ones that detach.
+    """
+    before = _keepalive_threads()
+    yield
+    leaked = _keepalive_threads() - before
+    assert not leaked, (
+        f"this test left {len(leaked)} bridge keep-alive thread(s) running. "
+        f"Call bridge.detach() in teardown, or pass the code under test a "
+        f"fake instead of letting it resolve the global bridge")
+
+
 def pytest_configure(config):
     config.addinivalue_line(
         "markers",
@@ -286,6 +452,25 @@ def pytest_configure(config):
         "installed on this machine. Skipped when KiCad is absent, so CI "
         "stays green without it; the value is checking a converter "
         "against a real corpus instead of only hand-written fixtures.")
+
+    # Simulate a machine with no EDA tool installed, which is what CI
+    # is. ONLY the auto-detection roots are emptied: environment
+    # overrides keep working, so a test pointing a provider at its own
+    # tmp_path behaves normally and only dependence on a real install
+    # breaks. Replacing the directory lookup outright would also defeat
+    # tests that build their own libraries, turning artefacts into
+    # failures and burying the real ones.
+    #
+    # Three CI runs failed in a row on tests that passed locally,
+    # because this state could not be reproduced without pushing. Run
+    # `pytest --bare-machine` before pushing anything that touches a
+    # local provider.
+    if config.getoption("--bare-machine"):
+        from eda_agent.libimport.providers import altium_local, kicad_local
+
+        kicad_local._WINDOWS_ROOTS = ()
+        kicad_local._POSIX_ROOTS = ()
+        altium_local._DEFAULT_ROOTS = ()
 
 
 @pytest.fixture(autouse=True)
@@ -438,3 +623,33 @@ def pytest_sessionfinish(session, exitstatus):
     import gc
 
     gc.collect()
+
+
+@pytest.fixture(autouse=True)
+def _no_leaked_easyeda_server():
+    """Stop the global EasyEDA bridge if a test left it listening.
+
+    Tools start it on first use and nothing in the library stops it,
+    which is right for the server process and wrong here: the socket
+    outlives the test, so the next test that starts its own bridge gets
+    the NEXT port in the discovery range while the extension harness
+    scans and finds the stale one first. It presents as the harness
+    timing out with no error on either side.
+
+    Function-scoped rather than session-scoped for that reason: the
+    collision is between tests, so waiting until the session ends fixes
+    nothing. A test that wants its own bridge still manages it itself;
+    this only reclaims the module-global one.
+    """
+    yield
+
+    from eda_agent.bridge import easyeda_bridge
+
+    leaked = getattr(easyeda_bridge, "_BRIDGE", None)
+    if leaked is not None:
+        try:
+            if leaked.status()["listening"]:
+                leaked.stop()
+        except Exception:
+            pass
+        easyeda_bridge._BRIDGE = None

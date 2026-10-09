@@ -96,7 +96,7 @@ class NeatnessReport:
         dimensions with a CLEAR target (not the placement-spread ones, which
         are board-dependent and have no single threshold). Each returned string
         names the dimension and its value so a caller can prioritise. An empty
-        list means nothing obviously wrong on the checked dimensions.
+        list means nothing wrong on the checked dimensions.
         """
         out: list[tuple[int, str]] = []
         # (severity, message); higher severity first.

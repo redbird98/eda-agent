@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """Unit tests for the perceptual placement metrics.
 
 These cover the geometry the metrics read off a placement -- cluster spread,

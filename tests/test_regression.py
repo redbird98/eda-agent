@@ -133,12 +133,15 @@ class TestLibGetComponentsReturnType:
 # Batch-file encoding
 # =========================================================================
 
-class TestBatchFileLatin1Encoding:
-    """Batch files passed to library.batch_set_params must be Latin-1,
-    because that's the encoding Altium's script engine reads."""
+class TestBatchFileAnsiEncoding:
+    """Batch files are written in the system ANSI codepage ("mbcs"),
+    because Altium's AssignFile/ReadLn hands the script engine bytes in
+    exactly that codepage. ASCII content, as here, is identical in every
+    candidate encoding; the non-ASCII cases live at the tool layer in
+    test_batch_file_encoding.py, where the encoding is actually chosen."""
 
-    def test_batch_set_params_accepts_latin1_file(self, altium_sim, e2e_bridge):
-        """library.batch_set_params must accept a latin-1-encoded batch file."""
+    def test_batch_set_params_accepts_ansi_file(self, altium_sim, e2e_bridge):
+        """library.batch_set_params must accept an ANSI-encoded batch file."""
         batch_path = altium_sim.workspace_dir / "batch_params.txt"
         with open(batch_path, "w", encoding="latin-1") as f:
             f.write("RES_0402|Partnumber|RC0402FR-0710KL\n")
@@ -334,7 +337,14 @@ class TestGenericRunProcessKeys:
             {"process": "Sch:Compile", "params": "ObjectKind=Document"},
             timeout=5.0,
         )
-        assert result["success"] is True
+        # DISPATCHED, not success. Altium accepts a process name it does
+        # not know without any error, so the handler cannot tell a command
+        # that ran from one that was ignored. MEASURED on AD26:
+        # obj_run_process("Sch:ThisProcessDoesNotExist") came back
+        # success:true. The key is named for what is actually known, and
+        # this assertion is what stops it drifting back.
+        assert result["dispatched"] is True
+        assert "success" not in result
         assert result["process"] == "Sch:Compile"
 
     def test_run_process_missing_process_key_errors(self, altium_sim, e2e_bridge):
@@ -648,18 +658,26 @@ class TestIpcWriteAtomicityIsDeliberatelyAsymmetric:
         implementation ever writes the final path directly, no rename
         happens and this fails.
         """
+        import os as _os
         from pathlib import Path as _Path
 
         from eda_agent.bridge.altium_bridge import CommandRequest
 
+        # Spy on os.replace, NOT Path.replace. Both spellings appear in
+        # this codebase and every atomic write now funnels through
+        # eda_agent.atomicfile, which calls os.replace; pathlib's
+        # Path.replace calls the same function, so this sees either.
+        # Patching Path.replace saw only one of them, and when the
+        # bridge moved behind the retry helper this test failed while
+        # the behaviour it guards was unchanged.
         renames: list[tuple[str, str]] = []
-        real_replace = _Path.replace
+        real_replace = _os.replace
 
-        def spy(self, target):
-            renames.append((self.name, _Path(target).name))
-            return real_replace(self, target)
+        def spy(src, target):
+            renames.append((_Path(src).name, _Path(target).name))
+            return real_replace(src, target)
 
-        monkeypatch.setattr(_Path, "replace", spy)
+        monkeypatch.setattr(_os, "replace", spy)
 
         bridge = _bare_bridge_for(tmp_path)
         request = CommandRequest(command="application.ping", params={})

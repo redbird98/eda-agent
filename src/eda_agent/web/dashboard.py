@@ -19,6 +19,9 @@ The dashboard tails ``workspace/activity.log`` and surfaces:
 - A per-command performance table you can sort by N / avg / max.
 - A free-text filter that scopes both feed and perf table.
 - Health probes (script version, version match, IPC liveness).
+- A Layout tab that draws the board as the in-house layout engines
+  change it, with the decisions logged before each step
+  (``design/live.py`` publishes, ``/api/live`` serves).
 
 Server-Sent Events stream from ``/events`` give the browser tab a
 sub-second view of every command without polling. Static assets are
@@ -39,6 +42,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Optional
+from eda_agent.atomicfile import replace_with_retry
 
 from flask import Flask, Response, jsonify, send_from_directory, stream_with_context
 
@@ -676,6 +680,110 @@ def _hot_reload_render_modules() -> None:
                 logger.warning("hot-reload of %s failed: %s", full, e)
 
 
+#: Hostnames a browser may legitimately use to reach a loopback bind.
+#: Anything else in the Host header means the request arrived through a
+#: name that resolves here without belonging here, which is what DNS
+#: rebinding is.
+_LOOPBACK_NAMES = frozenset({"127.0.0.1", "localhost", "::1", "[::1]", ""})
+
+#: Escape hatch for a deliberate non-loopback bind. Comma separated
+#: hostnames, no ports. Sharing the dashboard is already gated behind an
+#: explicit --host and a printed warning; this lets that case name the
+#: address it will actually be reached by.
+_ALLOWED_HOSTS_ENV = "EDA_AGENT_DASHBOARD_ALLOWED_HOSTS"
+
+
+def _hostname_of(value: str) -> str:
+    """The host part of a Host or Origin header, lowercased, no port.
+
+    Handles the bracketed IPv6 form, where the colons inside the
+    brackets are not a port separator.
+    """
+    value = (value or "").strip().lower()
+    if value.startswith("http://"):
+        value = value[7:]
+    elif value.startswith("https://"):
+        value = value[8:]
+    value = value.split("/")[0]
+    if value.startswith("["):
+        end = value.find("]")
+        if end != -1:
+            return value[:end + 1]
+        return value
+    return value.split(":")[0]
+
+
+def _allowed_hostnames() -> frozenset:
+    import os
+
+    extra = os.environ.get(_ALLOWED_HOSTS_ENV, "")
+    names = {n.strip().lower() for n in extra.split(",") if n.strip()}
+    return frozenset(_LOOPBACK_NAMES | names)
+
+
+def install_origin_guard(app) -> None:
+    """Refuse requests that did not come from a loopback name.
+
+    WHY THIS EXISTS. Every endpoint here is unauthenticated, and
+    /api/tool/run invokes any registered tool with caller-supplied
+    arguments. On this project that means reading and mutating client
+    designs under NDA, so the only thing standing between a web page and
+    the board is that the server listens on loopback.
+
+    Loopback is not the protection it looks like. Ordinary CSRF is
+    already blocked, because the endpoint requires a JSON content type
+    and that forces a preflight the server never approves. DNS
+    REBINDING is not: an attacker page served from a domain whose DNS
+    then answers 127.0.0.1 is same-origin as far as the browser is
+    concerned, so no preflight applies and the request arrives looking
+    entirely ordinary.
+
+    MEASURED before this guard: a JSON POST carrying
+    Host: evil.example.com was accepted and ran a command against a live
+    Altium, and GET /api/tools listed all 412 tools to the same caller.
+
+    What separates the two cases is the Host header. A browser sends the
+    name the user typed, so a rebound request carries the attacker's
+    domain while a genuine one carries a loopback name. Origin is
+    checked too when present, which costs nothing and catches a plain
+    cross-site attempt earlier.
+    """
+    from flask import jsonify, request
+
+    @app.before_request
+    def _reject_foreign_origin():
+        allowed = _allowed_hostnames()
+
+        host = _hostname_of(request.headers.get("Host", ""))
+        if host not in allowed:
+            return jsonify({
+                "ok": False,
+                "reason": (
+                    f"refusing a request addressed to {host!r}. This "
+                    f"dashboard is unauthenticated and reachable only as "
+                    f"localhost, because every endpoint can drive the "
+                    f"EDA application. A Host that is not a loopback name "
+                    f"is how a DNS rebinding attack arrives. Set "
+                    f"{_ALLOWED_HOSTS_ENV} if you are deliberately serving "
+                    f"this to another machine."),
+            }), 403
+
+        # Origin is absent on same-origin GETs and on direct navigation,
+        # so only a PRESENT and foreign one is a refusal. Treating a
+        # missing Origin as hostile would break the page itself.
+        origin = request.headers.get("Origin")
+        if origin and _hostname_of(origin) not in allowed:
+            return jsonify({
+                "ok": False,
+                "reason": (
+                    f"refusing a cross-origin request from {origin!r}. "
+                    f"This dashboard has no authentication and its "
+                    f"endpoints drive the EDA application."),
+            }), 403
+
+        return None
+
+
 def create_app(workspace_dir: Optional[Path] = None) -> Flask:
     if workspace_dir is None:
         workspace_dir = get_config().workspace_dir
@@ -725,8 +833,7 @@ def create_app(workspace_dir: Optional[Path] = None) -> Flask:
                 # os.replace raises -> we skip this tick and refresh on the
                 # next one (staleness window is well above 3s).
                 heartbeat_tmp.write_text(str(ts), encoding="utf-8")
-                import os as _os
-                _os.replace(heartbeat_tmp, heartbeat_path)
+                replace_with_retry(heartbeat_tmp, heartbeat_path)
             except OSError:
                 pass
             heartbeat_stop.wait(3.0)
@@ -742,6 +849,8 @@ def create_app(workspace_dir: Optional[Path] = None) -> Flask:
     _atexit.register(_remove_heartbeat)
 
     app = Flask("eda-agent-dashboard")
+    # Before any route, and before anything reads the body.
+    install_origin_guard(app)
     app.config["WORKSPACE_DIR"] = str(workspace_dir)
     app.config["TAILER"] = tailer
 
@@ -1331,7 +1440,10 @@ def create_app(workspace_dir: Optional[Path] = None) -> Flask:
     _READ_ONLY_EXACT = frozenset({
         "proj_compile", "proj_force_recompile", "proj_run_erc", "pcb_run_drc",
         "proj_run_output", "proj_cross_probe", "app_attach", "app_detach",
-        "app_set_intent", "app_run_menu", "obj_highlight_net",
+        # app_run_menu is NOT here: it dispatches an arbitrary menu path,
+        # and "File|Save All" writes to disk. Treating it as read-only
+        # left the project cache stale after it changed something.
+        "app_set_intent", "obj_highlight_net",
         "obj_clear_highlights", "obj_deselect_all", "obj_select", "obj_zoom",
         "obj_switch_view", "obj_refresh_document",
     })
@@ -1759,6 +1871,69 @@ def create_app(workspace_dir: Optional[Path] = None) -> Flask:
             "payload_prefix": entry.payload_prefix,
             "trace": trace_lines,
         })
+
+    # -- Layout tab: the live layout view (design/live.py) -------------------
+    # The engines publish into workspace/live; these endpoints only read it,
+    # so a standalone dashboard shows what the MCP server's jobs publish.
+    live_root = workspace_dir / "live"
+    live_cache: dict[str, Any] = {}
+
+    def _live_doc() -> Optional[dict]:
+        """The latest board.json, parsed once per change on disk.
+
+        A read that fails while the file is being replaced serves the last
+        good document rather than blanking the view for a poll.
+        """
+        from ..design import live
+        try:
+            st = (live_root / live.BOARD_FILE).stat()
+        except OSError:
+            return None
+        stamp = (st.st_mtime_ns, st.st_size)
+        if live_cache.get("stamp") != stamp:
+            doc = live.read_board(live_root)
+            if doc is None:
+                return live_cache.get("doc")
+            live_cache.update(stamp=stamp, doc=doc)
+        return live_cache.get("doc")
+
+    @app.route("/api/live")
+    def live_board() -> Response:
+        """The latest layout snapshot, its version and its diff.
+
+        ``since`` is the version the page already has: when it is still
+        the latest, only the header and progress come back, so polling
+        once a second does not resend the board.
+        """
+        from flask import request as _req
+        from ..design import live
+        progress = live.read_progress(live_root)
+        doc = _live_doc()
+        if doc is None:
+            return jsonify({"ok": True, "version": 0, "empty": True,
+                            "progress": progress})
+        head = {k: doc.get(k) for k in ("version", "time", "ts", "note", "kind")}
+        since = _req.args.get("since", type=int)
+        if since is not None and since == doc.get("version"):
+            return jsonify({"ok": True, "unchanged": True, **head,
+                            "progress": progress})
+        return jsonify({"ok": True, **head, "snapshot": doc.get("snapshot"),
+                        "diff": doc.get("diff"), "progress": progress})
+
+    @app.route("/api/live/decisions")
+    def live_decisions() -> Response:
+        """Logged decisions after sequence number ``since``, oldest first.
+
+        ``last`` is the newest sequence number in the log; a value below
+        the page's own means the log was cleared and the page starts over.
+        """
+        from flask import request as _req
+        from ..design import live
+        since = max(0, _req.args.get("since", default=0, type=int) or 0)
+        rows = live.decisions(0, root=live_root, limit=10 ** 9)
+        last = int(rows[-1].get("seq", 0)) if rows else 0
+        newer = [r for r in rows if int(r.get("seq", 0)) > since][-500:]
+        return jsonify({"ok": True, "decisions": newer, "last": last})
 
     @app.route("/events")
     def events() -> Response:

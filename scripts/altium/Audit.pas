@@ -470,7 +470,7 @@ Var
     Ratio, ViolationPct : Double;
 Begin
     Board := Nil;
-    Try Board := GetPCBBoardAnywhere; Except End;
+    Try Board := GetPCBBoardAnywhere(0); Except End;
     If Board = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_BOARD',
@@ -742,7 +742,7 @@ Var
     Found, First : Boolean;
 Begin
     Board := Nil;
-    Try Board := GetPCBBoardAnywhere; Except End;
+    Try Board := GetPCBBoardAnywhere(0); Except End;
     If Board = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_BOARD',
@@ -965,7 +965,7 @@ Var
     First, ReturnFound : Boolean;
 Begin
     Board := Nil;
-    Try Board := GetPCBBoardAnywhere; Except End;
+    Try Board := GetPCBBoardAnywhere(0); Except End;
     If Board = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_BOARD',
@@ -1078,7 +1078,7 @@ Var
     First, IsInvalid : Boolean;
 Begin
     Board := Nil;
-    Try Board := GetPCBBoardAnywhere; Except End;
+    Try Board := GetPCBBoardAnywhere(0); Except End;
     If Board = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_BOARD',
@@ -1441,7 +1441,7 @@ Var
     First, HitOnLayer : Boolean;
 Begin
     Board := Nil;
-    Try Board := GetPCBBoardAnywhere; Except End;
+    Try Board := GetPCBBoardAnywhere(0); Except End;
     If Board = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_BOARD',
@@ -1748,7 +1748,7 @@ Var
     PadX, PadY : TCoord;
 Begin
     Board := Nil;
-    Try Board := GetPCBBoardAnywhere; Except End;
+    Try Board := GetPCBBoardAnywhere(0); Except End;
     If Board = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_BOARD',
@@ -1999,7 +1999,7 @@ Var
     First, Inside : Boolean;
 Begin
     Board := Nil;
-    Try Board := GetPCBBoardAnywhere; Except End;
+    Try Board := GetPCBBoardAnywhere(0); Except End;
     If Board = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_BOARD',
@@ -2081,22 +2081,132 @@ End;
 {                                                                              }
 { Response: checked, violations, clearance_mils, items where each entry has}
 { kind (pad / via), designator (refdes), distance_mils, at coords.          }
+{ Distance in mils from (Px, Py), in mils, to the board outline: every      }
+{ segment, line or arc, segment I running from vertex I to vertex I + 1.    }
+{ -1 for an outline with no segments.                                       }
+Function OutlineDistMils(Outline : IPCB_BoardOutline; Px, Py : Double) : Double;
+Var
+    I, N : Integer;
+    Ax, Ay, Bx, By, Cx, Cy, R, D : Double;
+Begin
+    Result := -1;
+    N := 0;
+    Try N := Outline.PointCount; Except N := 0; End;
+    For I := 0 To N - 1 Do
+    Begin
+        Ax := Outline.Segments[I].vx / 10000.0;
+        Ay := Outline.Segments[I].vy / 10000.0;
+        Bx := Outline.Segments[(I + 1) Mod N].vx / 10000.0;
+        By := Outline.Segments[(I + 1) Mod N].vy / 10000.0;
+        If Outline.Segments[I].Kind = ePolySegmentLine Then
+            D := SegDistMils(Px, Py, Ax, Ay, Bx, By)
+        Else
+        Begin
+            Cx := Outline.Segments[I].cx / 10000.0;
+            Cy := Outline.Segments[I].cy / 10000.0;
+            R := Sqrt((Ax - Cx) * (Ax - Cx) + (Ay - Cy) * (Ay - Cy));
+            D := ArcDistMils(Px, Py, Cx, Cy, R,
+                Outline.Segments[I].Angle1, Outline.Segments[I].Angle2);
+        End;
+        If (Result < 0) Or (D < Result) Then Result := D;
+    End;
+End;
+
+{ The outline distance of one point of a shape, given in the shape's own    }
+{ frame (Lx, Ly) about its centre (X, Y), turned by the cosine and sine C, S. }
+Function ShapePointGapMils(Outline : IPCB_BoardOutline; X, Y, C, S, Lx, Ly : Double) : Double;
+Begin
+    Result := OutlineDistMils(Outline, X + Lx * C - Ly * S, Y + Lx * S + Ly * C);
+End;
+
+{ How close a pad's or via's copper comes to the board outline, in mils,    }
+{ never below 0. A via or round pad is its centre less its radius, an        }
+{ obround pad the nearer of its two end centres less its half-width, both    }
+{ exact. Any other shape is the nearest of its corners and edge midpoints:   }
+{ exact against a straight edge and against an arc curving away from the     }
+{ pad, as a round board's edge does, and at worst a little generous where    }
+{ the outline bends in toward the pad.                                       }
+Function PadEdgeGapMils(Outline : IPCB_BoardOutline; Obj : IPCB_Primitive) : Double;
+Var
+    Pad : IPCB_Pad;
+    Via : IPCB_Via;
+    X, Y, Hx, Hy, Rot, C, S, Ux, Uy, R, D1, D2 : Double;
+Begin
+    X := Obj.x / 10000.0;
+    Y := Obj.y / 10000.0;
+    If Obj.ObjectId = eViaObject Then
+    Begin
+        Via := Obj;
+        Result := OutlineDistMils(Outline, X, Y) - Via.Size / 20000.0;
+    End
+    Else
+    Begin
+        Pad := Obj;
+        Hx := Pad.TopXSize / 20000.0;
+        Hy := Pad.TopYSize / 20000.0;
+        Rot := 0;
+        Try Rot := Pad.Rotation; Except Rot := 0; End;
+        C := Cos(Rot * 3.14159265358979 / 180.0);
+        S := Sin(Rot * 3.14159265358979 / 180.0);
+        If Pad.TopShape = eRounded Then
+        Begin
+            If Hx >= Hy Then
+            Begin
+                R := Hy; Ux := (Hx - Hy) * C; Uy := (Hx - Hy) * S;
+            End
+            Else
+            Begin
+                R := Hx; Ux := -(Hy - Hx) * S; Uy := (Hy - Hx) * C;
+            End;
+            D1 := OutlineDistMils(Outline, X + Ux, Y + Uy);
+            D2 := OutlineDistMils(Outline, X - Ux, Y - Uy);
+            If D2 < D1 Then D1 := D2;
+            Result := D1 - R;
+        End
+        Else
+        Begin
+            Result := ShapePointGapMils(Outline, X, Y, C, S, -Hx, -Hy);
+            D1 := ShapePointGapMils(Outline, X, Y, C, S, Hx, -Hy);
+            If D1 < Result Then Result := D1;
+            D1 := ShapePointGapMils(Outline, X, Y, C, S, Hx, Hy);
+            If D1 < Result Then Result := D1;
+            D1 := ShapePointGapMils(Outline, X, Y, C, S, -Hx, Hy);
+            If D1 < Result Then Result := D1;
+            D1 := ShapePointGapMils(Outline, X, Y, C, S, 0, -Hy);
+            If D1 < Result Then Result := D1;
+            D1 := ShapePointGapMils(Outline, X, Y, C, S, Hx, 0);
+            If D1 < Result Then Result := D1;
+            D1 := ShapePointGapMils(Outline, X, Y, C, S, 0, Hy);
+            If D1 < Result Then Result := D1;
+            D1 := ShapePointGapMils(Outline, X, Y, C, S, -Hx, 0);
+            If D1 < Result Then Result := D1;
+        End;
+    End;
+    If Result < 0 Then Result := 0;
+End;
+
+{ Audit_FindPadsNearBoardEdge                                                 }
+{                                                                              }
+{ It measured with Board.PrimPrimDistance(BoardOutline, prim) inside an empty }
+{ Try, counted a pad only when that answered, and found 0 of them on a round  }
+{ board with a connector pad 0.5 mm from the edge. Measured here from the     }
+{ outline's own segments instead, and a pad that cannot be measured is        }
+{ counted rather than passed.                                                 }
+
 Function Audit_FindPadsNearBoardEdge(Params, RequestId : String) : String;
 Var
     Board : IPCB_Board;
     Outline : IPCB_BoardOutline;
     Iter : IPCB_BoardIterator;
     Obj : IPCB_Primitive;
-    Checked, Violations : Integer;
-    ClearanceMils : Integer;
-    Clearance : TCoord;
-    Dist : TCoord;
-    DistMils : Integer;
+    Checked, Violations, Unmeasured : Integer;
+    ClearanceMils, Gap : Double;
+    Measured : Boolean;
     KindStr, DesStr, ItemsJson, EntryJson : String;
     First : Boolean;
 Begin
     Board := Nil;
-    Try Board := GetPCBBoardAnywhere; Except End;
+    Try Board := GetPCBBoardAnywhere(0); Except End;
     If Board = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_BOARD',
@@ -2112,12 +2222,12 @@ Begin
         Exit;
     End;
 
-    ClearanceMils := StrToIntDef(ExtractJsonValue(Params, 'clearance_mils'), 25);
+    ClearanceMils := StrToFloatDef(ExtractJsonValue(Params, 'clearance_mils'), 25);
     If ClearanceMils <= 0 Then ClearanceMils := 25;
-    Clearance := MilsToCoord(ClearanceMils);
 
     Checked := 0;
     Violations := 0;
+    Unmeasured := 0;
     ItemsJson := '';
     First := True;
 
@@ -2129,34 +2239,32 @@ Begin
         Obj := Iter.FirstPCBObject;
         While Obj <> Nil Do
         Begin
-            Try
-                Inc(Checked);
-                Dist := -1;
-                { PrimPrimDistance returns 0 for overlap, distance otherwise. }
-                { For a pad INSIDE the outline polygon the distance to the    }
-                { outline segments is the gap to the nearest edge, which is  }
-                { exactly what we want.                                       }
-                Try Dist := Board.PrimPrimDistance(Outline, Obj); Except End;
-                If (Dist >= 0) And (Dist < Clearance) Then
-                Begin
-                    Inc(Violations);
-                    DistMils := CoordToMils(Dist);
-                    If Obj.ObjectId = eViaObject Then KindStr := 'via'
-                    Else KindStr := 'pad';
-                    DesStr := '';
-                    If Obj.InComponent Then
-                        Try DesStr := Obj.Component.Name.Text; Except End;
-                    If Not First Then ItemsJson := ItemsJson + ',';
-                    First := False;
-                    EntryJson :=
-                        JsonStr('kind', KindStr) + ',' +
-                        JsonStr('designator', DesStr) + ',' +
-                        JsonInt('distance_mils', DistMils) + ',' +
-                        JsonStr('at', '(' + IntToStr(CoordToMils(Obj.x)) + ',' +
-                                      IntToStr(CoordToMils(Obj.y)) + ')');
-                    ItemsJson := ItemsJson + JsonObj(EntryJson);
-                End;
-            Except End;
+            Inc(Checked);
+            Measured := True;
+            Gap := 0;
+            Try Gap := PadEdgeGapMils(Outline, Obj); Except Measured := False; End;
+            If Not Measured Then
+            Begin
+                Inc(Unmeasured);
+            End
+            Else If Gap < ClearanceMils Then
+            Begin
+                Inc(Violations);
+                If Obj.ObjectId = eViaObject Then KindStr := 'via'
+                Else KindStr := 'pad';
+                DesStr := '';
+                If Obj.InComponent Then
+                    Try DesStr := Obj.Component.Name.Text; Except End;
+                If Not First Then ItemsJson := ItemsJson + ',';
+                First := False;
+                EntryJson :=
+                    JsonStr('kind', KindStr) + ',' +
+                    JsonStr('designator', DesStr) + ',' +
+                    JsonRaw('distance_mils', FloatToJsonStr(Round(Gap * 100) / 100.0)) + ',' +
+                    JsonStr('at', '(' + IntToStr(CoordToMils(Obj.x)) + ',' +
+                                  IntToStr(CoordToMils(Obj.y)) + ')');
+                ItemsJson := ItemsJson + JsonObj(EntryJson);
+            End;
             Obj := Iter.NextPCBObject;
         End;
     Finally
@@ -2167,7 +2275,8 @@ Begin
         JsonObj(
             JsonInt('checked', Checked) + ',' +
             JsonInt('violations', Violations) + ',' +
-            JsonInt('clearance_mils', ClearanceMils) + ',' +
+            JsonInt('unmeasured', Unmeasured) + ',' +
+            JsonRaw('clearance_mils', FloatToJsonStr(ClearanceMils)) + ',' +
             JsonRaw('items', '[' + ItemsJson + ']')
         ));
 End;
@@ -2669,7 +2778,7 @@ Var
     First : Boolean;
     OnTop : Boolean;
 Begin
-    Board := GetPCBBoardAnywhere;
+    Board := GetPCBBoardAnywhere(0);
     If Board = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_BOARD',
@@ -2936,7 +3045,7 @@ Var
     ItemsJson, EntryJson, CompName : String;
     First, Locked : Boolean;
 Begin
-    Board := GetPCBBoardAnywhere;
+    Board := GetPCBBoardAnywhere(0);
     If Board = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_BOARD',
@@ -3006,7 +3115,7 @@ Var
     First, MirrorFlag : Boolean;
     LayerVal : TLayer;
 Begin
-    Board := GetPCBBoardAnywhere;
+    Board := GetPCBBoardAnywhere(0);
     If Board = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_BOARD',
@@ -3607,7 +3716,7 @@ Var
     V1X, V1Y, V2X, V2Y : Double;
     L1, L2, Dot, CosTheta, ThetaDeg : Double;
 Begin
-    Board := GetPCBBoardAnywhere;
+    Board := GetPCBBoardAnywhere(0);
     If Board = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_BOARD',
@@ -3634,18 +3743,23 @@ Begin
             For Endpoint := 1 To 2 Do
             Begin
                 Try
+                    { IN MILS, AS REALS. A coordinate difference is an     }
+                    { Integer, and kept one in a Double variable, so its   }
+                    { square overflowed 32 bits on any track longer than   }
+                    { about 4.6 mil: the angles were garbage and a negative }
+                    { sum made Sqrt return NaN, which is not JSON.          }
                     If Endpoint = 1 Then
                     Begin
                         PX := Track.X1; PY := Track.Y1;
-                        V1X := Track.X2 - PX; V1Y := Track.Y2 - PY;
+                        V1X := (Track.X2 - PX) / 10000.0; V1Y := (Track.Y2 - PY) / 10000.0;
                     End
                     Else
                     Begin
                         PX := Track.X2; PY := Track.Y2;
-                        V1X := Track.X1 - PX; V1Y := Track.Y1 - PY;
+                        V1X := (Track.X1 - PX) / 10000.0; V1Y := (Track.Y1 - PY) / 10000.0;
                     End;
                     L1 := Sqrt(V1X * V1X + V1Y * V1Y);
-                    If L1 < 1 Then Continue;
+                    If L1 < 0.01 Then Continue;
 
                     SpatIter := Board.SpatialIterator_Create;
                     Try
@@ -3658,7 +3772,9 @@ Begin
                         Begin
                             Try
                                 Other := Obj;
-                                If (Other.I_ObjectAddress <> Track.I_ObjectAddress)
+                                { Each join is seen from both of its tracks: }
+                                { reported from the lower address only.       }
+                                If (Other.I_ObjectAddress > Track.I_ObjectAddress)
                                    And (Other.Net = Track.Net) Then
                                 Begin
                                     { Find which of Other's endpoints is at (PX,PY) }
@@ -3666,14 +3782,14 @@ Begin
                                     If (Abs(Other.X1 - PX) <= Tol)
                                        And (Abs(Other.Y1 - PY) <= Tol) Then
                                     Begin
-                                        V2X := Other.X2 - PX;
-                                        V2Y := Other.Y2 - PY;
+                                        V2X := (Other.X2 - PX) / 10000.0;
+                                        V2Y := (Other.Y2 - PY) / 10000.0;
                                     End
                                     Else If (Abs(Other.X2 - PX) <= Tol)
                                             And (Abs(Other.Y2 - PY) <= Tol) Then
                                     Begin
-                                        V2X := Other.X1 - PX;
-                                        V2Y := Other.Y1 - PY;
+                                        V2X := (Other.X1 - PX) / 10000.0;
+                                        V2Y := (Other.Y1 - PY) / 10000.0;
                                     End
                                     Else
                                     Begin
@@ -3681,7 +3797,7 @@ Begin
                                         Continue;
                                     End;
                                     L2 := Sqrt(V2X * V2X + V2Y * V2Y);
-                                    If L2 < 1 Then
+                                    If L2 < 0.01 Then
                                     Begin
                                         Obj := SpatIter.NextPCBObject;
                                         Continue;
@@ -3815,7 +3931,7 @@ Var
     MinW, MaxW, TX, TY : Integer;
     Ratio : Double;
 Begin
-    Board := GetPCBBoardAnywhere;
+    Board := GetPCBBoardAnywhere(0);
     If Board = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_BOARD',
@@ -3919,7 +4035,7 @@ Var
     First, TrackTouches, EndpointAtCenter : Boolean;
 Begin
     Board := Nil;
-    Try Board := GetPCBBoardAnywhere; Except End;
+    Try Board := GetPCBBoardAnywhere(0); Except End;
     If Board = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_BOARD',
@@ -4125,6 +4241,256 @@ End;
 
 
 { Dispatcher entry for `audit.*` commands.                                    }
+{..............................................................................}
+{ Audit_FindNetLabelConflicts                                                 }
+{                                                                              }
+{ Three related failure modes that all look fine on a printed sheet:          }
+{                                                                              }
+{  1. CONFLICT: two net labels with DIFFERENT text at the same (x, y).        }
+{     Altium merges both names into one net and one name wins. The losing     }
+{     net silently ceases to exist and everything on it is absorbed. This is  }
+{     a real short between two named nets.                                    }
+{                                                                              }
+{  2. ON_PIN_ROOT: a label sitting on a pin Location rather than on its       }
+{     electrical end. Pin.Location is the BODY-side root; the pin connects at }
+{     Location + PinLength along Orientation. A label on the root is inert,   }
+{     so the sheet reads as wired while the pin floats on an auto-net.        }
+{                                                                              }
+{  3. DUPLICATE: two labels with the SAME text at one point. Harmless         }
+{     electrically, but it is clutter and it hides class 1 underneath.        }
+{                                                                              }
+{ Orientation convention matches Generic.pas: 0=right(+x) 1=up(+y)            }
+{ 2=left(-x) 3=down(-y).                                                      }
+{..............................................................................}
+
+Function Audit_FindNetLabelConflicts(Params, RequestId : String) : String;
+Var
+    Workspace : IWorkspace;
+    Project : IProject;
+    DocI : Integer;
+    Document : IDocument;
+    Sheet : ISch_Document;
+    Iter, SpatIter, PinIter : ISch_Iterator;
+    Obj, Hit : ISch_GraphicalObject;
+    NetLbl, OtherLbl : ISch_NetLabel;
+    Pin : ISch_Pin;
+    DocKind, SheetName, LabelText, OtherText : String;
+    PinDesig, PinNum, OwnerDesig : String;
+    Loc, PinLoc, OtherLoc : TLocation;
+    LX, LY, PX, PY, CX, CY, PinLen, PinOrient : Integer;
+    Tol : Integer;
+    Total, NConf, NRoot, NDup : Integer;
+    ConfJson, RootJson, DupJson, EntryJson : String;
+    FirstC, FirstR, FirstD : Boolean;
+    FoundConf, FoundDup, FoundRoot : Boolean;
+Begin
+    Workspace := GetWorkspace;
+    If Workspace = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_WORKSPACE', 'No workspace');
+        Exit;
+    End;
+    Project := Workspace.DM_FocusedProject;
+    If Project = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PROJECT', 'No project focused');
+        Exit;
+    End;
+
+    Total := 0;
+    NConf := 0;
+    NRoot := 0;
+    NDup := 0;
+    ConfJson := '';
+    RootJson := '';
+    DupJson := '';
+    FirstC := True;
+    FirstR := True;
+    FirstD := True;
+    Tol := MilsToCoord(1);
+
+    For DocI := 0 To Project.DM_LogicalDocumentCount - 1 Do
+    Begin
+        Document := Nil;
+        Try Document := Project.DM_LogicalDocuments(DocI); Except End;
+        If Document = Nil Then Continue;
+        DocKind := '';
+        Try DocKind := Document.DM_DocumentKind; Except End;
+        If DocKind <> 'SCH' Then Continue;
+        Sheet := Nil;
+        Try Sheet := SchServer.GetSchDocumentByPath(Document.DM_FullPath); Except End;
+        If Sheet = Nil Then Continue;
+        SheetName := '';
+        Try SheetName := Document.DM_FileName; Except End;
+
+        Iter := Sheet.SchIterator_Create;
+        If Iter = Nil Then Continue;
+        Try
+            Iter.AddFilter_ObjectSet(MkSet(eNetLabel));
+            Obj := Iter.FirstSchObject;
+            While Obj <> Nil Do
+            Begin
+                Try
+                    Inc(Total);
+                    NetLbl := Obj;
+                    Loc := NetLbl.GetState_Location;
+                    LX := Loc.X;
+                    LY := Loc.Y;
+                    LabelText := '';
+                    Try LabelText := NetLbl.Text; Except End;
+
+                    FoundConf := False;
+                    FoundDup := False;
+                    OtherText := '';
+
+                    SpatIter := Sheet.SchIterator_Create;
+                    If SpatIter <> Nil Then
+                    Begin
+                        Try
+                            SpatIter.AddFilter_ObjectSet(MkSet(eNetLabel));
+                            { AddFilter_Area matches text bounding boxes, not }
+                            { Location. Adjacent 100-mil pin-pitch labels in  }
+                            { a column otherwise report as conflicts.         }
+                            SpatIter.AddFilter_Area(LX - Tol, LY - Tol, LX + Tol, LY + Tol);
+                            Hit := SpatIter.FirstSchObject;
+                            While Hit <> Nil Do
+                            Begin
+                                If Hit <> Obj Then
+                                Begin
+                                    OtherLbl := Hit;
+                                    Try
+                                        OtherLoc := OtherLbl.GetState_Location;
+                                        If CoordWithinTol(OtherLoc.X, LX, Tol) And
+                                           CoordWithinTol(OtherLoc.Y, LY, Tol) Then
+                                        Begin
+                                            If OtherLbl.Text <> LabelText Then
+                                            Begin
+                                                FoundConf := True;
+                                                If OtherText = '' Then OtherText := OtherLbl.Text;
+                                            End
+                                            Else
+                                                FoundDup := True;
+                                        End;
+                                    Except End;
+                                End;
+                                Hit := SpatIter.NextSchObject;
+                            End;
+                        Finally
+                            Sheet.SchIterator_Destroy(SpatIter);
+                        End;
+                    End;
+
+                    If FoundConf Then
+                    Begin
+                        Inc(NConf);
+                        If Not FirstC Then ConfJson := ConfJson + ',';
+                        FirstC := False;
+                        EntryJson :=
+                            JsonStr('label', LabelText) + ',' +
+                            JsonStr('conflicts_with', OtherText) + ',' +
+                            JsonStr('sheet', SheetName) + ',' +
+                            JsonInt('x_mils', CoordToMils(LX)) + ',' +
+                            JsonInt('y_mils', CoordToMils(LY));
+                        ConfJson := ConfJson + JsonObj(EntryJson);
+                    End;
+
+                    If FoundDup Then
+                    Begin
+                        Inc(NDup);
+                        If Not FirstD Then DupJson := DupJson + ',';
+                        FirstD := False;
+                        EntryJson :=
+                            JsonStr('label', LabelText) + ',' +
+                            JsonStr('sheet', SheetName) + ',' +
+                            JsonInt('x_mils', CoordToMils(LX)) + ',' +
+                            JsonInt('y_mils', CoordToMils(LY));
+                        DupJson := DupJson + JsonObj(EntryJson);
+                    End;
+
+                    FoundRoot := False;
+                    PinDesig := '';
+                    PinNum := '';
+                    OwnerDesig := '';
+                    CX := 0;
+                    CY := 0;
+                    PinIter := Sheet.SchIterator_Create;
+                    If PinIter <> Nil Then
+                    Begin
+                        Try
+                            PinIter.AddFilter_ObjectSet(MkSet(ePin));
+                            PinIter.AddFilter_Area(LX - Tol, LY - Tol, LX + Tol, LY + Tol);
+                            Hit := PinIter.FirstSchObject;
+                            While Hit <> Nil Do
+                            Begin
+                                Try
+                                    Pin := Hit;
+                                    PinLoc := Pin.GetState_Location;
+                                    PX := PinLoc.X;
+                                    PY := PinLoc.Y;
+                                    If (Abs(PX - LX) <= Tol) And (Abs(PY - LY) <= Tol) Then
+                                    Begin
+                                        PinLen := 0;
+                                        PinOrient := 0;
+                                        Try PinLen := Pin.PinLength; Except End;
+                                        Try PinOrient := Pin.Orientation; Except End;
+                                        CX := PX;
+                                        CY := PY;
+                                        If PinOrient = 0 Then CX := PX + PinLen
+                                        Else If PinOrient = 1 Then CY := PY + PinLen
+                                        Else If PinOrient = 2 Then CX := PX - PinLen
+                                        Else If PinOrient = 3 Then CY := PY - PinLen;
+                                        If (CX <> PX) Or (CY <> PY) Then
+                                        Begin
+                                            FoundRoot := True;
+                                            Try PinNum := Pin.Designator; Except End;
+                                            Try OwnerDesig := Pin.OwnerSchComponent.Designator.Text; Except End;
+                                        End;
+                                    End;
+                                Except End;
+                                Hit := PinIter.NextSchObject;
+                            End;
+                        Finally
+                            Sheet.SchIterator_Destroy(PinIter);
+                        End;
+                    End;
+
+                    If FoundRoot Then
+                    Begin
+                        Inc(NRoot);
+                        If Not FirstR Then RootJson := RootJson + ',';
+                        FirstR := False;
+                        PinDesig := OwnerDesig + '.' + PinNum;
+                        EntryJson :=
+                            JsonStr('label', LabelText) + ',' +
+                            JsonStr('pin', PinDesig) + ',' +
+                            JsonStr('sheet', SheetName) + ',' +
+                            JsonInt('x_mils', CoordToMils(LX)) + ',' +
+                            JsonInt('y_mils', CoordToMils(LY)) + ',' +
+                            JsonInt('connect_x_mils', CoordToMils(CX)) + ',' +
+                            JsonInt('connect_y_mils', CoordToMils(CY));
+                        RootJson := RootJson + JsonObj(EntryJson);
+                    End;
+                Except End;
+                Obj := Iter.NextSchObject;
+            End;
+        Finally
+            Sheet.SchIterator_Destroy(Iter);
+        End;
+    End;
+
+    Result := BuildSuccessResponse(RequestId,
+        JsonObj(
+            JsonInt('checked', Total) + ',' +
+            JsonInt('conflicts', NConf) + ',' +
+            JsonInt('on_pin_root', NRoot) + ',' +
+            JsonInt('duplicates', NDup) + ',' +
+            JsonRaw('conflicting_labels', '[' + ConfJson + ']') + ',' +
+            JsonRaw('labels_on_pin_root', '[' + RootJson + ']') + ',' +
+            JsonRaw('duplicate_labels', '[' + DupJson + ']')
+        ));
+End;
+
+
 Function HandleAuditCommand(Action : String; Params : String;
                              RequestId : String) : String;
 Begin
@@ -4176,6 +4542,8 @@ Begin
         Result := Audit_FindVisibleSupplierPN(Params, RequestId)
     Else If Action = 'find_orphan_net_labels' Then
         Result := Audit_FindOrphanNetLabels(Params, RequestId)
+    Else If Action = 'find_net_label_conflicts' Then
+        Result := Audit_FindNetLabelConflicts(Params, RequestId)
     Else If Action = 'find_orphan_power_objects' Then
         Result := Audit_FindOrphanPowerObjects(Params, RequestId)
     Else If Action = 'find_placeholder_values' Then

@@ -119,6 +119,36 @@ def _script_version(main_pas: Path) -> str | None:
     return match.group(1) if match else None
 
 
+def _pas_differences(bundled_dir: Path, deployed_dir: Path) -> list[str]:
+    """Names of .pas files whose deployed content differs from bundled.
+
+    Compared by CONTENT rather than by SCRIPT_VERSION, because the
+    version is bumped by hand and the case that produces a stale deploy
+    is precisely the case where somebody forgot. A version-only check
+    passes whenever the two copies carry the same string, which is the
+    default state after an edit, so it cannot detect its own motivating
+    scenario.
+
+    Line endings are normalised: the install copies files between
+    directories and a CRLF difference is not a code difference.
+    """
+    differing = []
+    for source in sorted(bundled_dir.glob("*.pas")):
+        target = deployed_dir / source.name
+        if not target.is_file():
+            differing.append(source.name)
+            continue
+        try:
+            a = source.read_bytes().replace(b"\r\n", b"\n")
+            b = target.read_bytes().replace(b"\r\n", b"\n")
+        except OSError:
+            differing.append(source.name)
+            continue
+        if a != b:
+            differing.append(source.name)
+    return differing
+
+
 def _check_deployed_scripts_current() -> Check:
     """The deployed copy must be the bundled one.
 
@@ -130,6 +160,12 @@ def _check_deployed_scripts_current() -> Check:
     That makes a stale deploy the one live-session problem worth
     catching offline: it costs a whole session to diagnose from the
     inside, and one file read to spot from the outside.
+
+    Checked two ways, because the version alone is not enough. A
+    mismatched SCRIPT_VERSION is the loud case. The quiet one is an edit
+    that never bumped it, leaving both copies claiming the same build
+    with different code in them, so the files are also compared by
+    content.
 
     WARN rather than FAIL. Nothing offline is affected, and a developer
     who has never installed the scripts is not in a broken state.
@@ -168,6 +204,29 @@ def _check_deployed_scripts_current() -> Check:
                 "reproduce."
             ),
         )
+
+    # Matching versions are not matching code. The version is bumped by
+    # hand, so an edit that skipped the bump leaves both copies claiming
+    # the same build while the deployed one is behind.
+    differing = _pas_differences(bundled.parent, deployed.parent)
+    if differing:
+        listed = ", ".join(differing[:6])
+        if len(differing) > 6:
+            listed += f", and {len(differing) - 6} more"
+        return Check(
+            name="deployed scripts current",
+            status=Status.WARN,
+            message=(
+                f"both copies say {have} but the code differs: {listed}"),
+            fix=(
+                "SCRIPT_VERSION was not bumped for these edits, so the "
+                "version cannot tell the two builds apart and app_ping "
+                "will report a match while Altium runs the older code. "
+                "Bump SCRIPT_VERSION in scripts/altium/Main.pas, run "
+                "`python -m eda_agent.server install-scripts --force`, "
+                "then reload the script project in Altium."
+            ),
+        )
     return Check(
         name="deployed scripts current",
         status=Status.PASS,
@@ -193,6 +252,107 @@ def _check_bridge_constructable() -> Check:
     return Check(name="bridge constructable", status=Status.PASS)
 
 
+_STAMPED_BUILD_ID = re.compile(r"^const BUILD_ID = '([^']*)';$", re.MULTILINE)
+
+
+def _stamped_build_id(built: Path) -> str | None:
+    """The BUILD_ID a built extension carries, or None if unreadable."""
+    try:
+        match = _STAMPED_BUILD_ID.search(
+            built.read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        return None
+    return match.group(1) if match else None
+
+
+def _easyeda_build_id(source: Path) -> str | None:
+    """What the build WOULD stamp for this source.
+
+    The hash is imported from the build script rather than reimplemented
+    here. Two copies of a hash definition drift, and the drift would show
+    up as a staleness warning nobody could clear by rebuilding.
+    """
+    build_script = source.parent / "build.py"
+    if not build_script.is_file():
+        return None
+    try:
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "_easyeda_build_for_health", build_script)
+        if spec is None or spec.loader is None:
+            return None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.build_id(source.read_text(encoding="utf-8"))
+    except Exception:                       # noqa: BLE001 - diagnostic only
+        return None
+
+
+def _check_easyeda_extension_built() -> Check:
+    """Is the editor half of the EasyEDA bridge ready to install?
+
+    Reported even on an Altium install, because the failure it prevents
+    is silent and confusing: EasyEDA DIALS OUT to this server, so a
+    missing extension looks exactly like a server that is not listening.
+    Someone debugging that will check ports and firewalls for a while
+    before suspecting the half that lives inside the editor.
+    """
+    source = (Path(__file__).resolve().parents[3]
+              / "extensions" / "easyeda" / "main.js")
+    built = source.parent / "dist" / "index.js"
+
+    if not source.is_file():
+        # Not an error on a source install that omits the extension.
+        return Check(
+            name="easyeda extension",
+            status=Status.SKIP,
+            message="no extensions/easyeda/main.js in this install",
+        )
+
+    if not built.is_file():
+        return Check(
+            name="easyeda extension",
+            status=Status.WARN,
+            severity=Severity.MINOR,
+            message="the extension is not built, so EasyEDA has nothing "
+                    "to install and will never connect",
+            fix="Run `python extensions/easyeda/build.py`, then install "
+                "the folder from EasyEDA Pro: Settings > Extensions.",
+        )
+
+    # Compared by BUILD_ID, not by bytes. The build is not a copy: it
+    # stamps the id and strips `export`, so the two files ALWAYS differ
+    # and a byte comparison warns even seconds after a successful build.
+    # BUILD_ID exists for exactly this question, being a hash of the
+    # source with its own id line canonicalised out.
+    want = _easyeda_build_id(source)
+    have = _stamped_build_id(built)
+    if want is None or have is None:
+        return Check(
+            name="easyeda extension",
+            status=Status.WARN,
+            severity=Severity.MINOR,
+            message="could not read BUILD_ID from the extension source or "
+                    "its build, so staleness cannot be determined",
+            fix="Rebuild with `python extensions/easyeda/build.py`.",
+        )
+    if want != have:
+        return Check(
+            name="easyeda extension",
+            status=Status.WARN,
+            severity=Severity.MINOR,
+            message=f"the built extension is stale: it carries {have} and "
+                    f"main.js now hashes to {want}, so EasyEDA is running "
+                    f"code that no longer matches this server",
+            fix="Rebuild with `python extensions/easyeda/build.py` and "
+                "reload the extension in EasyEDA.",
+        )
+
+    return Check(name="easyeda extension", status=Status.PASS,
+                 message=f"built from main.js, {have}")
+
+
 def run_health_checks() -> list[Check]:
     """Order matters, earlier failures often explain later ones."""
     return [
@@ -201,4 +361,5 @@ def run_health_checks() -> list[Check]:
         _check_bundled_scripts(),
         _check_deployed_scripts_current(),
         _check_bridge_constructable(),
+        _check_easyeda_extension_built(),
     ]

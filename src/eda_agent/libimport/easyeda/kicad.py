@@ -25,7 +25,7 @@ from eda_agent.libimport.easyeda.shapes import PIN_ELECTRIC
 
 __all__ = ["footprint_to_kicad_mod", "symbol_to_kicad_sym"]
 
-_MIL_TO_MM = 0.0254
+from eda_agent.units import MM_PER_MIL as _MIL_TO_MM
 
 #: EasyEDA electrical code -> KiCad pin electrical type.
 _KICAD_ELEC = {

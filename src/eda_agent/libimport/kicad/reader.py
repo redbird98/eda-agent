@@ -50,7 +50,7 @@ from eda_agent.libimport.kicad.sexpr import find, find_all, loads, value
 
 __all__ = ["read_kicad_footprint", "read_kicad_symbol", "MM_TO_MIL"]
 
-MM_TO_MIL = 1000.0 / 25.4
+from eda_agent.units import MILS_PER_MM as MM_TO_MIL
 
 #: KiCad layer name -> EasyEDA layer id, the neutral model's vocabulary.
 _LAYER_TO_ID = {

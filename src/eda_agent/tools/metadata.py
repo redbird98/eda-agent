@@ -74,6 +74,10 @@ _CATEGORY_BY_PREFIX = (
     ("tool_", "meta"),
     ("part_", "parts"),
     ("kicad_", "kicad"),
+    # Before "easy" would ever be reached by a shorter prefix. Order
+    # matters here: the first match wins, so a new prefix that is a
+    # prefix of an existing one has to go above it.
+    ("easyeda_", "easyeda"),
 )
 
 # Tools every one of whose bridge commands the in-repo Altium simulator
@@ -93,7 +97,8 @@ _CATEGORY_BY_PREFIX = (
 # handler, and a tool is only covered when EVERY command it sends is,
 # because one unanswered call ends the run just as surely.
 _SIMULATOR_TOOLS = frozenset({
-    "app_detach", "app_get_active_document", "app_get_version",
+    "app_context", "app_detach", "app_get_active_document",
+    "app_get_version",
     "app_list_documents", "app_set_active_document",
     "audit_find_missing_decoupling",
     "audit_find_pin_net_name_mismatches",
@@ -115,7 +120,7 @@ _SIMULATOR_TOOLS = frozenset({
     "pcb_get_components", "pcb_get_nets", "pcb_get_unrouted_nets",
     "pcb_get_vias", "pcb_move_components", "pcb_place_components",
     "pcb_place_tracks", "pcb_place_via", "pcb_run_drc",
-    "proj_add_document", "proj_annotate", "proj_close", "proj_compile",
+    "proj_add_document", "proj_annotate", "proj_compile",
     "proj_create", "proj_cross_probe", "proj_export_bom_html",
     "proj_export_netlist", "proj_export_pdf", "proj_get_board_info",
     "proj_get_bom", "proj_get_component_info", "proj_get_focused",
@@ -155,6 +160,14 @@ _DESIGN_BRIDGE = frozenset(
         # Both fetch board state over the bridge before reporting.
         "design_lint_report",
         "design_visual_review",
+        # These three extract symbol geometry, or read the live sheet,
+        # over the bridge. Each CATCHES the failure and answers anyway,
+        # so with no Altium running they return a degraded result rather
+        # than an error, and calling them offline is what sends somebody
+        # to rely on that result.
+        "design_preview_plan",
+        "design_hints_from_sheet",
+        "design_plan_from_sheet",
     }
 )
 
@@ -166,6 +179,31 @@ INTERACTION_OVERRIDES = {
     "proj_sync_schematic": MODAL,    # Update-Schematic dialog
     "pcb_add_teardrops": MODAL,      # Teardrop dialog
     "pcb_remove_teardrops": MODAL,   # Teardrop dialog
+    # The wizard and its ECO, which block the loop for as long as they
+    # are up. This tool is the one that clicks them rather than a human,
+    # but that does not make it silent: while it runs, the bridge cannot
+    # answer, and anyone filtering for operations that keep the session
+    # responsive must not be handed this one.
+    "app_update_from_libraries": MODAL,
+    # MEASURED MODAL during the live sweep of 2026-08-24. Each of these was
+    # published as silent, so anything filtering for "keeps the session
+    # responsive" was handed a tool that blocks the bridge until a human
+    # answers a dialog. The dialog seen is named beside each one.
+    # Design Rule Checker (TDesignRuleCheckForm). Altium exposes no
+    # non-interactive DRC trigger, so the tool's only functional path is
+    # the modal one: it refuses unless called with allow_modal=True.
+    # Measured behind the dialog: a 30-minute dead loop to an 1800 s
+    # client timeout. pcb_get_clearance_violations reads stored
+    # violations instead and stays readonly.
+    "pcb_run_drc": MODAL,
+    "proj_export_pdf": MODAL,         # Preview PCB / print preview
+    "proj_run_output": MODAL,         # Altium's exporter dialogs
+    # These three raise "Unsaved Changes" whenever the target is dirty, and
+    # that one is a WPF dialog whose buttons expose no window handles, so
+    # app_press_dialog_button cannot answer it. Keyboard only.
+    "lib_reload_library": MODAL,
+    "proj_remove_document": MODAL,
+    "proj_close": MODAL,
     # Succeeds but leaves the job incomplete.
     "pcb_place_components": PARTIAL,  # geometry only; needs pcb_build_from_project for nets
     # "diff" homograph: _READONLY_SUBSTRINGS carries "_diff_" for
@@ -185,6 +223,20 @@ INTERACTION_OVERRIDES = {
     # (mutates). State the truth explicitly rather than depending on a
     # side effect of another rule.
     "design_visual_review": READONLY,
+    # Reports a pin's root, its electrical connection point, and every
+    # object sitting on each. Pure inspection -- it exists precisely so a
+    # caller can debug connectivity WITHOUT touching the sheet. The obj_
+    # prefix defaults to "silent" (mutating), which is the opposite of
+    # the truth here, so say so explicitly.
+    "obj_explain_pin": READONLY,
+    # Reads the board (or a saved board model) and measures it: overlaps,
+    # gaps, connectivity, corners, return vias, plane islands. Nothing is
+    # written. The pcb_ prefix defaults to silent, which would tell anyone
+    # filtering for safe operations that an audit edits the board.
+    "pcb_layout_audit": READONLY,
+    # Reads a database library's declared tables and fields. The lib_ prefix
+    # does not make that clear to the classifier; it writes nothing.
+    "lib_dblib_info": READONLY,
     # part_fetch writes library files when given download_dir. The
     # "parts" category is offline, and offline falls back to READONLY,
     # which would advertise a tool that touches the filesystem as
@@ -192,6 +244,13 @@ INTERACTION_OVERRIDES = {
     # lib_extract_cse_zip, proj_export_pdf, pcb_render_svg) is SILENT,
     # so match them. part_search never writes and stays readonly.
     "part_fetch": SILENT,
+    # Refuses on this Altium build: the via soldermask write raises an
+    # access violation inside ScriptingSystem.DLL, so the handler
+    # answers NOT_SCRIPTABLE and touches nothing. The pcb_set_ prefix
+    # defaults to "silent" (mutates), which tells a caller filtering for
+    # safe operations the opposite of the truth. If a build is ever
+    # found where the write works, this goes back to SILENT with it.
+    "pcb_set_via_soldermask_relief": READONLY,
 }
 
 # --- explicit maturity overrides -------------------------------------------
@@ -232,6 +291,158 @@ _CATEGORY_BY_NAME = {
 }
 
 
+#: The EasyEDA tools all share one prefix, so the prefix table would
+#: file every one of them under a single "easyeda" heading. That is not
+#: cosmetic: ``tool_catalog`` filters BY category, and it is the way a
+#: client with a tool-count limit finds anything at all. One bucket of
+#: 128 is the same as no index, while Altium's surface is browsable in
+#: thirteen.
+#:
+#: The subject is already encoded in the command each tool sends, so it
+#: is read from there rather than restated as a table that would drift.
+_EASYEDA_NAMESPACE_CATEGORY = {
+    "pcb": "pcb",
+    "sch": "schematic",
+    "lib": "library",
+    "proj": "project",
+    # Altium files its exports under project (proj_export_*), so the
+    # same heading keeps one habit across backends.
+    "export": "project",
+    "design": "design",
+    "system": "application",
+    "sys": "application",
+    "editor": "application",
+    "dmt": "application",
+}
+
+#: EasyEDA tools whose category the command namespace gets wrong, or
+#: which send no command at all. Each one is a judgement, so each is
+#: written down rather than inferred.
+#:
+#: Tools NAMED `easyeda_audit_*` are not listed here. They were, all of
+#: them, which made the name the real rule and the list a hand-kept copy
+#: of it: a new audit read as a pcb tool until someone remembered to add
+#: a line. The prefix is applied directly below instead.
+_EASYEDA_CATEGORY_OVERRIDE = {
+    # Cross-checks that do NOT carry the audit prefix. They read through
+    # pcb/sch commands, but what they are FOR is finding defects, which
+    # is what audit means here.
+    "easyeda_compare_schematic_pcb": "audit",
+    "easyeda_get_unconnected_pins": "audit",
+    "easyeda_get_unrouted_nets": "audit",
+    # Sends no command of its own: it runs every audit and ranks what
+    # they found, so the deriver has no literal command to read. Filed
+    # under audit, which is where someone looking for "run the checks"
+    # will look for it.
+    "easyeda_review_board": "audit",
+    # Same shape, opposite job: it fetches the design DATA a review is
+    # judged from rather than running the checks, so the deriver has no
+    # single command to read here either. Filed under design, because
+    # what it returns is the design, not a verdict on it.
+    "easyeda_review_snapshot": "design",
+    # Sends no command because there is nothing to send: EasyEDA has no
+    # project-delete API at all, so the tool exists only to explain that
+    # and point at what CAN be deleted. The deriver reads the command
+    # namespace, and a tool that never calls one has nothing to read.
+    # Still filed under project, since that is where someone looking for
+    # it will look, and finding the explanation is the point.
+    "easyeda_delete_project": "project",
+    # Reads design.snapshot and renders a page, so the deriver files it
+    # under design, and design is an OFFLINE category. Both halves of
+    # that are wrong here and the second one is dangerous: offline falls
+    # back to READONLY, and the sweep calls readonly tools with their
+    # defaults. This one defaults to writing bom.html into the
+    # workspace, so it would overwrite a file nobody asked it to touch
+    # while claiming to be read-only.
+    #
+    # Same trap part_fetch fell into, recorded a few lines up. Filed
+    # under project with the other exports, including its own Altium
+    # twin proj_export_bom_html, which is live_only and silent.
+    "easyeda_export_bom_html": "project",
+    # Sends no command of its own: it runs the fabrication exports in
+    # turn and judges whether the result is sendable, so the deriver
+    # has no single literal command to read. Filed with its Altium
+    # twin, proj_generate_fab_package.
+    "easyeda_generate_fab_package": "project",
+    # Searches both documents, so the command it sends is chosen at run
+    # time. The deriver below reads a LITERAL first argument, which a
+    # computed one does not offer, and a tool with no derivable category
+    # falls back to the flat one. Filed where the Altium equivalent
+    # lives, proj_find_component.
+    "easyeda_find_component": "project",
+    # Sends nothing directly: it delegates to create_symbol, add_pins
+    # and add_rectangle, whose categories disagree with each other
+    # anyway (library, then schematic twice). What it MAKES is a library
+    # part, which is the heading a reader would look under.
+    #
+    # Any tool built out of other tools lands here for the same reason,
+    # and the guard in tests/test_tool_metadata.py names the offender
+    # rather than letting it fall back quietly.
+    "easyeda_create_ic_symbol": "library",
+    "easyeda_create_passive_symbol": "library",
+    "easyeda_create_standard_footprint": "library",
+    # Bundles five reads through a helper that takes the command as an
+    # argument, so there is no literal for the deriver to see. Every
+    # one of those reads is a pcb command.
+    "easyeda_get_board_statistics": "pcb",
+    # Reads the local measurement record, never the editor, so there is
+    # no command to derive from. Filed under application beside the
+    # other record-reading tool, list_checkpoints.
+    "easyeda_get_measured_shapes": "application",
+    # Pure computation over a plan; they send nothing.
+    "easyeda_emit_plan": "design",
+    "easyeda_emit_connections": "design",
+    # Sends nothing directly either: it dispatches to whichever tools an
+    # emitted plan names, so there is no command namespace to read.
+    "easyeda_run_plan": "design",
+    # Reads the local checkpoint store and never asks the editor, so
+    # there is no command to derive from. Filed where the Altium
+    # equivalent lives, app_list_checkpoints.
+    "easyeda_list_checkpoints": "application",
+}
+
+_easyeda_categories: dict[str, str] | None = None
+
+
+def _easyeda_category(name: str) -> "str | None":
+    """Category for one EasyEDA tool, from the command it sends.
+
+    Built once, by reading the tool module, so adding a tool files it
+    correctly with no list to update. A tool that sends nothing and has
+    no override returns None and falls back to the prefix.
+    """
+    global _easyeda_categories
+    if _easyeda_categories is None:
+        import ast
+        import pathlib
+
+        _easyeda_categories = {}
+        source = (pathlib.Path(__file__).with_name("easyeda.py")
+                  .read_text(encoding="utf-8"))
+        for node in ast.walk(ast.parse(source)):
+            if not (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and node.name.startswith("easyeda_")):
+                continue
+            for inner in ast.walk(node):
+                if not (isinstance(inner, ast.Call)
+                        and getattr(inner.func, "id", "") == "_call"):
+                    continue
+                if not inner.args or not isinstance(
+                        inner.args[0], ast.Constant):
+                    continue
+                namespace = str(inner.args[0].value).split(".", 1)[0]
+                category = _EASYEDA_NAMESPACE_CATEGORY.get(namespace)
+                if category:
+                    _easyeda_categories.setdefault(node.name, category)
+                break
+    if name.startswith("easyeda_audit_"):
+        # Ahead of the namespace, which would file these under whatever
+        # they happen to read: an audit of pads is not a pad tool.
+        return "audit"
+    return (_EASYEDA_CATEGORY_OVERRIDE.get(name)
+            or _easyeda_categories.get(name))
+
+
 def category_of(name: str) -> str:
     """Tool category from an explicit name, else the prefix.
 
@@ -241,6 +452,10 @@ def category_of(name: str) -> str:
     explicit = _CATEGORY_BY_NAME.get(name)
     if explicit:
         return explicit
+    if name.startswith("easyeda_"):
+        derived = _easyeda_category(name)
+        if derived:
+            return derived
     for prefix, cat in _CATEGORY_BY_PREFIX:
         if name.startswith(prefix):
             return cat

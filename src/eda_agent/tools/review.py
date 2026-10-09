@@ -83,6 +83,7 @@ LINT_SEVERITY: dict[str, str] = {
     # break the board or block fab ----
     "find_designator_collisions":        "critical",
     "find_orphan_net_labels":            "critical",
+    "find_net_label_conflicts":          "critical",
     "find_orphan_power_objects":         "critical",
     "find_placeholder_values":           "critical",
     "find_invalid_regions":              "critical",
@@ -140,6 +141,7 @@ LINT_AUDIT_LIST: list[tuple[str, str]] = [
     ("find_non_embedded_images",        "audit.find_non_embedded_images"),
     ("find_visible_supplier_pn",        "audit.find_visible_supplier_pn"),
     ("find_orphan_net_labels",          "audit.find_orphan_net_labels"),
+    ("find_net_label_conflicts",        "audit.find_net_label_conflicts"),
     ("find_orphan_power_objects",       "audit.find_orphan_power_objects"),
     ("find_placeholder_values",         "audit.find_placeholder_values"),
     # --- pcb ---
@@ -426,6 +428,24 @@ def register_review_tools(mcp):
         result["_sections_fetched"] = [
             s for s in ordered if s in result and not s.startswith("_")
         ]
+
+        # A review that fetched NOTHING must say so. _sections_fetched
+        # being empty is already honest, but it is an absence, and an
+        # absence is the easiest thing for a reader to skim past: the
+        # equivalent aggregator on the EasyEDA side reported a board as
+        # having no violations when not one audit had been able to read
+        # it. Stated here rather than left to inference.
+        #
+        # Deliberately NOT adding an `ok` key. Whether this tool should
+        # carry the ok/reason envelope is the open question in the
+        # failure-shape task, and answering it here by hand would settle
+        # a published contract as a side effect of a different fix.
+        if not result["_sections_fetched"]:
+            result["_nothing_fetched"] = (
+                "not one section could be fetched, so this is not a "
+                "clean or empty design: nothing was read. See "
+                "_sections_failed for why."
+            )
 
         return result
 

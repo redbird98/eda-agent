@@ -137,23 +137,47 @@ async def test_catalog_exposes_parameters_so_invoke_need_not_guess(
         minimal_server):
     """Without schemas, tool_invoke is reduced to guessing argument names.
 
-    That is a real failure, not a theoretical one: this tool takes
-    ``current_amps`` while the KiCad-side tool of the same name takes
-    ``current_a``, so a plausible guess is wrong.
+    This tool used to be the sharpest example: it took ``current_amps``
+    while the same-named tool on the other backends took ``current_a``,
+    so the plausible guess was wrong half the time. Both spellings are
+    accepted now, which removes the hazard rather than documenting it.
+
+    That fix has a cost this test is the right place to record. Making
+    each spelling optional empties the schema's ``required`` list, so an
+    absent current is no longer caught by schema validation and is
+    refused at run time instead. The refusal names BOTH spellings, and
+    a separate guard holds it to that, so a caller is not left guessing
+    either way. What must not happen is the catalog hiding a parameter,
+    which would put the guessing back.
     """
     got = _unwrap(await minimal_server.call_tool("tool_catalog", {
         "query": "trace_width_for_current", "with_schema": True}))
     entry = next(t for t in got["tools"]
                  if t["name"] == "pcb_calc_trace_width_for_current")
-    assert entry["required"] == ["current_amps"]
-    assert "copper_oz" in entry["parameters"]
-    assert entry["parameters"]["current_amps"]["type"] == "number"
 
-    # And the discovered names must actually work when invoked.
-    args = {k: 2.0 for k in entry["required"]}
-    run = _unwrap(await minimal_server.call_tool(
-        "tool_invoke", {"name": entry["name"], "arguments": args}))
-    assert run["result"]["ok"] is True
+    for spelling in ("current_amps", "current_a"):
+        assert spelling in entry["parameters"], (
+            f"{spelling} is accepted but the catalog does not list it, so "
+            f"a client reading the schema cannot discover it")
+        assert entry["parameters"][spelling]["type"] == "number"
+    assert "copper_oz" in entry["parameters"]
+
+    # Either discovered spelling must actually work when invoked, and
+    # both must give the same answer; that is what makes them aliases.
+    runs = []
+    for spelling in ("current_amps", "current_a"):
+        run = _unwrap(await minimal_server.call_tool(
+            "tool_invoke", {"name": entry["name"],
+                            "arguments": {spelling: 2.0}}))
+        assert run["result"]["ok"] is True, run
+        runs.append(run["result"]["recommended_width_mils"])
+    assert runs[0] == runs[1]
+
+    # And omitting the current entirely must still be refused, since
+    # the schema no longer does it.
+    empty = _unwrap(await minimal_server.call_tool(
+        "tool_invoke", {"name": entry["name"], "arguments": {}}))
+    assert empty["result"]["ok"] is False
 
 
 @pytest.mark.anyio
@@ -266,3 +290,120 @@ def test_tool_surface_has_not_silently_shrunk(backend, minimum):
     assert len(registry) >= minimum, (
         f"{backend} registered only {len(registry)} tools (expected at "
         f"least {minimum}); a registrar probably failed silently")
+
+
+def test_easyeda_tools_are_discoverable_under_the_minimal_toolset():
+    """Under `minimal`, the catalog is the ONLY way to find a tool.
+
+    So a family the catalog cannot classify is unreachable in practice,
+    even though it is registered and `tool_invoke` would run it. That is
+    exactly what happened: every easyeda_ tool fell into `other` because
+    no prefix was registered, and browsing returned nothing.
+
+    Nothing raises in that state. The backend simply appears empty.
+
+    The fix has since moved: the tools no longer share one "easyeda"
+    heading, they file under the same SUBJECT headings Altium uses, so
+    a client browsing "pcb" finds them on either backend. This checks
+    the property that matters either way, which is that every tool is
+    reachable through some category, rather than checking whichever
+    heading happens to be current.
+    """
+    import asyncio
+
+    from eda_agent.tools import register_backend
+
+    class Capture:
+        def __init__(self):
+            self.tools = {}
+
+        def tool(self, *a, **k):
+            def deco(fn):
+                self.tools[fn.__name__] = fn
+                return fn
+            return deco
+
+    capture = Capture()
+    register_backend(capture, backend="easyeda", toolset="minimal")
+    assert sorted(capture.tools) == ["tool_catalog", "tool_invoke"]
+
+    everything = asyncio.run(capture.tools["tool_catalog"]())
+    categories = everything["categories"]
+    assert categories, "the catalog reports no categories at all"
+
+    # Catch-alls do not count as found. Browsing reaches a tool filed
+    # under "other" too, so counting every listed category would pass in
+    # exactly the broken state this test describes: the tools were in
+    # "other" the whole time, and the complaint was that a caller
+    # looking for them by subject got nothing.
+    catch_all = {"other", "easyeda"}
+
+    reachable: set[str] = set()
+    for category in categories:
+        if category in catch_all:
+            continue
+        listing = asyncio.run(
+            capture.tools["tool_catalog"](category=category))
+        reachable |= {t["name"] for t in listing["tools"]}
+
+    easyeda_tools = {n for n in reachable if n.startswith("easyeda_")}
+    assert len(easyeda_tools) > 100, (
+        f"only {len(easyeda_tools)} easyeda tools sit under a subject "
+        f"category; the rest are in a catch-all, where a caller "
+        f"browsing by subject will not find them")
+
+    # And browsing must not have dropped any of them, which is what a
+    # tool filed under a category the catalog does not list would do.
+    from eda_agent.tools.registry import ToolRegistry
+
+    full = ToolRegistry()
+    register_backend(full, backend="easyeda", toolset="full")
+    registered = {n for n in full.names if n.startswith("easyeda_")}
+    missing = sorted(registered - easyeda_tools)
+    assert not missing, (
+        f"these easyeda tools are registered but reachable through no "
+        f"category, so a minimal client cannot find them: {missing}")
+
+
+def test_a_narrow_query_returns_the_schema_needed_to_invoke(stub=None):
+    """Filter first, then read the schema. That is the documented flow.
+
+    Schemas are dropped past a cap so a broad query cannot flood the
+    caller, which means a filter that is too wide silently returns tools
+    with no parameters, and an agent then guesses argument names.
+    """
+    import asyncio
+
+    from eda_agent.tools import register_backend
+
+    class Capture:
+        def __init__(self):
+            self.tools = {}
+
+        def tool(self, *a, **k):
+            def deco(fn):
+                self.tools[fn.__name__] = fn
+                return fn
+            return deco
+
+    capture = Capture()
+    register_backend(capture, backend="easyeda", toolset="minimal")
+
+    catalog = asyncio.run(capture.tools["tool_catalog"](
+        query="net_length", with_schema=True))
+
+    # Narrow enough to stay under the schema cap, which is the property
+    # being tested. NOT "exactly one result": that held only while one
+    # tool happened to match, and adding easyeda_get_net_lengths broke
+    # it without changing anything the test cares about.
+    assert 0 < catalog["count"] <= 5, (
+        f"{catalog['count']} results for a narrow query; either the "
+        f"query stopped matching or it is no longer narrow")
+
+    by_name = {t["name"]: t for t in catalog["tools"]}
+    entry = by_name.get("easyeda_get_net_length")
+    assert entry is not None, (
+        f"the query no longer finds the tool it was written for: "
+        f"{sorted(by_name)}")
+    assert "net" in entry["parameters"], (
+        "the schema is missing, so a caller must guess the argument name")

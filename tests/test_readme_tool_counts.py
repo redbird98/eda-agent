@@ -70,31 +70,45 @@ def _readme_section_counts() -> dict[str, int]:
     return out
 
 
-def test_readme_section_counts_match_code():
-    """Every ``### Name (N tools)`` header in the README matches the
-    actual @mcp.tool count across its source files. Failure means
-    someone added a tool but didn't bump the header count."""
-    readme_counts = _readme_section_counts()
-    mismatches: list[str] = []
+def test_no_hand_written_section_counts_have_come_back():
+    """The README must not carry per-section tool counts again.
+
+    It used to state them by hand, one header per source file, and this
+    test compared each against the @mcp.tool count. They drifted anyway:
+    the headers read 65 Library and 105 PCB while the code had 67 and
+    108, and the numbers were only corrected because this guard failed.
+
+    That whole section was a hand-curated copy of
+    docs/TOOL_REFERENCE.md, which is GENERATED and cannot drift, so it
+    was deleted rather than repaired. With no second copy there is
+    nothing left to disagree, and the right guard is the one that stops
+    the duplication coming back.
+
+    SECTION_FILES stays because the counts it derives are still the
+    reference for what a section contains.
+    """
+    text = README.read_text(encoding="utf-8", errors="replace")
+    revived = [line.strip() for line in text.splitlines()
+               if _COUNTED_SECTION.match(line)]
+    assert not revived, (
+        "the README states per-section tool counts again:\n  "
+        + "\n  ".join(revived)
+        + "\n\nThose numbers duplicate docs/TOOL_REFERENCE.md, which is "
+          "generated from the code. They drifted last time. Link the "
+          "generated file instead of restating it.")
+
+
+def test_the_section_counts_are_still_derivable():
+    """The mapping itself must stay usable, or the guard above is prose.
+
+    Without this, SECTION_FILES could name a file that no longer exists
+    and nothing would notice, since nothing compares against it now.
+    """
     for section, files in SECTION_FILES.items():
-        actual = sum(_count_mcp_tools(f) for f in files)
-        readme = readme_counts.get(section)
-        if readme is None:
-            mismatches.append(
-                f"  README has no '### {section} (N tools)' header (expected "
-                f"{actual})."
-            )
-        elif readme != actual:
-            mismatches.append(
-                f"  '### {section}' README says {readme} but "
-                f"{'+'.join(files)} has {actual} @mcp.tool decorators."
-            )
-    assert not mismatches, (
-        "README per-section tool counts disagree with the code:\n"
-        + "\n".join(mismatches)
-        + "\n\nBump the header counts (or add the missing tools to "
-          "SECTION_FILES if you added a new tool module)."
-    )
+        total = sum(_count_mcp_tools(f) for f in files)
+        assert total > 0, (
+            f"section {section!r} maps to {files}, which register no "
+            f"tools; the mapping is stale")
 
 
 # ---------------------------------------------------------------------
@@ -200,7 +214,11 @@ def test_the_pypi_description_agrees_with_the_readme():
 # ---------------------------------------------------------------------
 
 _TOOL_ROW = re.compile(r"^\|\s*`([a-z][a-z0-9_]+)`")
-_COUNTED_SECTION = re.compile(r"^#{2,3}\s+(.*?)\s*\((\d+)\s+tools?\)")
+#: The count suffix is optional now. The README wrote its headers by
+#: hand as "### Library (67 tools)"; the generated reference writes
+#: "## library (67)". Requiring the word silently scoped this scan to
+#: nothing once the hand-written copy was deleted.
+_COUNTED_SECTION = re.compile(r"^#{2,3}\s+(.*?)\s*\((\d+)(?:\s+tools?)?\)\s*$")
 
 
 def _tools_named_in(text: str) -> dict[str, str]:
@@ -227,19 +245,38 @@ def _tools_named_in(text: str) -> dict[str, str]:
 
 
 def _tools_named_in_catalog_sections() -> dict[str, str]:
-    return _tools_named_in(README.read_text(encoding="utf-8",
-                                            errors="replace"))
+    """Across the whole documentation set, not the README alone.
+
+    The catalog moved out of the README into the generated reference,
+    and a tool named in any published file is the same promise to a
+    reader wherever it sits.
+    """
+    from tests import documentation_set
+
+    return _tools_named_in(documentation_set.all_text())
 
 
 def _registered_both() -> set[str]:
+    """Every tool any backend registers.
+
+    "both" means Altium plus KiCad, and EasyEDA is a third backend that
+    it does not include. Once the documentation set grew to cover all
+    three, comparing against "both" alone reported every easyeda_* tool
+    as undocumented, which said nothing about the tools and everything
+    about the comparison set.
+    """
     import asyncio
 
     from eda_agent.server import register_backend
+    from eda_agent.tools import BACKENDS
     from eda_agent.tools.registry import ToolRegistry
 
-    registry = ToolRegistry()
-    register_backend(registry, "both", "full")
-    return {t.name for t in asyncio.run(registry.list_tools())}
+    names: set[str] = set()
+    for backend in BACKENDS:
+        registry = ToolRegistry()
+        register_backend(registry, backend, "full")
+        names |= {t.name for t in asyncio.run(registry.list_tools())}
+    return names
 
 
 def test_every_tool_named_in_the_readme_exists():

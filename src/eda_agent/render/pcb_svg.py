@@ -613,43 +613,64 @@ def _render_text(tx: dict[str, Any], color: str, opt: PcbRenderOptions) -> str:
     )
 
 
+def _outline_arc(seg: dict[str, Any], start: tuple[float, float],
+                 end: tuple[float, float]) -> list[str]:
+    """SVG arc commands for one outline arc segment, from start to end.
+
+    Altium's arc runs counter-clockwise from angle1 to angle2 and does
+    not say which end the segment starts on, so the direction comes from
+    the end nearer ``start``: angle1 means counter-clockwise (sweep-flag
+    1, which is increasing angle in the path's own coordinates, flipped
+    or not), angle2 means clockwise. A full circle has the same start
+    and end, which SVG draws as nothing, so it goes in two halves.
+    """
+    r = float(seg.get("radius", 0) or 0)
+    a1 = float(seg.get("angle1", 0) or 0)
+    a2 = float(seg.get("angle2", 0) or 0)
+    span = a2 - a1
+    full = abs(span) >= 359.999
+    sweep_deg = 360.0 if full else span % 360.0
+    sweep = 1
+    if "cx" in seg and "cy" in seg:
+        cx, cy = float(seg["cx"]), float(seg["cy"])
+        p1 = (cx + r * math.cos(math.radians(a1)), cy + r * math.sin(math.radians(a1)))
+        p2 = (cx + r * math.cos(math.radians(a2)), cy + r * math.sin(math.radians(a2)))
+        if not full and math.dist(start, p2) < math.dist(start, p1):
+            sweep = 0
+        if full or math.dist(start, end) < 1e-6:
+            far = (2 * cx - start[0], 2 * cy - start[1])
+            return [f"A {r} {r} 0 0 {sweep} {far[0]} {far[1]}",
+                    f"A {r} {r} 0 0 {sweep} {end[0]} {end[1]}"]
+    large = 1 if sweep_deg > 180.0 else 0
+    return [f"A {r} {r} 0 {large} {sweep} {end[0]} {end[1]}"]
+
+
 def _render_outline(outline: Iterable[dict[str, Any]],
                     opt: PcbRenderOptions) -> str:
     """Render the board outline as a path -- arc segments emit real SVG
     arc commands so curved board shapes (rounded corners, mounting
     cutouts) draw correctly instead of being flattened to chord lines.
 
-    Each segment's vertex (vx, vy) is the END of that segment. Arc
-    segments additionally carry center + angles, so we build an A
-    command from the previous endpoint to the current vertex.
+    Segment i runs FROM its vertex to the next segment's vertex, the
+    last one back to the first (layout.read_altium reads it the same
+    way). Read the other way round, the first segment's arc was never
+    drawn and the closing Z joined the last vertex to the first with a
+    straight line: one quadrant of a round board came out as a diagonal.
     """
     segs = list(outline)
     if not segs:
         return ""
     color = _color_for("Outline", opt)
 
-    # First segment's vertex is the polygon start.
-    parts: list[str] = []
-    x0 = float(segs[0].get("x", 0))
-    y0 = float(segs[0].get("y", 0))
-    parts.append(f"M {x0} {y0}")
-    for seg in segs[1:]:
-        sx = float(seg.get("x", 0))
-        sy = float(seg.get("y", 0))
+    pts = [(float(s.get("x", 0)), float(s.get("y", 0))) for s in segs]
+    parts: list[str] = [f"M {pts[0][0]} {pts[0][1]}"]
+    for i, seg in enumerate(segs):
+        sx, sy = pts[i]
+        ex, ey = pts[(i + 1) % len(segs)]
         if seg.get("kind") == "arc":
-            r = float(seg.get("radius", 0) or 0)
-            a1 = float(seg.get("angle1", 0) or 0)
-            a2 = float(seg.get("angle2", 0) or 0)
-            sweep_deg = a2 - a1
-            if sweep_deg < 0:
-                sweep_deg += 360.0
-            large = 1 if sweep_deg > 180.0 else 0
-            # Outer wrapper flips Y, so visual CCW becomes CW in user
-            # space -- sweep-flag=1 makes Altium-positive arcs render
-            # correctly.
-            parts.append(f"A {r} {r} 0 {large} 1 {sx} {sy}")
-        else:
-            parts.append(f"L {sx} {sy}")
+            parts.extend(_outline_arc(seg, (sx, sy), (ex, ey)))
+        elif i + 1 < len(segs):
+            parts.append(f"L {ex} {ey}")
     parts.append("Z")
     d = " ".join(parts)
     return (

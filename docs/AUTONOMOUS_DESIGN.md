@@ -33,15 +33,20 @@ next, do it, log the result.
 ## The loop (all clients)
 
 1. `design_get_discipline`: hard rules + the DesignPlan schema (once).
-2. `design_session_start(requirement)` → keep the `session_id`.
+2. `design_session_start(requirement)` → keep the `session_id`. Open
+   `design_live_view` so the board can be watched as it changes, and log
+   each decision before acting on it with `design_live_note`.
 3. `app_checkpoint("before autonomous run")` if a project will be modified.
 4. Repeat `design_next_action(session_id)`:
    - `proceed` / `retry` → do the stage with its `suggested_tools`, meet the
      `exit_gate`, then `design_session_log(event="stage_result",
-     stage=…, status="ok")`.
+     stage=…, status="ok")`. The placement, routing, pours and verification
+     gates are measured: pass `pcb_layout_audit`'s result as `data=` and
+     the harness sends the stage back if a number fails.
    - `blocked` → ask the user `open_question`, then
      `design_session_log(event="resolved", text=…)`.
-   - `complete` → review outputs.
+   - `complete` → `design_session_report` writes the design report, then
+     review outputs.
 5. Checkpoint before `sch_to_pcb`, `routing`, `pours_tuning`.
 6. Long runs → `design_job_start` + poll `design_job_status`.
 

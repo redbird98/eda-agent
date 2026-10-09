@@ -8,11 +8,64 @@ from pathlib import Path
 from typing import Any, Optional
 from ..bridge import get_bridge
 from ..bridge.payload import payload_safe
-from ..bridge.exceptions import InvalidParameterError
 from ..libimport import extract_cse_zip, inspect_cse_zip
+from ..library_db import (
+    dblib_path_refusal, is_dblib_path, redact_connection_text, redact_reply,
+    search_hit_as_result,
+)
 from .bulk_hints import BulkHintTracker
 from .datasheet_hints import tag_response
 from ..config import get_config
+from ..units import format_length, length_in, normalise_units
+from ..atomicfile import replace_with_retry
+
+
+def _encode_layer_ops(layers) -> "str | dict":
+    """Layer dicts to the batch string, or a refusal dict.
+
+    Shared by ``lib_set_mech_layers`` and ``lib_run_across``. It lived
+    inside the first of those, so a sweep passing the same list through
+    the second sent a JSON array where the handler expected the encoded
+    string. The handler parsed no operations from it, changed nothing,
+    and reported success, which across twenty two libraries read as
+    twenty two successes and no work done.
+    """
+    if not isinstance(layers, (list, tuple)):
+        return {"success": False,
+                "error": (f"layers must be a list of dicts, got "
+                          f"{type(layers).__name__}")}
+    ops: list[str] = []
+    for entry in layers:
+        if not isinstance(entry, dict):
+            return {"success": False,
+                    "error": f"each layer must be a dict, got {entry!r}"}
+        name = str(entry.get("layer") or "").strip()
+        if not name:
+            return {"success": False,
+                    "error": "every layer entry needs a 'layer' key"}
+        fields = [f"layer={name}"]
+        if entry.get("name") is not None:
+            fields.append(f"name={entry['name']}")
+        if entry.get("enabled") is not None:
+            fields.append(
+                f"enabled={'true' if entry['enabled'] else 'false'}")
+        if entry.get("kind") is not None:
+            fields.append(f"kind={entry['kind']}")
+        joined = ";".join(str(f) for f in fields)
+        # ';' separates fields and '~~' separates operations, so a value
+        # carrying either would silently split into something else.
+        if "~~" in joined:
+            return {"success": False,
+                    "error": (f"a value contains the '~~' separator and "
+                              f"cannot be encoded: {joined}")}
+        ops.append(joined)
+
+    if not ops:
+        return {"success": False,
+                "error": ("layers is empty, so nothing would change. An "
+                          "empty request that reports success is how a "
+                          "library gets skipped unnoticed")}
+    return "~~".join(ops)
 
 
 # Schematic symbol grid is 100 mils. Every pin Location and every
@@ -38,6 +91,41 @@ _STRAY_MILS = 5000
 # geometry change revealed (a resized text has a new bounding box). Convergence
 # is fast -- ~90% in the first pass -- so this is a runaway guard, not a budget.
 _MAX_PASSES = 6
+
+
+def _batch_encoding() -> str:
+    """The encoding the Pascal batch reader actually decodes.
+
+    The batch handlers read with classic AssignFile/ReadLn, which hands
+    Altium bytes in the SYSTEM ANSI codepage; Python's name for that is
+    "mbcs" (Windows only). The previous latin-1 choice was wrong twice
+    on a CP1252 machine: 0x80-0x9F characters (trademark sign, curly
+    quotes, en/em dashes) crashed the tool with UnicodeEncodeError, and
+    any latin-1/ANSI divergence would have reached Altium as the wrong
+    character. Off Windows there is no "active ANSI codepage", so fall
+    back to cp1252, the codepage of the Windows machine the workspace
+    is shared with in every real deployment.
+    """
+    try:
+        "".encode("mbcs")
+        return "mbcs"
+    except LookupError:
+        return "cp1252"
+
+
+def _first_unencodable(value: str, encoding: str) -> str:
+    """The first character of ``value`` the codepage cannot represent.
+
+    Not taken from UnicodeEncodeError.start/end: the native mbcs codec
+    reports those in UTF-16 code units, so slicing the code-point
+    string with them lands past an astral character and names ''.
+    """
+    for ch in value:
+        try:
+            ch.encode(encoding)
+        except UnicodeEncodeError:
+            return ch
+    return ""
 
 
 def _edit_line(act: dict) -> str:
@@ -83,7 +171,7 @@ def write_designator_edits(workspace_dir, actions) -> tuple:
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
             f.write(body)
-        os.replace(tmp, path)
+        replace_with_retry(tmp, path)
     except BaseException:
         try:
             os.unlink(tmp)
@@ -243,7 +331,23 @@ def _payload_safe(value: object) -> str:
     return payload_safe(value)
 
 
-def _pads_payload(pads: list[dict[str, Any]]) -> tuple[str, int]:
+def _units_refusal(units: str) -> dict[str, Any] | None:
+    """The reply for a unit the authoring tools do not take, or None."""
+    if normalise_units(units) is None:
+        return {"error": f"units must be 'mil' or 'mm', not {units!r}"}
+    return None
+
+
+def _with_units(params: dict[str, Any], units: str) -> dict[str, Any]:
+    """Name millimetres on the wire; mils, the default, are left implicit
+    so a call that never mentions units sends what it always sent."""
+    if normalise_units(units) == "mm":
+        params["units"] = "mm"
+    return params
+
+
+def _pads_payload(pads: list[dict[str, Any]],
+                  units: str = "mil") -> tuple[str, int]:
     """Build the ``pads`` batch payload, and count what was dropped.
 
     Sibling of :func:`_pins_payload`, extracted for the same reason: the
@@ -269,11 +373,13 @@ def _pads_payload(pads: list[dict[str, Any]]) -> tuple[str, int]:
             continue
         fields = [
             f"designator={desig}",
-            f"x={round(p.get('x', 0))}",
-            f"y={round(p.get('y', 0))}",
-            f"x_size={round(p.get('x_size', 60))}",
-            f"y_size={round(p.get('y_size', 60))}",
-            f"hole_size={round(p.get('hole_size', 0))}",
+            # Lengths unrounded, in ``units``: round() here quantised every
+            # millimetre land pattern to whole mils before it left Python.
+            f"x={format_length(p.get('x', 0))}",
+            f"y={format_length(p.get('y', 0))}",
+            f"x_size={format_length(p.get('x_size', length_in(units, 60)))}",
+            f"y_size={format_length(p.get('y_size', length_in(units, 60)))}",
+            f"hole_size={format_length(p.get('hole_size', 0))}",
             f"shape={_payload_safe(p.get('shape', 'rectangular'))}",
             f"corner_radius={round(p.get('corner_radius', 25))}",
             f"rotation={_payload_safe(p.get('rotation', 0))}",
@@ -346,6 +452,299 @@ def _safe_filename(name: str, fallback: str = "part") -> str:
     from ..libimport._names import safe_filename
 
     return safe_filename(name, fallback)
+
+
+def _spill_pin_list(result, pins, comp, output_path):
+    """Write the full pin array to JSON and summarise what is left.
+
+    A pin list that overflows the conversation is not merely awkward: the
+    client decides what survives, so the answer becomes environment
+    dependent. Writing the whole thing and returning a summary makes the
+    outcome the same everywhere, and the file is the more useful artefact
+    for the job people actually do with it, which is a field-by-field
+    comparison against the datasheet pin table.
+
+    The summary carries the two distributions worth eyeballing: pins per
+    part, and electrical type. Both are the checks that catch a symbol
+    built from a mis-transcribed table.
+    """
+    import json
+    from collections import Counter
+    from pathlib import Path
+
+    per_part = Counter()
+    per_type = Counter()
+    for pin in pins:
+        if not isinstance(pin, dict):
+            continue
+        per_part[str(pin.get("owner_part_id", ""))] += 1
+        per_type[str(pin.get("electrical_type", ""))] += 1
+
+    if output_path:
+        target = Path(output_path)
+    else:
+        safe = "".join(c if c.isalnum() or c in "-_." else "_"
+                       for c in (comp or "symbol"))
+        target = Path(get_bridge().config.workspace_dir) / f"pins_{safe}.json"
+
+    written = ""
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(pins, indent=1), encoding="utf-8")
+        written = str(target)
+    except OSError as exc:
+        # Never lose the data because the file could not be written.
+        # Returning it inline is worse than a file and better than
+        # nothing, and the reason has to travel with it.
+        out = dict(result)
+        out["spill_error"] = f"could not write {target}: {exc}"
+        return out
+
+    out = {k: v for k, v in result.items() if k != "pins"}
+    out["pins_path"] = written
+    out["summary"] = {
+        "pins": len(pins),
+        "per_part": dict(sorted(per_part.items())),
+        "per_electrical_type": dict(sorted(per_type.items())),
+    }
+    out["note"] = (
+        f"{len(pins)} pins written to {written}. Read or diff that file "
+        f"directly; it is not summarised further here."
+    )
+    return out
+
+
+#: Installed library kinds lib_search cannot read, and why, as
+#: library.get_installed_libraries names them.
+_UNSEARCHED_KINDS = {
+    "database": "a database library (DbLib) keeps its parts as rows in a "
+                "database; lib_search reads it only with include_dblibs on, "
+                "and lib_dblib_search reads it directly",
+    "query": "a query library (SVN DbLib) keeps its parts as rows in a "
+             "database, which this search does not read",
+    "integrated": "an integrated library (IntLib) is a compiled package; this "
+                  "search reads only open .SchLib files",
+    "design_items": "workspace components are not in a file this search reads",
+}
+
+
+async def _search_coverage(bridge, library_path) -> dict[str, Any]:
+    """What a lib_search looked through, and what it could not.
+
+    An empty search used to read as "no such part" whatever was installed:
+    a user with a database library got 0 hits and no hint that the DbLib
+    was never opened. The search walks the open .SchLib documents, which
+    the open-documents list names exactly; the installed list names the
+    rest. Either read failing leaves its field None rather than failing
+    the search.
+    """
+    if library_path:
+        return {"libraries_searched": [library_path], "libraries_searched_count": 1}
+    out: dict[str, Any] = {}
+    searched: list[str] = []
+    try:
+        docs = await bridge.send_command_async("application.get_open_documents")
+        rows = docs if isinstance(docs, list) else (
+            (docs or {}).get("result") or (docs or {}).get("documents") or [])
+        seen: set[str] = set()
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            path = str(row.get("file_path") or "")
+            kind = str(row.get("document_kind") or "").upper()
+            if (kind == "SCHLIB" or path.upper().endswith(".SCHLIB")) and path.lower() not in seen:
+                seen.add(path.lower())
+                searched.append(path)
+        out["libraries_searched"] = searched
+        out["libraries_searched_count"] = len(searched)
+    except Exception:  # noqa: BLE001 - coverage is a report, never a failure
+        out["libraries_searched"] = None
+    try:
+        inst = await bridge.send_command_async(
+            "library.get_installed_libraries", {"with_counts": "false"})
+        libs = (inst.get("libraries") or []) if isinstance(inst, dict) else []
+        open_paths = {p.lower() for p in searched}
+        skipped = []
+        for lib in libs:
+            if not isinstance(lib, dict):
+                continue
+            path = str(lib.get("library_path") or "")
+            kind = str(lib.get("library_type") or "unknown")
+            if kind == "unknown" and is_dblib_path(path):
+                # Installed but missing from the available list, which is
+                # how the type gets lost; the file is still a DbLib.
+                kind = "database"
+            reason = _UNSEARCHED_KINDS.get(kind)
+            if reason is None and path.upper().endswith(".SCHLIB") and path.lower() not in open_paths:
+                reason = ("an installed .SchLib that is not open; open it, or pass "
+                          "library_path, to search it")
+            if reason:
+                skipped.append({"library_path": path, "library_type": kind, "reason": reason})
+        out["not_searched"] = skipped
+        out["not_searched_count"] = len(skipped)
+        note = _coverage_note(len(searched), 0, skipped)
+        if note:
+            out["coverage_note"] = note
+    except Exception:  # noqa: BLE001
+        out["not_searched"] = None
+    return out
+
+
+def _coverage_note(schlib_count: int, dblib_count: int, skipped: list) -> "str | None":
+    """The sentence that stops an empty search reading as "no such part"."""
+    if not skipped:
+        return None
+    kinds = sorted({str(s.get("library_type")) for s in skipped})
+    what = f"{schlib_count} open .SchLib file(s)"
+    if dblib_count:
+        what += (f" and {dblib_count} database "
+                 f"librar{'y' if dblib_count == 1 else 'ies'}")
+    else:
+        what += " only"
+    n = len(skipped)
+    return (f"Searched {what}. {n} installed librar{'y' if n == 1 else 'ies'} "
+            f"({', '.join(kinds)}) were not searched, so an empty result is not "
+            "evidence that a part is absent from them.")
+
+
+#: One DbLib search reads table rows over ADO. A network database or a
+#: large table takes far longer than the file reads the other tools wait
+#: on, so it gets its own, longer, bound.
+_DBLIB_TIMEOUT = 120.0
+
+
+async def _query_one_dblib(bridge, library_path: str, query: str,
+                           limit: int) -> dict[str, Any]:
+    """One database library searched by library.query_dblib, redacted."""
+    reply = await bridge.send_command_async(
+        "library.query_dblib",
+        {"library_path": library_path, "query": query, "limit": str(limit)},
+        timeout=_DBLIB_TIMEOUT)
+    return redact_reply(reply) if isinstance(reply, dict) else {}
+
+
+def _dblib_summary(path: str, reply: dict[str, Any]) -> dict[str, Any]:
+    """What one DbLib search covered, for ``dblib_searches``."""
+    libs = reply.get("libraries") or []
+    lib = libs[0] if libs and isinstance(libs[0], dict) else {}
+    return {
+        "library_path": path,
+        "searched": bool(lib.get("searched")),
+        "error": lib.get("error"),
+        "count": reply.get("count", 0),
+        "truncated": bool(reply.get("truncated")),
+        "rows_scanned": reply.get("rows_scanned"),
+        "scan_capped": bool(reply.get("scan_capped")),
+        "tables_searched": lib.get("tables_searched") or [],
+        "tables_failed": lib.get("tables_failed") or [],
+    }
+
+
+async def _search_dblibs(bridge, result: dict[str, Any], query: str,
+                         limit: int, include_dblibs: bool) -> None:
+    """Fold the installed database libraries into a lib_search reply.
+
+    Each DbLib that _search_coverage listed under ``not_searched`` is
+    searched in turn with what is left of ``limit``. Its rows join
+    ``results`` marked ``source: "dblib"`` and its path moves to
+    ``libraries_searched``. A DbLib that is switched off, crowded out by
+    the limit, or that fails stays under ``not_searched`` with that
+    reason: a DbLib never fails the search, and an unread one is never
+    reported as read.
+    """
+    skipped = result.get("not_searched")
+    if not isinstance(skipped, list):
+        return
+    results = result.setdefault("results", [])
+    searched = result.get("libraries_searched")
+    schlib_count = len(searched) if isinstance(searched, list) else 0
+    truncated = bool(result.get("truncated"))
+    remaining: list[dict[str, Any]] = []
+    summaries: list[dict[str, Any]] = []
+    dblibs_read = 0
+    for entry in skipped:
+        if not isinstance(entry, dict) or entry.get("library_type") != "database":
+            remaining.append(entry)
+            continue
+        path = str(entry.get("library_path") or "")
+        if not include_dblibs:
+            remaining.append({**entry, "reason": (
+                "a database library (DbLib), skipped because include_dblibs "
+                "is off; turn it on, or use lib_dblib_search")})
+            continue
+        room = limit - len(results)
+        if room <= 0:
+            truncated = True
+            remaining.append({**entry, "reason": (
+                "a database library (DbLib) left unsearched because the result "
+                "limit was reached first; raise limit or use lib_dblib_search")})
+            continue
+        try:
+            reply = await _query_one_dblib(bridge, path, query, room)
+        except Exception as exc:  # noqa: BLE001 - one DbLib never fails the search
+            remaining.append({**entry, "reason": (
+                "a database library (DbLib) whose search failed: "
+                + redact_connection_text(str(exc))[:300])})
+            continue
+        summary = _dblib_summary(path, reply)
+        summaries.append(summary)
+        if not summary["searched"]:
+            remaining.append({**entry, "reason": (
+                "a database library (DbLib) that could not be searched ("
+                + str(summary["error"] or "no reply") + "); lib_dblib_info "
+                "reports its connection and tables")})
+            continue
+        hits = [search_hit_as_result(h) for h in (reply.get("results") or [])
+                if isinstance(h, dict)]
+        results.extend(hits[:room])
+        if summary["truncated"] or summary["scan_capped"] or len(hits) > room:
+            truncated = True
+        if isinstance(searched, list):
+            searched.append(path)
+        dblibs_read += 1
+    result["not_searched"] = remaining
+    result["not_searched_count"] = len(remaining)
+    if isinstance(searched, list):
+        result["libraries_searched_count"] = len(searched)
+    if summaries:
+        result["dblib_searches"] = summaries
+    note = _coverage_note(schlib_count, dblibs_read, remaining)
+    if note:
+        result["coverage_note"] = note
+    else:
+        result.pop("coverage_note", None)
+    result["count"] = len(results)
+    result["truncated"] = truncated or len(results) >= limit
+
+
+async def _search_named_dblib(bridge, library_path: str, query: str,
+                              search_type: str, limit: int) -> dict[str, Any]:
+    """lib_search with library_path naming a DbLib: that DbLib alone, in
+    lib_search's own reply shape."""
+    out: dict[str, Any] = {"query": query, "search_type": search_type,
+                           "limit": limit, "results": []}
+    try:
+        reply = await _query_one_dblib(bridge, library_path, query, limit)
+    except Exception as exc:  # noqa: BLE001
+        return {"success": False, "error": redact_connection_text(str(exc))}
+    summary = _dblib_summary(library_path, reply)
+    out["results"] = [search_hit_as_result(h) for h in (reply.get("results") or [])
+                      if isinstance(h, dict)]
+    out["count"] = len(out["results"])
+    out["truncated"] = summary["truncated"] or summary["scan_capped"]
+    out["dblib_searches"] = [summary]
+    if summary["searched"]:
+        out["libraries_searched"] = [library_path]
+        out["libraries_searched_count"] = 1
+    else:
+        out["libraries_searched"] = []
+        out["libraries_searched_count"] = 0
+        out["not_searched"] = [{
+            "library_path": library_path, "library_type": "database",
+            "reason": ("a database library (DbLib) that could not be searched ("
+                       + str(summary["error"] or "no reply") + ")")}]
+        out["not_searched_count"] = 1
+    return out
 
 
 def register_library_tools(mcp):
@@ -422,7 +821,12 @@ def register_library_tools(mcp):
         """
         from eda_agent.design.symbol_gen import generate_ic_symbol
 
-        geom = generate_ic_symbol(left_pins, right_pins)
+        # The generator is a pure function and raises on bad geometry;
+        # at the tool boundary that becomes a refusal, not a stack trace.
+        try:
+            geom = generate_ic_symbol(left_pins, right_pins)
+        except ValueError as e:
+            return {"ok": False, "reason": str(e)}
 
         bridge = get_bridge()
         created = await bridge.send_command_async(
@@ -440,11 +844,13 @@ def register_library_tools(mcp):
         # straight into the string, so any of them carrying ";" or "~~"
         # reshaped the payload -- a pin name lifted from a datasheet
         # table is enough to do it by accident.
-        pins_payload, _ = _pins_payload(geom.pins)
-        pins_res = await bridge.send_command_async(
-            "library.add_pins", {"pins": pins_payload})
-
-        # Body: Altium standard light-yellow fill (discipline rule 17).
+        # BODY FIRST, THEN PINS, AND THE ORDER IS NOT COSMETIC.
+        # Altium exposes no z-order on schematic primitives: drawing order
+        # IS insertion order, and there is no send-to-back to undo it. This
+        # rectangle is solid (fill_color sets IsSolid), so adding it after
+        # the pins paints it straight over the pin names, and the only
+        # remedy is rebuilding the whole symbol. Reported from the field
+        # 2026-09-21 after exactly that rebuild.
         body = geom.body
         rect_res = await bridge.send_command_async(
             "library.add_symbol_rectangle",
@@ -455,6 +861,10 @@ def register_library_tools(mcp):
                 "border_color": 0,
             },
         )
+
+        pins_payload, _ = _pins_payload(geom.pins)
+        pins_res = await bridge.send_command_async(
+            "library.add_pins", {"pins": pins_payload})
 
         return {
             "symbol": name,
@@ -497,7 +907,10 @@ def register_library_tools(mcp):
         """
         from eda_agent.design.symbol_gen import generate_passive_symbol
 
-        geom = generate_passive_symbol(kind)
+        try:
+            geom = generate_passive_symbol(kind)
+        except ValueError as e:
+            return {"ok": False, "reason": str(e)}
         prefix = designator_prefix or {
             "resistor": "R", "r": "R", "res": "R",
             "capacitor": "C", "c": "C", "cap": "C",
@@ -679,6 +1092,13 @@ def register_library_tools(mcp):
         border_color: int = 0,
     ) -> dict[str, Any]:
         """Add a rectangle to the current symbol body.
+
+        ADD THE BODY BEFORE THE PINS. Altium exposes no z-order on
+        schematic primitives, so drawing order is insertion order and
+        there is no send-to-back to correct it afterwards. A rectangle
+        given a `fill_color` is SOLID, and one added after the pins paints
+        over the pin names; the only fix is rebuilding the symbol. Build
+        order is body, then pins, then anything drawn on top.
 
         Args:
             x1: First corner X in mils
@@ -906,11 +1326,15 @@ def register_library_tools(mcp):
         """
         from eda_agent.design.footprint_gen import generate_footprint
 
-        geom = generate_footprint(
-            family, pin_count, pitch=pitch, pad_w=pad_w, pad_h=pad_h,
-            row_span=row_span, shape=shape, silk=silk, courtyard=courtyard,
-            body_w=body_w, body_h=body_h, hole=hole, rows=rows, cols=cols,
-            exposed_pad=exposed_pad, skip=skip, tab_w=tab_w, tab_h=tab_h)
+        try:
+            geom = generate_footprint(
+                family, pin_count, pitch=pitch, pad_w=pad_w, pad_h=pad_h,
+                row_span=row_span, shape=shape, silk=silk,
+                courtyard=courtyard, body_w=body_w, body_h=body_h,
+                hole=hole, rows=rows, cols=cols, exposed_pad=exposed_pad,
+                skip=skip, tab_w=tab_w, tab_h=tab_h)
+        except ValueError as e:
+            return {"ok": False, "reason": str(e)}
 
         bridge = get_bridge()
         created = await bridge.send_command_async(
@@ -959,25 +1383,27 @@ def register_library_tools(mcp):
     @mcp.tool()
     async def lib_add_footprint_pad(
         designator: str,
-        x: int,
-        y: int,
-        x_size: int = 60,
-        y_size: int = 60,
-        hole_size: int = 0,
+        x: float,
+        y: float,
+        x_size: Optional[float] = None,
+        y_size: Optional[float] = None,
+        hole_size: float = 0,
         shape: str = "rectangular",
         layer: str = "TopLayer",
         rotation: int = 0,
         corner_radius: int = 25,
+        footprint_name: str = "",
+        units: str = "mil",
     ) -> dict[str, Any]:
-        """Add a pad to the current footprint.
+        """Add a pad to a footprint: the named one, or the current one.
 
         Args:
             designator: Pad designator (e.g., "1", "2")
             x: X coordinate in mils
             y: Y coordinate in mils
-            x_size: Pad X size in mils
-            y_size: Pad Y size in mils
-            hole_size: Drill hole size in mils (0 for SMD). A drilled pad
+            x_size: Pad X size (default 60 mil)
+            y_size: Pad Y size (default 60 mil)
+            hole_size: Drill hole size (0 for SMD). A drilled pad
                 is forced through-hole (MultiLayer); a hole-less pad is
                 SMD on `layer`.
             shape: Pad shape -- "round", "rectangular", "octagonal", or
@@ -988,26 +1414,40 @@ def register_library_tools(mcp):
             rotation: Pad rotation in degrees
             corner_radius: Corner radius percentage for shape="roundrect"
                 (Altium stores RR radius as a %; 25 is typical).
+            footprint_name: footprint to write into. Empty uses the
+                editor's current footprint; a name makes that footprint
+                current first and refuses if it cannot, since otherwise
+                the primitives land in whichever footprint another call
+                left current.
+            units: "mil" (default) or "mm", for every length and
+                coordinate here. Millimetres are kept exact: 1.625 mm
+                used to arrive as 64 mil and read back as 1.6256 mm.
 
         Returns:
             Dictionary confirming pad addition
         """
+        refusal = _units_refusal(units)
+        if refusal:
+            return refusal
         bridge = get_bridge()
+        params: dict[str, Any] = {
+            "designator": designator,
+            "x": format_length(x),
+            "y": format_length(y),
+            "x_size": format_length(
+                length_in(units, 60) if x_size is None else x_size),
+            "y_size": format_length(
+                length_in(units, 60) if y_size is None else y_size),
+            "hole_size": format_length(hole_size),
+            "shape": shape,
+            "layer": layer,
+            "rotation": rotation,
+            "corner_radius": corner_radius,
+        }
+        if footprint_name:
+            params["footprint_name"] = footprint_name
         result = await bridge.send_command_async(
-            "library.add_footprint_pad",
-            {
-                "designator": designator,
-                "x": x,
-                "y": y,
-                "x_size": x_size,
-                "y_size": y_size,
-                "hole_size": hole_size,
-                "shape": shape,
-                "layer": layer,
-                "rotation": rotation,
-                "corner_radius": corner_radius,
-            },
-        )
+            "library.add_footprint_pad", _with_units(params, units))
         hint = BulkHintTracker.record_and_hint("lib_add_footprint_pad")
         if hint and isinstance(result, dict):
             result["_hint_bulk"] = hint
@@ -1016,6 +1456,8 @@ def register_library_tools(mcp):
     @mcp.tool()
     async def lib_add_footprint_pads(
         pads: list[dict[str, Any]],
+        footprint_name: str = "",
+        units: str = "mil",
     ) -> dict[str, Any]:
         """Add MANY pads to the current footprint in ONE call.
 
@@ -1048,10 +1490,22 @@ def register_library_tools(mcp):
                  "y_size": 40},
             ])
 
+        ``footprint_name`` picks the footprint to write into. Empty uses
+        the editor's current footprint; a name makes that footprint
+        current first and refuses if it cannot, since otherwise the
+        primitives land in whichever footprint another call left current.
+
+        ``units`` is "mil" (default) or "mm" for every pad in the call:
+        one land pattern, one unit, so half a footprint cannot be drawn
+        in the wrong one. Millimetres are kept exact.
+
         Returns:
             Dict with added, failed, total counts.
         """
-        payload, skipped_invalid = _pads_payload(pads)
+        refusal = _units_refusal(units)
+        if refusal:
+            return refusal
+        payload, skipped_invalid = _pads_payload(pads, units)
 
         if not payload:
             return {
@@ -1062,22 +1516,25 @@ def register_library_tools(mcp):
             }
 
         bridge = get_bridge()
+        params: dict[str, Any] = {"pads": payload}
+        if footprint_name:
+            params["footprint_name"] = footprint_name
         result = await bridge.send_command_async(
-            "library.add_footprint_pads",
-            {"pads": payload},
-        )
+            "library.add_footprint_pads", _with_units(params, units))
         if isinstance(result, dict) and skipped_invalid:
             result["skipped_invalid"] = skipped_invalid
         return result
 
     @mcp.tool()
     async def lib_add_footprint_track(
-        x1: int,
-        y1: int,
-        x2: int,
-        y2: int,
-        width: int = 10,
+        x1: float,
+        y1: float,
+        x2: float,
+        y2: float,
+        width: Optional[float] = None,
         layer: str = "TopOverlay",
+        footprint_name: str = "",
+        units: str = "mil",
     ) -> dict[str, Any]:
         """Add a track to the current footprint (for silkscreen/courtyard).
 
@@ -1091,15 +1548,30 @@ def register_library_tools(mcp):
                 Altium layer is accepted, e.g. "BottomOverlay" or
                 "Mechanical1".."Mechanical16" for courtyard / assembly
                 outlines.
+            footprint_name: footprint to write into. Empty uses the
+                editor's current footprint; a name makes that footprint
+                current first and refuses if it cannot.
+            units: "mil" (default) or "mm", for every length and
+                coordinate here, kept exact rather than rounded to
+                whole mils.
 
         Returns:
             Dictionary confirming track addition
         """
         bridge = get_bridge()
+        refusal = _units_refusal(units)
+        if refusal:
+            return refusal
+        params: dict[str, Any] = {
+            "x1": format_length(x1), "y1": format_length(y1),
+            "x2": format_length(x2), "y2": format_length(y2),
+            "width": format_length(
+                length_in(units, 10) if width is None else width),
+            "layer": layer}
+        if footprint_name:
+            params["footprint_name"] = footprint_name
         result = await bridge.send_command_async(
-            "library.add_footprint_track",
-            {"x1": x1, "y1": y1, "x2": x2, "y2": y2, "width": width, "layer": layer},
-        )
+            "library.add_footprint_track", _with_units(params, units))
         hint = BulkHintTracker.record_and_hint("lib_add_footprint_track")
         if hint and isinstance(result, dict):
             result["_hint_bulk"] = hint
@@ -1108,6 +1580,8 @@ def register_library_tools(mcp):
     @mcp.tool()
     async def lib_add_footprint_tracks(
         tracks: list[dict[str, Any]],
+        footprint_name: str = "",
+        units: str = "mil",
     ) -> dict[str, Any]:
         """Add MANY tracks to the current footprint in ONE call.
 
@@ -1132,9 +1606,20 @@ def register_library_tools(mcp):
                 {"x1": -50, "y1":  30, "x2": -50, "y2": -30},
             ])
 
+        ``footprint_name`` picks the footprint to write into. Empty uses
+        the editor's current footprint; a name makes that footprint
+        current first and refuses if it cannot, since otherwise the
+        primitives land in whichever footprint another call left current.
+
+        ``units`` is "mil" (default) or "mm" for every track in the
+        call, kept exact rather than rounded to whole mils.
+
         Returns:
             Dict with added, failed, total counts.
         """
+        refusal = _units_refusal(units)
+        if refusal:
+            return refusal
         op_strs: list[str] = []
         skipped_invalid = 0
         for t in tracks:
@@ -1142,11 +1627,11 @@ def register_library_tools(mcp):
                 skipped_invalid += 1
                 continue
             fields = [
-                f"x1={round(t.get('x1', 0))}",
-                f"y1={round(t.get('y1', 0))}",
-                f"x2={round(t.get('x2', 0))}",
-                f"y2={round(t.get('y2', 0))}",
-                f"width={round(t.get('width', 10))}",
+                f"x1={format_length(t.get('x1', 0))}",
+                f"y1={format_length(t.get('y1', 0))}",
+                f"x2={format_length(t.get('x2', 0))}",
+                f"y2={format_length(t.get('y2', 0))}",
+                f"width={format_length(t.get('width', length_in(units, 10)))}",
                 f"layer={_payload_safe(t.get('layer', 'TopOverlay'))}",
             ]
             op_strs.append(";".join(fields))
@@ -1160,23 +1645,26 @@ def register_library_tools(mcp):
             }
 
         bridge = get_bridge()
+        params: dict[str, Any] = {"tracks": "~~".join(op_strs)}
+        if footprint_name:
+            params["footprint_name"] = footprint_name
         result = await bridge.send_command_async(
-            "library.add_footprint_tracks",
-            {"tracks": "~~".join(op_strs)},
-        )
+            "library.add_footprint_tracks", _with_units(params, units))
         if isinstance(result, dict) and skipped_invalid:
             result["skipped_invalid"] = skipped_invalid
         return result
 
     @mcp.tool()
     async def lib_add_footprint_arc(
-        x_center: int,
-        y_center: int,
-        radius: int,
+        x_center: float,
+        y_center: float,
+        radius: float,
         start_angle: float = 0,
         end_angle: float = 360,
-        width: int = 10,
+        width: Optional[float] = None,
         layer: str = "TopOverlay",
+        footprint_name: str = "",
+        units: str = "mil",
     ) -> dict[str, Any]:
         """Add an arc to the current footprint.
 
@@ -1190,38 +1678,50 @@ def register_library_tools(mcp):
             layer: Layer name. Default "TopOverlay" (silkscreen). Any
                 Altium layer accepted, e.g. "Mechanical1".."Mechanical16"
                 for pin-1 / assembly markers.
+            footprint_name: footprint to write into. Empty uses the
+                editor's current footprint; a name makes that footprint
+                current first and refuses if it cannot.
+            units: "mil" (default) or "mm", for every length and
+                coordinate here, kept exact rather than rounded to
+                whole mils.
 
         Returns:
             Dictionary confirming arc addition
         """
         bridge = get_bridge()
+        refusal = _units_refusal(units)
+        if refusal:
+            return refusal
+        params: dict[str, Any] = {
+            "x_center": format_length(x_center),
+            "y_center": format_length(y_center),
+            "radius": format_length(radius),
+            "start_angle": start_angle,
+            "end_angle": end_angle,
+            "width": format_length(
+                length_in(units, 10) if width is None else width),
+            "layer": layer,
+        }
+        if footprint_name:
+            params["footprint_name"] = footprint_name
         result = await bridge.send_command_async(
-            "library.add_footprint_arc",
-            {
-                "x_center": x_center,
-                "y_center": y_center,
-                "radius": radius,
-                "start_angle": start_angle,
-                "end_angle": end_angle,
-                "width": width,
-                "layer": layer,
-            },
-        )
+            "library.add_footprint_arc", _with_units(params, units))
         return result
 
     @mcp.tool()
     async def lib_add_footprint_text(
         text: str,
-        x: int = 0,
-        y: int = 0,
-        size: int = 50,
-        width: int = 8,
+        x: float = 0,
+        y: float = 0,
+        size: Optional[float] = None,
+        width: Optional[float] = None,
         rotation: int = 0,
         layer: str = "TopOverlay",
         use_ttfont: bool = False,
         mirror: bool = False,
         library_path: Optional[str] = None,
         component_name: Optional[str] = None,
+        units: str = "mil",
     ) -> dict[str, Any]:
         """Add a text primitive to a PcbLib footprint.
 
@@ -1234,7 +1734,15 @@ def register_library_tools(mcp):
 
         Args:
             text: The string to place. Required.
-            x, y: Coordinates in mils, relative to the board origin.
+            x, y: Coordinates in mils, relative to the FOOTPRINT's origin,
+                which is what the handler has always actually done
+                (``Footprint.X + MilsToCoord(x)``). The old wording said
+                "board origin" and that was wrong: a PcbLib footprint sits
+                at Altium's library origin, 50000 mils out, so the two
+                readings differ by more than a metre. The pad, track and
+                arc tools wrote absolute board coordinates and produced
+                footprints whose geometry was nowhere near them; they now
+                match this one.
             size: Text height in mils. 50 is a common silkscreen size;
                 drop to 30-40 for tight footprints.
             width: Stroke width in mils. 8 reads cleanly at 50 mil
@@ -1253,20 +1761,28 @@ def register_library_tools(mcp):
                 Defaults to the active document.
             component_name: Optional footprint name to switch to before
                 adding. Defaults to the currently active footprint.
+            units: "mil" (default) or "mm", for every length and
+                coordinate here, kept exact rather than rounded to
+                whole mils.
 
         Returns:
             Dict with ``success``, ``footprint``, ``text``, ``layer``,
             ``x``, ``y``.
         """
         if not text:
-            raise InvalidParameterError("text is required")
+            return {"ok": False,
+                    "reason": "text is required: pass the string to place"}
+        refusal = _units_refusal(units)
+        if refusal:
+            return refusal
         bridge = get_bridge()
-        params: dict[str, Any] = {
+        params: dict[str, Any] = _with_units({
             "text": text,
-            "x": x, "y": y,
-            "size": size, "width": width,
+            "x": format_length(x), "y": format_length(y),
+            "size": format_length(length_in(units, 50) if size is None else size),
+            "width": format_length(length_in(units, 8) if width is None else width),
             "rotation": rotation, "layer": layer,
-        }
+        }, units)
         if use_ttfont:
             params["use_ttfont"] = "true"
         if mirror:
@@ -1311,7 +1827,8 @@ def register_library_tools(mcp):
             kind of source, or write permissions prevented the dump.
         """
         if not intlib_path:
-            raise InvalidParameterError("intlib_path is required")
+            return {"ok": False, "reason":
+                    "intlib_path is required: absolute path to the .IntLib"}
         bridge = get_bridge()
         result = await bridge.send_command_async(
             "library.extract_intlib",
@@ -1672,11 +2189,12 @@ def register_library_tools(mcp):
     # =========================================================================
 
     @mcp.tool()
-    async def lib_update_footprint_heights_from_3d() -> dict[str, Any]:
+    async def lib_update_footprint_heights_from_3d(
+        mode: str = "raise",
+    ) -> dict[str, Any]:
         """Sweep the active PCB Library: for every footprint, find the
-        tallest 3D body and propagate its ``OverallHeight`` up to
-        ``Footprint.Height`` when the model is taller than the
-        currently-stored value.
+        tallest 3D body and write its ``OverallHeight`` to
+        ``Footprint.Height``.
 
         Footprint.Height is what Altium's placement-collision DRC
         uses to enforce height-clearance rules (don't place a tall
@@ -1686,26 +2204,97 @@ def register_library_tools(mcp):
         to 0 which makes the DRC silently no-op -- a real production
         risk caught only at first-article assembly.
 
+        Args:
+            mode: ``raise`` (default) only ever increases a height, so a
+                hand-set "I know this part is 5mm despite the model
+                being 3mm" survives. ``match`` also LOWERS one to the
+                model.
+
+        Reach for ``match`` when heights are too TALL, which raising
+        cannot fix and which is the more damaging fault: a footprint
+        claiming 50mm when the part is 3mm fails placement-collision
+        DRC against everything near it and blocks placements that are
+        fine, where a too-low height merely fails to catch a real
+        collision. To correct one footprint, or one with no model at
+        all, use ``lib_set_footprint_height``.
+
         Safety:
-          - Only updates footprints whose 3D model is TALLER than
-            the current Height -- never shrinks. Protects a manual
-            "I know this part is 5mm despite the model being 3mm"
-            override.
-          - Does NOT save the library; the agent should review the
-            ``items[]`` diff and save via the Altium UI or by
-            re-opening to confirm.
+          - NEITHER MODE WRITES ZERO. A footprint with no 3D body
+            yields no measurement, and writing the 0 that implies would
+            silently disable the very DRC rule this arms. Those come
+            back as ``without_model`` with their names.
+          - Does NOT save the library; review the ``items[]`` diff and
+            save in Altium.
 
         Returns:
-            Dict with:
-              - ``inspected``: total footprints walked
-              - ``updated``: footprints whose Height was raised
-              - ``items``: per-footprint diff
-                ``{name, old_height_mm, new_height_mm}``
+            Dict with ``mode``, ``inspected``, ``updated``, ``lowered``,
+            ``without_model``, ``without_model_names``, and ``items``
+            (``{name, old_height_mm, new_height_mm}`` per footprint).
         """
+        mode = (mode or "raise").strip().lower()
+        if mode not in ("raise", "match"):
+            return {
+                "ok": False,
+                "reason": (
+                    f"mode must be 'raise' (only increase, the default) or "
+                    f"'match' (also lower to the model). Got {mode!r}."),
+            }
         bridge = get_bridge()
         return await bridge.send_command_async(
-            "library.update_footprint_heights_from_3d", {},
+            "library.update_footprint_heights_from_3d", {"mode": mode},
             timeout=60.0,
+        )
+
+    @mcp.tool()
+    async def lib_set_footprint_height(
+        height_mm: float,
+        footprint_name: str = "",
+    ) -> dict[str, Any]:
+        """Set one footprint's Height directly, up or down.
+
+        The sweep can only derive a height from a 3D body, which leaves
+        two cases it cannot serve: a part with no model, and a part
+        whose model is wrong. There was no setter at all before this, so
+        a footprint carrying an absurd height could be read and not
+        corrected.
+
+        WHY TOO TALL IS WORSE THAN TOO SHORT. Footprint.Height drives
+        placement-collision DRC. A footprint claiming 50mm when the part
+        is 3mm fails against everything near it and blocks placements
+        that are fine. A too-low height only fails to catch a real
+        collision. The first floods the report and gets the rule
+        switched off; the second is quiet.
+
+        ZERO IS ACCEPTED AND IS NOT NEUTRAL. It disables the rule for
+        that footprint rather than relaxing it, so nothing is ever
+        flagged against it however tall the real part is. The reply says
+        so when zero is written.
+
+        Args:
+            height_mm: the height in MILLIMETRES, not mils. Must be
+                non-negative.
+            footprint_name: which footprint. Empty uses the library's
+                current component.
+
+        Returns:
+            ``{name, old_height_mm, new_height_mm, changed, saved,
+            save_note, note}``. ``saved`` is always false: the library
+            is modified in memory and left for you to review and save.
+        """
+        try:
+            height = float(height_mm)
+        except (TypeError, ValueError):
+            return {"ok": False,
+                    "reason": f"height_mm must be a number, got {height_mm!r}"}
+        if height < 0 or height != height:      # NaN fails both comparisons
+            return {"ok": False,
+                    "reason": (f"height_mm must be a non-negative number of "
+                               f"millimetres, got {height_mm!r}")}
+
+        bridge = get_bridge()
+        return await bridge.send_command_async(
+            "library.set_footprint_height",
+            {"height_mm": height, "footprint_name": footprint_name},
         )
 
     @mcp.tool()
@@ -1777,27 +2366,45 @@ def register_library_tools(mcp):
         Args:
             component_name: Name of the footprint in the active PcbLib
             model_path: Path to the 3D model file (.step, .stp); must exist
-            offset_x: X offset in mils, applied via the body's MoveByXY
+            offset_x: X offset in mils from the FOOTPRINT's origin. The
+                body is always moved onto that origin first: it arrives
+                at the board origin, and a footprint open in the editor
+                sits at Altium's library origin, about 50000,50000 mil,
+                so an offset of 50000 used to be needed to bring it back.
+                Do not add that any more.
             offset_y: Y offset in mils, applied with offset_x
             offset_z: Z offset in mils, sets the body's StandoffHeight.
                 This is the common adjustment: lifting a connector body
                 off the board so it sits on its pads rather than through
                 them.
-            rotation_x: NOT APPLIED. IPCB_ComponentBody exposes a PLANAR
-                Rotation only; the PCB API gives the model no X tilt, so
-                this is accepted for signature stability and ignored.
+            rotation_x: NOT APPLIED, accepted for signature stability.
                 Set it in the library editor after linking.
             rotation_y: NOT APPLIED, same reason as rotation_x.
-            rotation_z: Z rotation in degrees, sets the body's Rotation.
+            rotation_z: NOT APPLIED. This one used to assign
+                ``Body.Rotation``, and IPCB_ComponentBody has no such
+                property on AD26 26.9.1.9. MEASURED: it raised
+                "Undeclared identifier: Rotation", which DelphiScript
+                cannot catch, so the Try around it never fired and the
+                resulting modal took the whole polling loop down with
+                it. Passing a rotation used to cost you the bridge.
+                The rotation lives on the MODEL, not the body, and has
+                to be set before the model is attached
+                (``Model.SetState`` in AutoSTEPplacer.pas). Its four
+                arguments are undocumented, so they are not guessed at
+                here. Rotate in the library editor for now.
 
         Returns:
-            Dict with ``success``, ``footprint``, ``model``, and
+            Dict with ``success``, ``footprint``, ``model``,
+            ``footprint_origin_mils`` and ``moved_to_footprint_origin``
+            (false means the body may sit at the board origin, away
+            from the footprint), and
             ``applied`` -- which adjustments were actually written to
             the body (``standoff_height``, ``rotation_z``,
-            ``offset_xy``). Check it rather than assuming: these three
-            properties are documented but are exercised nowhere else in
-            this codebase, and each assignment is individually guarded,
-            so one failing does not fail the call.
+            ``offset_xy``). Check it rather than assuming: each
+            assignment is individually guarded, so one failing does not
+            fail the call. ``rotation_z`` is now ALWAYS false, see
+            above. ``standoff_height`` is confirmed live;
+            ``offset_xy`` is not yet.
 
             A ``false`` means the adjustment did not happen, which
             covers both a rejected assignment and an argument left at
@@ -1931,6 +2538,15 @@ def register_library_tools(mcp):
                 designator string (slow on large libraries; smaller
                 payload than with_parameters). Default False.
 
+        ``part_count`` HERE IS NOT TRUSTWORTHY. It comes from the
+        CompInfoReader, and MEASURED on AD26 it reported 2 for a symbol
+        created single-part whose every pin carries OwnerPartId 1, while
+        ``lib_get_component_details`` reported 1 for an identically
+        created symbol. The two readers disagree and only the
+        discrepancy is established, not a conversion between them, so
+        no correction is applied here rather than guess one. Use
+        ``lib_get_component_details`` when the part count matters.
+
         Returns:
             Dictionary with ``count`` and ``components`` list. Each
             component carries index, name, alias_name, part_count,
@@ -1965,8 +2581,28 @@ def register_library_tools(mcp):
         search_type: str = "all",
         library_path: Optional[str] = None,
         limit: int = 100,
+        include_dblibs: bool = True,
     ) -> dict[str, Any]:
-        """Search open SchLib documents for components.
+        """Search open SchLib documents and installed database libraries.
+
+        OPEN .SchLib FILES AND INSTALLED DATABASE LIBRARIES (DbLib) ARE
+        SEARCHED. Query libraries (SVN DbLib), integrated libraries
+        (IntLib), workspace components and installed .SchLib files that
+        are not open are not, so 0 hits is not "no such part". The reply
+        says what was searched (``libraries_searched``, DbLibs included)
+        and lists every installed library it could not read
+        (``not_searched``, with the reason), with a ``coverage_note`` when
+        anything was skipped.
+
+        DbLib rows join ``results`` after the SchLib matches, with what
+        is left of ``limit``, each marked ``source: "dblib"`` and carrying
+        its table, key, symbol and footprints; SchLib matches are marked
+        ``source: "schlib"``. Every column of a row is matched, so a
+        manufacturer part number or a value finds the part. A DbLib that
+        cannot be connected stays under ``not_searched`` with the reason,
+        and ``dblib_searches`` says what each DbLib search covered. Use
+        ``lib_dblib_search`` to restrict to one table or a few columns,
+        and ``lib_dblib_get_record`` for every column of one row.
 
         Case-insensitive substring match. Walks every .SchLib that is
         a member of any open project, plus every standalone .SchLib in
@@ -1974,6 +2610,14 @@ def register_library_tools(mcp):
         ``CreateLibCompInfoReader`` so the search is fast even with
         many libraries open: it only loads symbols when ``search_type``
         is ``"parameters"``.
+
+        IT READS THE FILE ON DISK, NOT THE EDITOR. A component created
+        in this session and not yet saved WILL NOT BE FOUND, and the
+        reply is an ordinary empty result with nothing to say why.
+        MEASURED: a symbol that ``lib_get_component_details`` returned
+        in full was absent here until a save. Save first, or use
+        ``lib_get_component_details`` / ``lib_get_pin_list``, which read
+        the live document.
 
         DATASHEET DISCIPLINE: Matches carry `_datasheet_guidance`.
         Before recommending any matched part as a replacement or
@@ -1987,19 +2631,42 @@ def register_library_tools(mcp):
                 description), ``"name"``, ``"description"``, or
                 ``"parameters"`` (slow, also walks each candidate's
                 parameter dict via the live symbol).
-            library_path: Optional path to a single .SchLib to restrict
-                the search to. When omitted, searches every open
-                library.
-            limit: Cap on returned matches (default 100).
+            library_path: Optional path to a single .SchLib, or to a
+                single .DbLib, to restrict the search to. When omitted,
+                searches every open .SchLib and every installed DbLib.
+            limit: Cap on returned matches (default 100), SchLib and
+                DbLib together.
+            include_dblibs: also search the installed database libraries
+                (default True). Their rows are read through the connection
+                each DbLib declares, every row of every enabled table up to
+                lib_dblib_search's row bound, so a large database makes the
+                search slower; False keeps it to open .SchLib files and
+                lists the DbLibs under ``not_searched``. A ``library_path``
+                naming a .DbLib searches that one either way.
 
         Returns:
             Dict with ``query``, ``search_type``, ``count``, ``limit``,
-            ``truncated`` (True when count == limit), and ``results``,
-            a list of {name, alias_name, description, library_path,
-            part_count} per match, plus `_datasheet_guidance` +
-            `_datasheet_parts`.
+            ``truncated`` (True when count == limit, or when a DbLib
+            search stopped early), and ``results``, a list of {name,
+            alias_name, description, library_path, part_count, source}
+            per match (a DbLib row adds table, key_field, symbol_ref,
+            symbol_library, footprints, matched_field, and its name is
+            the row's key), plus `_datasheet_guidance` +
+            `_datasheet_parts`; and ``libraries_searched``,
+            ``not_searched`` (each ``{library_path, library_type,
+            reason}``), ``dblib_searches`` and ``coverage_note`` as
+            above. Either list is None when it could not be read.
         """
         bridge = get_bridge()
+        if library_path and is_dblib_path(library_path):
+            result = await _search_named_dblib(
+                bridge, library_path, query, search_type, limit)
+            if result.get("success") is False:
+                return result
+            synthetic = {"components": result.get("results") or []}
+            return tag_response(
+                result, components=synthetic, context="lib_search"
+            )
         params: dict[str, Any] = {
             "query": query,
             "search_type": search_type,
@@ -2010,6 +2677,13 @@ def register_library_tools(mcp):
         result = await bridge.send_command_async("library.search", params)
         if isinstance(result, list):
             result = {"results": result}
+        if isinstance(result, dict) and "error" not in result:
+            for row in result.get("results") or []:
+                if isinstance(row, dict):
+                    row.setdefault("source", "schlib")
+            result.update(await _search_coverage(bridge, library_path))
+            if not library_path:
+                await _search_dblibs(bridge, result, query, limit, include_dblibs)
         if isinstance(result, dict):
             synthetic = {"components": (
                 result.get("results") or result.get("components") or []
@@ -2018,6 +2692,270 @@ def register_library_tools(mcp):
                 result, components=synthetic, context="lib_search"
             )
         return result
+
+    # =========================================================================
+    # Database libraries (DbLib)
+    # =========================================================================
+
+    @mcp.tool()
+    async def lib_dblib_info(
+        library_path: str,
+        with_fields: bool = True,
+    ) -> dict[str, Any]:
+        """What a database library (.DbLib) declares, and how it connects.
+
+        A DbLib holds no symbols. It names a database (Access, Excel, SQL
+        Server, any ODBC or OLE DB source) and lists the tables whose rows
+        are the components; each row names a symbol in a .SchLib and
+        footprints in .PcbLibs. This reads the .DbLib file itself, inside
+        Altium, and with ``with_fields`` opens the database read-only to
+        list each table's columns. Call it first on an unfamiliar DbLib:
+        it says which column is each table's key, which carries the
+        symbol and which the footprints, which is what
+        ``lib_dblib_get_record`` and ``sch_place_dblib_component`` take.
+
+        THE PASSWORD IS NEVER RETURNED. ``connection.redacted`` is the
+        connection string with every Password / Pwd value replaced by
+        ``***``, and ``has_password`` says whether there was one.
+
+        HOW EACH COLUMN WAS FOUND IS STATED. ``key_field_source`` is
+        ``key_setting`` or ``where_clause`` when the DbLib names it,
+        ``part_number_column`` when a column is called Part Number
+        (Altium's default), or ``first_column`` as a last resort; treat
+        the last as a guess. ``settings`` is the table's section of the
+        file as written, for anything the parsed fields do not cover.
+
+        Args:
+            library_path: Full path of the .DbLib (or .SVNDbLib) file.
+                lib_get_installed_libraries lists installed ones with
+                library_type "database".
+            with_fields: True (default) connects to the database to list
+                every table's columns. False reads the file only and
+                opens no connection: use it when the database is slow or
+                unreachable, or to read the connection settings alone.
+
+        Returns:
+            {"library_path", "connection": {"provider", "kind" (access /
+            excel / sql_server / odbc / oracle / other), "data_source",
+            "has_password", "redacted", "read_only"}, "left_quote",
+            "right_quote", "search_path", "table_count", "tables": [{"name",
+            "enabled", "schema", "key_field", "key_field_source",
+            "key_field_found", "symbol_ref_field", "symbol_library_field",
+            "description_field", "footprint_fields": [{"ref_field",
+            "library_field"}], "fields" (null when not read), "field_count",
+            "error", "settings"}], "sections", "fields_included",
+            "connected" (null when no connection was attempted)}.
+        """
+        refusal = dblib_path_refusal(library_path)
+        if refusal:
+            return refusal
+        bridge = get_bridge()
+        params: dict[str, Any] = {"library_path": library_path}
+        if not with_fields:
+            params["with_fields"] = "false"
+        result = await bridge.send_command_async(
+            "library.get_dblib_info", params, timeout=_DBLIB_TIMEOUT)
+        return redact_reply(result)
+
+    @mcp.tool()
+    async def lib_dblib_search(
+        query: str,
+        library_path: Optional[str] = None,
+        table: Optional[str] = None,
+        fields: Optional[list[str]] = None,
+        limit: int = 50,
+        max_rows: int = 20000,
+    ) -> dict[str, Any]:
+        """Search database libraries (.DbLib) for components, read-only.
+
+        Case-insensitive substring match against the columns of every
+        row of every enabled table, in one DbLib or in every installed
+        one. lib_search already folds DbLib rows into its own results;
+        this is the direct form, for restricting to one table or a few
+        columns, or for raising the row bound on a large database.
+
+        THE QUERY NEVER REACHES THE DATABASE. Each table is read with a
+        plain SELECT of the DbLib's own declared table and every row is
+        matched inside Altium, so a query holding quotes, wildcards or
+        SQL is matched as the text it is. The cost is that every row is
+        read: ``max_rows`` bounds the total, ``rows_scanned`` reports it,
+        and ``scan_capped`` says the bound cut the search short.
+
+        Args:
+            query: Text to find (case-insensitive substring).
+            library_path: One .DbLib to search. Omitted, every installed
+                database library is searched.
+            table: One table the DbLib declares (as lib_dblib_info names
+                it). Omitted, every enabled table.
+            fields: Column names to match. Omitted, every column. A name
+                a table lacks is reported under ``unknown_fields``.
+            limit: Cap on returned rows (1 to 1000, default 50).
+            max_rows: Cap on rows read in total (default 20000).
+
+        Returns:
+            {"query", "count", "limit", "truncated", "rows_scanned",
+            "scan_capped", "libraries": [{"library_path", "searched",
+            "error", "tables_searched", "tables_failed", "unknown_fields"}],
+            "results": [{"library_path", "table", "key", "key_field",
+            "symbol_ref", "symbol_library", "footprints": [{"ref",
+            "library"}], "description", "matched_field", "matched_value"}]}.
+            A library's ``error`` is a code (READ_FAILED, TABLE_UNKNOWN,
+            NO_TABLES, NO_CONNECTION_STRING, CONNECT_FAILED,
+            LIMIT_REACHED); the reason text never carries the connection
+            string.
+        """
+        if not isinstance(query, str) or not query.strip():
+            return {"success": False, "error": "query is required"}
+        if library_path:
+            refusal = dblib_path_refusal(library_path)
+            if refusal:
+                return refusal
+        if not 1 <= int(limit) <= 1000:
+            return {"success": False, "error": "limit must be between 1 and 1000"}
+        if int(max_rows) < 1:
+            return {"success": False, "error": "max_rows must be at least 1"}
+        names = [str(f).strip() for f in (fields or [])]
+        if any(not n or "|" in n for n in names):
+            return {"success": False,
+                    "error": ("each entry in fields must be a non-empty column "
+                              "name without '|', which separates them on the "
+                              "way to Altium")}
+        params: dict[str, Any] = {
+            "query": query,
+            "limit": str(int(limit)),
+            "max_rows": str(int(max_rows)),
+        }
+        if library_path:
+            params["library_path"] = library_path
+        if table:
+            params["table"] = table
+        if names:
+            params["fields"] = "|".join(names)
+        bridge = get_bridge()
+        result = await bridge.send_command_async(
+            "library.query_dblib", params, timeout=_DBLIB_TIMEOUT)
+        return redact_reply(result)
+
+    @mcp.tool()
+    async def lib_dblib_get_record(
+        library_path: str,
+        table: str,
+        key: str,
+        key_field: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Every column of one row of a database library table.
+
+        The row is found by its key, the value in the table's key column
+        (``key`` in a ``lib_dblib_search`` result; the column is
+        ``key_field`` in ``lib_dblib_info``). The key is passed to the
+        database as a parameter, never as SQL text. ``lookup`` says how
+        the row was found: ``parameter`` when the database matched it,
+        ``scan`` when the parameterised query could not run and the
+        table was read and compared instead.
+
+        Args:
+            library_path: Full path of the .DbLib file.
+            table: A table the DbLib declares.
+            key: The row's key value.
+            key_field: Optional column to match instead of the DbLib's
+                own key column; it must be a column of the table.
+
+        Returns:
+            {"library_path", "table", "key", "key_field",
+            "key_field_source", "lookup", "found", "match_count",
+            "rows_scanned", "scan_capped", "symbol_ref", "symbol_library",
+            "footprints": [{"ref", "library"}], "description",
+            "fields": {column: value}}. ``found`` False is an answer, not
+            an error: the key is not in that table. ``match_count`` above
+            1 means the key is not unique and the first row is shown.
+        """
+        refusal = dblib_path_refusal(library_path)
+        if refusal:
+            return refusal
+        if not isinstance(table, str) or not table.strip():
+            return {"success": False, "error": "table is required"}
+        if not isinstance(key, str) or not key.strip():
+            return {"success": False, "error": "key is required"}
+        params: dict[str, Any] = {
+            "library_path": library_path, "table": table, "key": key,
+        }
+        if key_field:
+            params["key_field"] = key_field
+        bridge = get_bridge()
+        result = await bridge.send_command_async(
+            "library.get_dblib_record", params, timeout=_DBLIB_TIMEOUT)
+        return redact_reply(result)
+
+    @mcp.tool()
+    async def sch_place_dblib_component(
+        library_path: str,
+        table: str,
+        key: str,
+        x: int,
+        y: int,
+        rotation: int = 0,
+        designator: Optional[str] = None,
+        sheet_path: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Place one database library (DbLib) part on a schematic sheet.
+
+        Acts on a .SchDoc: the active sheet, or ``sheet_path``. The part
+        is built by Altium from the database row (symbol, footprints and
+        parameters, with its database link) and dropped at (x, y). NOT
+        INTERACTIVE: nothing is attached to the cursor and nothing waits
+        for a click.
+
+        THE DbLib MUST BE AVAILABLE TO ALTIUM. Altium finds a DbLib part
+        by the library's file name among its available libraries, so the
+        DbLib has to be installed (lib_install_library) or in the
+        project. The call refuses before touching the sheet when it is
+        not, or when ``table`` is not one the DbLib declares.
+
+        ``database_linked`` reads the placed part's DatabaseTableName
+        back: True means the part carries its database link, False that
+        Altium built it without one. ``lib_reference`` is the symbol it
+        used.
+
+        Do not draw a schematic part by part with this. A sheet comes from
+        a DesignPlan through design_execute_plan; this is for adding a
+        part a person picked from their company library.
+
+        Args:
+            library_path: Full path of the .DbLib file.
+            table: A table the DbLib declares.
+            key: The row's key value (``key`` in a lib_dblib_search
+                result).
+            x, y: Location in mils.
+            rotation: 0, 90, 180 or 270.
+            designator: Optional designator to stamp on the part.
+            sheet_path: Optional .SchDoc path; default the active sheet.
+
+        Returns:
+            {"placed", "library_path", "table", "key", "lib_reference",
+            "database_table", "database_linked", "x", "y", "rotation",
+            "designator"}.
+        """
+        refusal = dblib_path_refusal(library_path)
+        if refusal:
+            return refusal
+        if not isinstance(table, str) or not table.strip():
+            return {"success": False, "error": "table is required"}
+        if not isinstance(key, str) or not key.strip():
+            return {"success": False, "error": "key is required"}
+        if int(rotation) not in (0, 90, 180, 270):
+            return {"success": False, "error": "rotation must be 0, 90, 180 or 270"}
+        params: dict[str, Any] = {
+            "library_path": library_path, "table": table, "key": key,
+            "x": str(int(x)), "y": str(int(y)), "rotation": str(int(rotation)),
+        }
+        if designator:
+            params["designator"] = designator
+        if sheet_path:
+            params["sheet_path"] = sheet_path
+        bridge = get_bridge()
+        result = await bridge.send_command_async(
+            "library.place_dblib_component", params, timeout=_DBLIB_TIMEOUT)
+        return redact_reply(result)
 
     @mcp.tool()
     async def lib_get_component_details(
@@ -2087,9 +3025,9 @@ def register_library_tools(mcp):
               - `_datasheet_guidance` + `_datasheet_parts`.
         """
         if not component_name and component_index is None:
-            raise ValueError(
-                "Provide component_name or component_index"
-            )
+            return {"ok": False, "reason":
+                    "provide component_name or component_index to pick "
+                    "the part"}
         bridge = get_bridge()
         params: dict[str, Any] = {}
         if component_name:
@@ -2261,18 +3199,19 @@ def register_library_tools(mcp):
             missing_target, failed.
         """
         if not ops:
-            raise InvalidParameterError("ops must be a non-empty list")
+            return {"ok": False,
+                    "reason": "ops must be a non-empty list of style ops"}
         encoded_ops: list[str] = []
         for i, op in enumerate(ops):
             if not isinstance(op, dict):
-                raise InvalidParameterError(f"ops[{i}] must be a dict")
+                return {"ok": False,
+                        "reason": f"ops[{i}] must be a dict of style keys"}
             target = op.get("target", "designator")
             if (not isinstance(target, str) or ";" in target
                     or "~~" in target):
-                raise InvalidParameterError(
-                    f"ops[{i}].target must be a string without "
-                    "';' or '~~'"
-                )
+                return {"ok": False, "reason":
+                        f"ops[{i}].target must be a string without "
+                        "';' or '~~'"}
             parts = [f"target={target}"]
             style_set = False
             if op.get("font_id") is not None:
@@ -2294,10 +3233,9 @@ def register_library_tools(mcp):
                 parts.append(f"justification={int(op['justification'])}")
                 style_set = True
             if not style_set:
-                raise InvalidParameterError(
-                    f"ops[{i}] must set at least one of font_id / "
-                    "color / is_hidden / orientation / justification"
-                )
+                return {"ok": False, "reason":
+                        f"ops[{i}] must set at least one of font_id / "
+                        "color / is_hidden / orientation / justification"}
             encoded_ops.append(";".join(parts))
         bridge = get_bridge()
         params: dict[str, Any] = {
@@ -2312,6 +3250,174 @@ def register_library_tools(mcp):
             params["only_mismatched"] = "false"
         result = await bridge.send_command_async(
             "library.set_label_formats", params, timeout=timeout,
+        )
+        return result or {}
+
+    @mcp.tool()
+    async def lib_set_mech_layers(
+        layers: list[dict[str, Any]],
+        library_path: Optional[str] = None,
+        tidy_pairs: bool = False,
+        timeout: float = 180.0,
+    ) -> dict[str, Any]:
+        """Name, enable and kind the mechanical layers of one library.
+
+        WHY THIS EXISTS RATHER THAN THE pcb_* LAYER TOOLS. Those act on
+        whichever board is current, and pointing them at a particular
+        library depends on the focus actually moving. When it does not
+        they operate on the previously focused library while reporting
+        success: a sweep over twenty one libraries returned twenty one
+        identical answers because every call had re-read the same file.
+
+        This takes the library by PATH and refuses unless the document
+        that ended up focused is the one asked for. Acting on the wrong
+        library is worse than not acting, because it looks like it
+        worked.
+
+        Every change is READ BACK. A layer whose name, enable or kind did
+        not take is reported against that layer rather than folded into
+        an overall pass.
+
+        PAIRED KINDS. Any kind ending in Top or Bottom is held by the
+        layer PAIR rather than by either layer, under a shorter name with
+        the side dropped, so "Courtyard Top" is stored as the pair kind
+        "Courtyard". Assigning one therefore needs BOTH sides in the same
+        call: give the partner kind to another layer in ``layers`` and
+        the two are joined and the pair given the kind. Single kinds such
+        as "Fab Notes" need no partner.
+
+        Pair with ``lib_run_across`` to apply the same layer scheme to
+        many libraries in a single call.
+
+        Args:
+            layers: One dict per layer. Keys: ``layer`` (required, e.g.
+                "Mechanical13"), and any of ``name``, ``enabled``
+                (bool), ``kind`` (e.g. "Courtyard Top"). A layer with
+                none of the three is reported as nothing asked for.
+            library_path: The library to edit. Defaults to the focused
+                document, which is only safe for a single library.
+            tidy_pairs: Remove layer pairs no kind justifies. Altium
+                never drops a pair when a kind moves to other layers, so
+                a library reworked more than once accumulates pairs the
+                Layer Stack Manager still shows. A pair survives the
+                tidy only when its two layers carry kinds that are each
+                other's opposite side. Off by default, because it
+                REMOVES pairs and a caller renaming one layer should not
+                have the stack rearranged underneath.
+            timeout: Seconds.
+
+        Returns:
+            Dict with ``library``, ``layers`` (each: layer, changed,
+            problem), ``changed``, ``failed``, ``kinds_displaced``,
+            ``pairs_removed``, ``pairs_tidied`` and ``pairs_scanned_to``.
+        """
+        encoded = _encode_layer_ops(layers)
+        if isinstance(encoded, dict):
+            return encoded
+
+        params: dict[str, Any] = {"layers": encoded}
+        if library_path:
+            params["library_path"] = library_path
+        if tidy_pairs:
+            params["tidy_pairs"] = "true"
+
+        bridge = get_bridge()
+        result = await bridge.send_command_async(
+            "library.set_mech_layers", params, timeout=timeout,
+        )
+        return result or {}
+
+    @mcp.tool()
+    async def lib_run_across(
+        action: str,
+        libraries: list[str],
+        params: Optional[dict[str, Any]] = None,
+        timeout: float = 600.0,
+    ) -> dict[str, Any]:
+        """Run one library command against several libraries in one call.
+
+        Sweeping libraries one at a time costs a round trip and a turn of
+        orchestration per library. This sends the whole sweep as a single
+        request and loops inside Altium.
+
+        WHAT THIS DOES NOT SAVE. Opening and saving each library, which is
+        the larger cost and is unavoidable. The saving is the round trips
+        and the waiting between them, which is what makes a twenty
+        library sweep tedious rather than slow.
+
+        WHICH ACTIONS WORK. Those that accept a ``library_path``, which is
+        most of the read and batch-edit commands. The footprint EDITING
+        commands (``create_footprint``, ``add_footprint_pad``,
+        ``link_3d_model`` and the rest) act on whichever library is open
+        and cannot be swept, because focusing the document is the work.
+
+        FAILURE IS PER LIBRARY. One library that will not open does not
+        abandon the rest, and the reply reports each library separately
+        rather than as a single flag. "17 of 20 worked" collapses into
+        either a false clean or a false failure the moment it becomes one
+        boolean, and the caller cannot tell which library to fix.
+
+        Args:
+            action: Library command without its namespace, e.g.
+                "get_components", "batch_rename", "audit_styles".
+            libraries: Full paths. Passed to Altium separated by "|",
+                which cannot occur in a Windows path.
+            params: Parameters shared by every library. Any
+                ``library_path`` here is overridden per library.
+            timeout: Seconds for the whole sweep, not per library.
+
+        Returns:
+            Dict with ``results`` (each: library, success, data, error),
+            ``succeeded``, ``failed`` and ``libraries``.
+        """
+        paths = [str(p).strip() for p in (libraries or []) if str(p).strip()]
+        if not paths:
+            return {"success": False,
+                    "error": ("libraries is empty, so nothing would run. A "
+                              "sweep over no libraries would report a clean "
+                              "pass having done nothing")}
+        if not str(action or "").strip():
+            return {"success": False, "error": "action is required"}
+        bad = [p for p in paths if "|" in p]
+        if bad:
+            return {"success": False,
+                    "error": (f"a library path contains the '|' separator, "
+                              f"so the list cannot be split safely: {bad}")}
+
+        merged: dict[str, Any] = dict(params or {})
+        merged.pop("library_path", None)
+
+        # A `layers` LIST has to be encoded the same way
+        # lib_set_mech_layers encodes it. Passed through raw it arrives
+        # as a JSON array, the handler parses no operations from it, and
+        # the sweep reports a success per library having changed
+        # nothing. Anything already a string is left alone, so a caller
+        # who encoded it themselves is not re-encoded.
+        if isinstance(merged.get("layers"), (list, tuple)):
+            encoded = _encode_layer_ops(merged["layers"])
+            if isinstance(encoded, dict):
+                return encoded
+            merged["layers"] = encoded
+
+        # Every value crossing the bridge is a JSON string field. A
+        # nested object or list in any other parameter would arrive the
+        # same way `layers` did, so it is refused rather than silently
+        # flattened into something the handler cannot read.
+        for key, value in merged.items():
+            if isinstance(value, (list, tuple, dict)):
+                return {"success": False,
+                        "error": (f"params[{key!r}] is a "
+                                  f"{type(value).__name__}, which the "
+                                  f"handler receives as raw JSON and cannot "
+                                  f"parse. Pass it in the encoded form that "
+                                  f"action expects.")}
+
+        merged["action"] = str(action).strip()
+        merged["libraries"] = "|".join(paths)
+
+        bridge = get_bridge()
+        result = await bridge.send_command_async(
+            "library.run_across", merged, timeout=timeout,
         )
         return result or {}
 
@@ -2344,25 +3450,47 @@ def register_library_tools(mcp):
         Returns:
             Dictionary with counts of updated, created, and failed assignments
         """
+        if not assignments:
+            return {"ok": False, "reason":
+                    "assignments must be a non-empty list of "
+                    "component_name/param_name/param_value dicts"}
+        # Validate keys and values BEFORE touching the workspace, so a
+        # bad call leaves no half-written batch file behind.
+        required_keys = {"component_name", "param_name", "param_value"}
+        encoding = _batch_encoding()
+        for i, a in enumerate(assignments):
+            missing = required_keys - set(a.keys())
+            if missing:
+                return {"ok": False, "reason":
+                        f"assignment {i} is missing required keys: "
+                        f"{', '.join(sorted(missing))}"}
+            for key in required_keys:
+                if "|" in str(a[key]):
+                    return {"ok": False, "reason":
+                            f"assignment {i}: '{key}' value contains the "
+                            "pipe character '|' which would corrupt the "
+                            "batch file"}
+                try:
+                    str(a[key]).encode(encoding)
+                except UnicodeEncodeError:
+                    bad = _first_unencodable(str(a[key]), encoding)
+                    return {"ok": False, "reason":
+                            f"assignment {i}: '{key}' contains "
+                            f"{bad!r}, which the Altium-side batch "
+                            f"reader's codepage ({encoding}) cannot "
+                            "represent; use a plain-text equivalent"}
+
         config = get_config()
         config.ensure_workspace()
         batch_path = config.workspace_dir / "batch_params.txt"
 
-        # Validate keys and values before writing
-        required_keys = {"component_name", "param_name", "param_value"}
-        for i, a in enumerate(assignments):
-            missing = required_keys - set(a.keys())
-            if missing:
-                raise InvalidParameterError(
-                    f"Assignment {i} is missing required keys: {', '.join(sorted(missing))}"
-                )
-            for key in required_keys:
-                if "|" in str(a[key]):
-                    raise InvalidParameterError(
-                        f"Assignment {i}: '{key}' value contains pipe character '|' which would corrupt the batch file"
-                    )
-
-        with open(batch_path, "w", encoding="latin-1") as f:
+        # Windows would translate the newline into CR LF here. The
+        # Pascal reader splits on the newline and leaves the carriage
+        # return attached to the LAST field on the line, so a rename
+        # wrote a LibReference ending in CR and a parameter got a CR
+        # in its value. The Pascal side trims as well; both, because
+        # either alone leaves the other half of the contract unstated.
+        with open(batch_path, "w", encoding=encoding, newline="") as f:
             for a in assignments:
                 f.write(f"{a['component_name']}|{a['param_name']}|{a['param_value']}\n")
 
@@ -2393,25 +3521,47 @@ def register_library_tools(mcp):
         Returns:
             Dictionary with counts of renamed and failed assignments
         """
+        if not assignments:
+            return {"ok": False, "reason":
+                    "assignments must be a non-empty list of "
+                    "old_name/new_name dicts"}
+        # Validate keys and values BEFORE touching the workspace, so a
+        # bad call leaves no half-written batch file behind.
+        required_keys = {"old_name", "new_name"}
+        encoding = _batch_encoding()
+        for i, a in enumerate(assignments):
+            missing = required_keys - set(a.keys())
+            if missing:
+                return {"ok": False, "reason":
+                        f"assignment {i} is missing required keys: "
+                        f"{', '.join(sorted(missing))}"}
+            for key in required_keys:
+                if "|" in str(a[key]):
+                    return {"ok": False, "reason":
+                            f"assignment {i}: '{key}' value contains the "
+                            "pipe character '|' which would corrupt the "
+                            "batch file"}
+                try:
+                    str(a[key]).encode(encoding)
+                except UnicodeEncodeError:
+                    bad = _first_unencodable(str(a[key]), encoding)
+                    return {"ok": False, "reason":
+                            f"assignment {i}: '{key}' contains "
+                            f"{bad!r}, which the Altium-side batch "
+                            f"reader's codepage ({encoding}) cannot "
+                            "represent; use a plain-text equivalent"}
+
         config = get_config()
         config.ensure_workspace()
         batch_path = config.workspace_dir / "batch_rename.txt"
 
-        # Validate keys and values before writing
-        required_keys = {"old_name", "new_name"}
-        for i, a in enumerate(assignments):
-            missing = required_keys - set(a.keys())
-            if missing:
-                raise InvalidParameterError(
-                    f"Assignment {i} is missing required keys: {', '.join(sorted(missing))}"
-                )
-            for key in required_keys:
-                if "|" in str(a[key]):
-                    raise InvalidParameterError(
-                        f"Assignment {i}: '{key}' value contains pipe character '|' which would corrupt the batch file"
-                    )
-
-        with open(batch_path, "w", encoding="latin-1") as f:
+        # Windows would translate the newline into CR LF here. The
+        # Pascal reader splits on the newline and leaves the carriage
+        # return attached to the LAST field on the line, so a rename
+        # wrote a LibReference ending in CR and a parameter got a CR
+        # in its value. The Pascal side trims as well; both, because
+        # either alone leaves the other half of the contract unstated.
+        with open(batch_path, "w", encoding=encoding, newline="") as f:
             for a in assignments:
                 f.write(f"{a['old_name']}|{a['new_name']}\n")
 
@@ -2549,8 +3699,19 @@ def register_library_tools(mcp):
         return result
 
     @mcp.tool()
-    async def lib_get_pin_list() -> dict[str, Any]:
-        """Get all pins of the current library component.
+    async def lib_get_pin_list(
+        component_name: str = "",
+        output_path: str = "",
+        inline_limit: int = 150,
+    ) -> dict[str, Any]:
+        """Get all pins of a library component.
+
+        NAME THE COMPONENT. Without ``component_name`` this reads
+        whatever the SchLib editor currently has selected, so the answer
+        depends on editor state a caller cannot see, and any tool that
+        moves the selection between calls changes what this returns.
+        Passing the name also avoids disturbing the selection, which is
+        what made exporting one symbol affect the next call.
 
         DATASHEET DISCIPLINE: Pin name + electrical_type from the
         symbol can be wrong, especially on libraries that have been
@@ -2560,18 +3721,48 @@ def register_library_tools(mcp):
         table. The response carries `_datasheet_guidance` +
         `_datasheet_parts`.
 
+        BIG SYMBOLS SPILL TO A FILE ON PURPOSE. A 699-pin module returns
+        more than a conversation can hold, and which half survives is
+        then decided by whichever client happens to be reading. Above
+        `inline_limit` pins the full array is written as JSON and the
+        reply carries `pins_path` and a summary instead. That is the
+        better artefact anyway: the file can be diffed against the
+        datasheet's pin table by script, field by field, without any of
+        it passing through the conversation.
+
+        Args:
+            component_name: library reference of the symbol to read.
+                Empty falls back to the editor's current component.
+            output_path: write the full pin array here as JSON and
+                return the summary. Forces the file path regardless of
+                size.
+            inline_limit: pin count above which the array is written to
+                a file instead of returned inline. 0 always returns
+                inline, which is what you want only for a small symbol.
+
         Returns:
             Dictionary with "count", "component" name, and "pins" array.
             Each pin has: designator, name, electrical_type, x, y,
             orientation, hidden. Plus `_datasheet_guidance` +
             `_datasheet_parts`.
+
+            When spilled: "pins_path" plus "summary" giving pins per
+            part and the electrical-type distribution, and no "pins".
         """
         bridge = get_bridge()
+        params: dict[str, Any] = {}
+        if str(component_name).strip():
+            params["component_name"] = component_name
         result = await bridge.send_command_async(
-            "library.get_pin_list", {}
+            "library.get_pin_list", params
         )
         if isinstance(result, dict):
             comp = str(result.get("component") or "").strip()
+            pins = result.get("pins")
+            if isinstance(pins, list) and (
+                output_path or (inline_limit and len(pins) > inline_limit)
+            ):
+                result = _spill_pin_list(result, pins, comp, output_path)
             explicit = (
                 [{"manufacturer": "", "part_number": comp, "designators": ""}]
                 if comp
@@ -2581,6 +3772,45 @@ def register_library_tools(mcp):
                 result, explicit_parts=explicit, context="lib_get_pin_list"
             )
         return result
+
+    @mcp.tool()
+    async def lib_set_pin_owner_part(
+        pin_designators: str,
+        owner_part_id: int,
+        component_name: str = "",
+    ) -> dict[str, Any]:
+        """Reassign pins of a multi-part symbol to a sub-part, or to Part Zero.
+
+        ``owner_part_id=0`` is Altium's Part Zero: the pin belongs to
+        the package as a whole instead of to one sub-part. That is the
+        documented placement for a multi-part component's supply pins.
+        A sub-part-owned supply pin is redrawn at every instance origin,
+        and where the gate pitch is only twice the pin length those
+        copies land on each other and the netlist merges the two rails.
+
+        Changes the library only. Placed instances pick it up on the
+        next Update From Libraries, which produces an ECO.
+
+        Args:
+            pin_designators: comma-separated pin numbers, e.g. "3,12".
+            owner_part_id: 0 for Part Zero, or 1..part_count.
+            component_name: library reference of the symbol to edit.
+                Empty falls back to the editor's current component.
+
+        Returns:
+            Dictionary with "component", "owner_part_id", the
+            "pins_changed" list and its "count".
+        """
+        bridge = get_bridge()
+        params: dict[str, Any] = {
+            "pin_designators": pin_designators,
+            "owner_part_id": int(owner_part_id),
+        }
+        if str(component_name).strip():
+            params["component_name"] = str(component_name).strip()
+        return await bridge.send_command_async(
+            "library.set_pin_owner_part", params
+        )
 
     @mcp.tool()
     async def lib_export_kicad_symbol(
@@ -2629,7 +3859,7 @@ def register_library_tools(mcp):
             return {"success": False, "error": "no component selected and none named"}
         pins = pin_data.get("pins", []) or []
 
-        MM = 0.0254  # mils -> mm
+        from eda_agent.units import MM_PER_MIL as MM  # mils -> mm
 
         def esc(s: str) -> str:
             return str(s).replace("\\", "\\\\").replace('"', '\\"')
@@ -2987,6 +4217,16 @@ def register_library_tools(mcp):
                 "overwrite": overwrite,
                 "note": "nothing was moved; re-run with dry_run=False",
             }
+        # Names ride a '~~'-separated field, and the default is to
+        # DELETE the moved parts from the source: a name carrying the
+        # separator splits into fragments that can match real parts.
+        # Refuse rather than strip.
+        bad = [n for n in resolved if "~~" in n]
+        if bad:
+            return {"ok": False, "reason":
+                    f"component names {bad} contain '~~', which is the "
+                    "wire-format separator; fragments could match other "
+                    "parts, so the call is refused"}
         bridge = get_bridge()
         return await bridge.send_command_async(
             "library.move_components",
@@ -3070,6 +4310,14 @@ def register_library_tools(mcp):
                 "overwrite": overwrite,
                 "note": "nothing was moved; re-run with dry_run=False",
             }
+        # Same wire format and same default-delete as
+        # lib_move_components; same refusal.
+        bad = [n for n in resolved if "~~" in n]
+        if bad:
+            return {"ok": False, "reason":
+                    f"footprint names {bad} contain '~~', which is the "
+                    "wire-format separator; fragments could match other "
+                    "footprints, so the call is refused"}
         bridge = get_bridge()
         return await bridge.send_command_async(
             "library.move_footprints",
@@ -3096,6 +4344,61 @@ def register_library_tools(mcp):
         """
         bridge = get_bridge()
         return await bridge.send_command_async("library.split_pin_functions", {})
+
+    @mcp.tool()
+    async def lib_get_installed_libraries(
+        with_counts: bool = True,
+    ) -> dict[str, Any]:
+        """List the libraries installed in the Altium environment.
+
+        The answer to "what libraries does this installation have?", which
+        no other tool gives: `lib_search` walks only the SchLibs already
+        open in the workspace, and `design_snapshot_inventory` has to be
+        handed explicit .SchLib paths. This reads the environment's own
+        list, so it covers .IntLib, .SchLib, .PcbLib, database and query
+        libraries whether or not anything is open.
+
+        INSTALLED IS NOT AVAILABLE. Installed libraries are the ones
+        switched on for this environment; available ones are every library
+        it knows about. This returns the installed list and reports the
+        available total beside it, so a library that is present but not
+        switched on shows up as a gap between the two numbers rather than
+        as an absence.
+
+        Args:
+            with_counts: True (default) also reports how many components
+                each library holds. That opens every library to count
+                them, so pass False for a fast listing; the count then
+                comes back as -1, meaning not asked rather than empty.
+
+        Returns:
+            {"libraries": [{"library_path", "file_name", "library_type",
+            "library_type_ordinal", "component_count"}], "installed_count",
+            "available_count", "counts_included"}. ``library_type`` is one
+            of integrated / source / datafile / database / none / query /
+            design_items, or unknown; it reads "unknown" with an ordinal of
+            -1 when a library is installed but missing from the available
+            list, which is a real state and not an error.
+        """
+        bridge = get_bridge()
+        params: dict[str, Any] = {}
+        if not with_counts:
+            params["with_counts"] = "false"
+        result = await bridge.send_command_async(
+            "library.get_installed_libraries", params
+        )
+        # Altium's component count is not a database library's row count:
+        # MEASURED on AD26, a DbLib of five rows read 0 while its connection
+        # was unreadable and 1 once it worked. Reported as unknown, with
+        # where the real answer is, rather than as a number.
+        if isinstance(result, dict) and with_counts:
+            for lib in result.get("libraries") or []:
+                if isinstance(lib, dict) and lib.get("library_type") in ("database", "query"):
+                    lib["component_count"] = None
+                    lib["count_note"] = ("Altium's count does not reflect a database "
+                                         "library's rows; lib_dblib_info and "
+                                         "lib_dblib_search read the database.")
+        return result
 
     @mcp.tool()
     async def lib_install_library(library_path: str) -> dict[str, Any]:
@@ -3157,7 +4460,9 @@ def register_library_tools(mcp):
             {"success": true, "library_path": "...", "deleted": "..."}.
         """
         if not component_name and component_index is None:
-            raise ValueError("Provide component_name or component_index")
+            return {"ok": False, "reason":
+                    "provide component_name or component_index to pick "
+                    "the part"}
         bridge = get_bridge()
         params: dict[str, Any] = {"library_path": library_path}
         if component_name:
@@ -3203,7 +4508,9 @@ def register_library_tools(mcp):
              "new_name": "..."}.
         """
         if not component_name and component_index is None:
-            raise ValueError("Provide component_name or component_index")
+            return {"ok": False, "reason":
+                    "provide component_name or component_index to pick "
+                    "the part"}
         bridge = get_bridge()
         params: dict[str, Any] = {
             "new_name": new_name,
@@ -3218,15 +4525,89 @@ def register_library_tools(mcp):
         )
 
     @mcp.tool()
+    async def lib_delete_footprint_primitives(
+        footprint_name: str,
+        object_type: str = "",
+        layer: str = "",
+        library_path: str = "",
+        include_pads: bool = False,
+        confirm: bool = False,
+    ) -> dict[str, Any]:
+        """Delete primitives inside ONE footprint of a PCB library.
+
+        THE ONLY LIBRARY-SCOPED PRIMITIVE DELETE. ``obj_delete`` and
+        ``pcb_delete_object`` both resolve a BOARD, and when no board is
+        focused that lookup opens the first PcbDoc any open project
+        holds. Aimed at a library they do not fail; they remove
+        primitives from a board you never named, and the reply does not
+        say which one. This is the tool for editing a footprint.
+
+        SCOPED THREE WAYS, all of which must agree before anything is
+        removed: the library by path, the footprint by name, and the
+        object type or layer. The library is verified AFTER it is
+        brought to the front, so a delete aimed at one that never
+        focused is refused rather than landing in whichever did.
+
+        PADS ARE EXCLUDED unless ``include_pads``. Deleting a pad changes
+        the part's connectivity rather than its drawing, and clearing
+        graphics off a layer should not quietly cost you the pinout.
+
+        Args:
+            footprint_name: The footprint to edit. Required: deleting
+                from whichever footprint the editor happens to show is
+                the mistake this avoids.
+            object_type: PCB object type, e.g. "track", "arc", "string",
+                "region", "fill". Give this or ``layer``.
+            layer: Restrict to one layer, e.g. "TopOverlay". The usual
+                case: clear a silkscreen without touching anything else.
+            library_path: The .PcbLib. Defaults to the focused document.
+            include_pads: Allow pads to be removed. Off by default.
+            confirm: Required. Read the footprint first with
+                ``lib_probe_footprint`` and pass True once the filters
+                are what you mean.
+
+        Returns:
+            Dict with ``library``, ``footprint``, ``removed``,
+            ``examined``, ``layers`` and ``pads_included``.
+        """
+        if not footprint_name.strip():
+            return {"ok": False, "reason": "footprint_name is required"}
+        if not object_type.strip() and not layer.strip():
+            return {"ok": False, "reason": (
+                "give object_type or layer. Emptying a whole footprint is "
+                "not something to reach by leaving both filters off")}
+
+        params: dict[str, Any] = {"footprint_name": footprint_name}
+        if object_type.strip():
+            params["object_type"] = object_type.strip()
+        if layer.strip():
+            params["layer"] = layer.strip()
+        if library_path.strip():
+            params["library_path"] = library_path.strip()
+        if include_pads:
+            params["include_pads"] = "true"
+        if confirm:
+            params["confirm"] = "true"
+
+        bridge = get_bridge()
+        return await bridge.send_command_async(
+            "library.delete_footprint_primitives", params)
+
+    @mcp.tool()
     async def lib_delete_footprint(
         footprint_name: str,
         library_path: str = "",
     ) -> dict[str, Any]:
         """Delete one footprint from a PCB library (.PcbLib).
 
-        Finds the footprint by name, removes and deregisters it, then saves
-        the .PcbLib. Deletes a single named footprint; if the name is not
-        found the call errors (FOOTPRINT_NOT_FOUND). No wildcard mass-delete.
+        Finds the footprint by name, removes and deregisters it, and MARKS
+        the .PcbLib dirty. It does NOT write to disk: this bridge defers
+        saves, and `app_save_all` (or `proj_save` on the LibPkg) is what
+        flushes them. Reported: this said it saved, the footprint was still
+        in the file and the timestamp unchanged until an explicit save.
+
+        Deletes a single named footprint; if the name is not found the call
+        errors (FOOTPRINT_NOT_FOUND). No wildcard mass-delete.
 
         Args:
             footprint_name: the footprint's name in the library.
@@ -3368,7 +4749,10 @@ def register_library_tools(mcp):
 
         Renames the footprint whose name is footprint_name to new_name.
         Errors if footprint_name is not found or new_name already exists in
-        the library. Saves the .PcbLib.
+        the library.
+
+        MARKS the .PcbLib dirty; it does not write. Call `app_save_all` to
+        flush, and check what it reports actually reached disk.
 
         Args:
             footprint_name: the current footprint name.
@@ -3504,8 +4888,18 @@ def register_library_tools(mcp):
         )
 
         if isinstance(spec_json, str):
-            spec_json = _json.loads(spec_json)
-        spec = LandPatternSpec.model_validate(spec_json)
+            try:
+                spec_json = _json.loads(spec_json)
+            except _json.JSONDecodeError as e:
+                return {"ok": False, "reason":
+                        f"spec_json is not valid JSON ({e}); pass the "
+                        "land-pattern spec object or its JSON text"}
+        try:
+            spec = LandPatternSpec.model_validate(spec_json)
+        except Exception as e:                         # pydantic ValidationError
+            return {"ok": False, "reason":
+                    f"spec_json does not match the land-pattern spec "
+                    f"schema: {e}"}
 
         bridge = get_bridge()
         footprint = await bridge.send_command_async(
@@ -3905,6 +5299,16 @@ def register_library_tools(mcp):
                 "true" if sync_design_item_id else "false",
         }
         if component_names:
+            # Comma-separated field; a LibReference containing a comma
+            # arrives as two names and a fragment can match a real
+            # component whose provenance this tool then rewrites.
+            # Refuse rather than strip.
+            bad = [n for n in component_names if "," in str(n)]
+            if bad:
+                return {"ok": False, "reason":
+                        f"component names {bad} contain a comma, which "
+                        "is the wire-format separator; fragments could "
+                        "match other components, so the call is refused"}
             params["component_names"] = ",".join(component_names)
         return await bridge.send_command_async(
             "library.clear_source_library", params,

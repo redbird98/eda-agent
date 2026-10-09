@@ -163,6 +163,20 @@ def _run_route(params: dict) -> dict:
 # (pcb_plan_placement) builds structured PlaceComp/PlaceNet/BoardRegion inputs
 # via the construct engine rather than taking a raw geometry dict, so wiring
 # it as a job kind needs that adapter first: a follow-up.
+def _run_layout_route(params: dict) -> dict:
+    from ..layout.route.job import route_job
+    return route_job(params)
+
+
+def _run_layout_place(params: dict) -> dict:
+    from ..layout.place.job import place_job
+    return place_job(params)
+
+
 JOB_KINDS: dict[str, Callable[[dict], dict]] = {
     "route": _run_route,
+    # The layout engine on an exact board read (pcb_autoroute starts it).
+    "layout_route": _run_layout_route,
+    # Its placer, likewise (pcb_autoplace starts it).
+    "layout_place": _run_layout_place,
 }

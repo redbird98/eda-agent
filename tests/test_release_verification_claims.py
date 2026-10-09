@@ -167,9 +167,10 @@ def test_every_step_that_writes_a_property_is_ranked():
             "nothing checks its claim against the Pascal.")
 
 
-# Step 0 pings the bridge, step 1 runs SelfTest, and step 8 only READS
-# violations. None writes an Altium property, so none can carry the
-# wrong-value risk the table ranks. Every other step must appear.
+# Step 0 pings the bridge, step 1 runs SelfTest, and steps 8 and 9 only
+# READ (violations, and a symbol's pins). None writes an Altium property,
+# so none can carry the wrong-value risk the table ranks. Every other
+# step must appear.
 #
 # Read-only does NOT mean risk-free, and step 8 is the clearest case:
 # it calls DM_PrimaryCrossProbeString, and an undeclared identifier
@@ -177,7 +178,20 @@ def test_every_step_that_writes_a_property_is_ranked():
 # That risk is recorded in the step's own "If it fails" paragraph. What
 # this table rates is a property written with a wrong value, which is a
 # different failure and one a read-only step cannot produce.
-_STEPS_WITHOUT_A_PROPERTY = {"0", "1", "8"}
+#
+# Step 10 (UNC paths) is also read-only: it opens a library through a
+# UNC path with lib_get_components. The change it verifies is a pure
+# DELETION of a StringReplace, so there is no new property write to
+# rank; the risk it carries (a mangled path) is the very thing the
+# step observes directly.
+#
+# Step 21 closes a document with Client.CloseDocument, a method call, not
+# a property write; its risk (an undeclared identifier) is in the step.
+#
+# Step 19 (the layout model read) only reads. Its undeclared-identifier
+# risk is listed in the step itself, identifier by identifier, for the
+# same reason step 8's is.
+_STEPS_WITHOUT_A_PROPERTY = {"0", "1", "8", "9", "10", "19", "21", "24"}
 
 
 def _step_headings() -> list[tuple[str, str]]:

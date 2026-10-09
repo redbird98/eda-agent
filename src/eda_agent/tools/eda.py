@@ -19,13 +19,20 @@ from ..core.review_engine import review_snapshot
 
 async def _snapshot(backend: Optional[str]):
     """Resolve the backend and pull its snapshot, or return a reason string."""
-    be = resolve_backend(backend)
+    be = None
     try:
+        # Inside the guard: an unrecognised name is refused here rather
+        # than quietly resolving to another EDA, and that refusal has to
+        # reach the caller as a reason instead of a traceback.
+        be = resolve_backend(backend)
         snap = await be.snapshot()
     except BackendUnavailableError as e:
         return None, str(e)
     except Exception as e:  # keep a raw backend traceback out of the response
-        return None, f"{be.name} snapshot failed: {e}"
+        # Named from the request when resolution itself failed, since
+        # there is no adapter to ask for a name in that case.
+        who = be.name if be is not None else (backend or "the active backend")
+        return None, f"{who} snapshot failed: {e}"
     return snap, None
 
 
@@ -83,13 +90,15 @@ def register_eda_tools(mcp) -> None:
         counts and a normalized list. ``backend`` targets one tool in "both"
         mode.
         """
-        be = resolve_backend(backend)
+        be = None
         try:
+            be = resolve_backend(backend)
             return await be.run_drc()
         except BackendUnavailableError as e:
             return {"ok": False, "reason": str(e)}
         except Exception as e:
-            return {"ok": False, "reason": f"{be.name} DRC failed: {e}"}
+            who = be.name if be is not None else (backend or "the active backend")
+            return {"ok": False, "reason": f"{who} DRC failed: {e}"}
 
     @mcp.tool()
     async def run_erc(backend: Optional[str] = None) -> dict[str, Any]:
@@ -100,13 +109,15 @@ def register_eda_tools(mcp) -> None:
         first). Returns violation counts and a normalized list. ``backend``
         targets one tool in "both" mode.
         """
-        be = resolve_backend(backend)
+        be = None
         try:
+            be = resolve_backend(backend)
             return await be.run_erc()
         except BackendUnavailableError as e:
             return {"ok": False, "reason": str(e)}
         except Exception as e:
-            return {"ok": False, "reason": f"{be.name} ERC failed: {e}"}
+            who = be.name if be is not None else (backend or "the active backend")
+            return {"ok": False, "reason": f"{who} ERC failed: {e}"}
 
     @mcp.tool()
     async def list_nets(backend: Optional[str] = None) -> dict[str, Any]:

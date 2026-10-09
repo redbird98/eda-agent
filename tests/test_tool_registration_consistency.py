@@ -35,7 +35,12 @@ INIT_PY = TOOLS_DIR / "__init__.py"
 
 
 def _imported_registrars() -> set[str]:
-    """Names imported via ``from .X import register_X_tools`` in __init__.py."""
+    """Registrars __init__.py can call: imported, or defined in it.
+
+    A registrar DEFINED here is as available as an imported one, and it
+    is the half this test cares about: what it catches is a call that
+    would NameError at boot, and a local definition cannot.
+    """
     tree = ast.parse(INIT_PY.read_text(encoding="utf-8"))
     names = set()
     for node in tree.body:
@@ -44,6 +49,14 @@ def _imported_registrars() -> set[str]:
                 if alias.name.startswith("register_") and \
                         alias.name.endswith("_tools"):
                     names.add(alias.name)
+        elif isinstance(node, ast.FunctionDef):
+            # Not the aggregators: they ARE the entrypoints, so nothing
+            # calls them from inside one and counting them here would
+            # report every entrypoint as imported-but-never-called.
+            if (node.name.startswith("register_")
+                    and node.name.endswith("_tools")
+                    and node.name not in _AGGREGATORS):
+                names.add(node.name)
     return names
 
 

@@ -144,8 +144,18 @@ class SessionJournal:
     def resolved(self, answer: str = "", *, now=None) -> JournalEvent:
         return self._append(KIND_RESOLVED, {"answer": answer}, now=now)
 
-    def note(self, text: str, *, now=None) -> JournalEvent:
-        return self._append(KIND_NOTE, {"text": text}, now=now)
+    def note(self, text: str, *, topic: str = "", data: Optional[dict] = None,
+             now=None) -> JournalEvent:
+        """A free-form record. ``topic`` files it under a section of the
+        design report (see ``design.report``); ``data`` carries numbers
+        behind it. Both are left out of the record when empty, so a note
+        reads exactly as it always has to anything that predates them."""
+        payload: dict = {"text": text}
+        if topic:
+            payload["topic"] = topic
+        if data:
+            payload["data"] = data
+        return self._append(KIND_NOTE, payload, now=now)
 
     # --- reading ---------------------------------------------------------
     def _raw_lines(self):

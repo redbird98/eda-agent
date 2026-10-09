@@ -1676,11 +1676,31 @@ def test_the_symbol_text_step_matches_the_real_tool_signature():
     rather than against this module's idea of it."""
     import inspect
 
-    from tests.test_easyeda_converter import _registered_tools
+    # Registered locally rather than imported from another test module.
+    # This used to reach into the EasyEDA converter test for the helper,
+    # which coupled a KiCad test to a file it has nothing to do with:
+    # deleting that file broke this one, and the failure named a missing
+    # module rather than anything about symbol text.
+    from eda_agent.tools.application import register_application_tools
+    from eda_agent.tools.library import register_library_tools
+
+    class _Capture:
+        def __init__(self):
+            self.fns = {}
+
+        def tool(self, *args, **kwargs):
+            def deco(fn):
+                self.fns[fn.__name__] = fn
+                return fn
+            return deco
+
+    cap = _Capture()
+    register_library_tools(cap)
+    register_application_tools(cap)
 
     step = next(s for s in _sym_plan(_SYMTEXT)["steps"]
                 if s["tool"] == "lib_add_symbol_text")
-    sig = _registered_tools()["lib_add_symbol_text"]
+    sig = inspect.signature(cap.fns["lib_add_symbol_text"])
     assert not set(step["args"]) - set(sig.parameters)
     required = {n for n, p in sig.parameters.items()
                 if p.default is inspect.Parameter.empty}

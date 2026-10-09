@@ -8,6 +8,7 @@ from .. import __version__ as _mcp_server_version
 from ..bridge import get_bridge, AltiumNotRunningError
 from ..cli import get_bundled_scripts_path
 from .datasheet_hints import DATASHEET_RULES
+from ..atomicfile import replace_with_retry
 
 
 _VERSION_RE = re.compile(r"SCRIPT_VERSION\s*=\s*'([^']+)'")
@@ -88,7 +89,9 @@ def register_meta_tools(mcp):
         Filters (all optional, AND-combined):
             category: core, application, project, library, generic,
                 schematic, pcb, audit, design, simulation, routing, meta,
-                parts (and kicad on the KiCad backend). "core" holds the
+                parts (and kicad on the KiCad backend; the EasyEDA tools
+                file under the same subject headings as Altium's, so
+                "pcb" means the same thing on either). "core" holds the
                 EDA-agnostic main flow (review_design, get_board_info,
                 list_components, list_nets, run_drc, run_erc) and is the
                 usual starting point. Call with NO filter to get the live
@@ -222,11 +225,124 @@ def register_application_tools(mcp):
         - Executable path
         - Whether the MCP bridge is attached
 
+        MORE THAN ONE ALTIUM. ``candidate_count`` and ``candidate_pids``
+        list every instance, and ``selected_by`` says how ``pid`` was
+        chosen: the instance owning the bridge's status window, or the
+        only one with a visible window. When neither decides it, ``pid``
+        is None, ``ambiguous`` is True and ``reason`` explains, and every
+        UI tool refuses rather than read the wrong process's dialogs.
+
         Returns:
             Dictionary with status information
         """
         bridge = get_bridge()
         return bridge.get_altium_status()
+
+    @mcp.tool()
+    async def app_context() -> dict[str, Any]:
+        """Where you are, in one call. Run this before anything else.
+
+        THE FOUR FACTS THAT EXPLAIN MOST "WHY DIDN'T THAT WORK". Each has
+        cost a session on its own, and each was individually available
+        and individually unasked for:
+
+        * **Which document is focused, and what kind it is.** Nearly
+          every tool acts on the focused document. A pcb_ tool aimed
+          while a library is focused does not always fail; it can resolve
+          some other open document and report success for work you did
+          not ask for.
+        * **Whether the running script matches the one on disk.**
+          DelphiScript caches compiled units, so a deployed fix does
+          nothing until the script project is reopened. Symptom: a fix
+          that "did not work".
+        * **What is unsaved.** An edit that is real in memory and absent
+          from disk reads as a tool that silently did nothing.
+        * **Whether the bridge is answering at all**, as opposed to
+          Altium being up.
+
+        This composes existing reads rather than adding a bridge call, so
+        it is cheap and cannot disagree with the tools it summarises.
+
+        WHAT IT DOES NOT TELL YOU: which library component is current.
+        That is editor state with no read exposed, and the library
+        authoring tools depend on it. If a lib_add_* call lands somewhere
+        unexpected, set the target explicitly with
+        ``lib_set_current_component`` rather than assuming.
+
+        Returns:
+            ``{"backend": ..., "bridge_answering": bool,
+            "script_version_match": bool, "active_document": {...},
+            "open_document_count": N, "unsaved": [paths],
+            "warnings": [...], "next_step": ...}``.
+
+            ``warnings`` is empty when nothing needs attention.
+            ``next_step`` is the single thing worth doing first, or empty.
+        """
+        bridge = get_bridge()
+        warnings: list[str] = []
+        next_step = ""
+
+        ping = await app_ping()
+        answering = bool(ping.get("success"))
+        version_match = bool(ping.get("version_match"))
+        if not answering:
+            warnings.append(ping.get("message", "the bridge is not answering"))
+            next_step = (
+                "Start the polling loop: File > Run Script > Altium_API > "
+                "Dispatcher.pas > StartMCPServer."
+            )
+        elif not version_match:
+            # Ranked above everything else on purpose. Every other answer
+            # below is being produced by code that is not the code on
+            # disk, so acting on them can be worse than not asking.
+            warnings.append(ping.get("message", "stale script cache"))
+            next_step = (
+                "Close and reopen Altium_API.PrjScr so Altium recompiles. "
+                "Until then the running script is not the deployed one."
+            )
+
+        active: dict[str, Any] = {}
+        open_count = 0
+        unsaved: list[str] = []
+        if answering:
+            try:
+                active = await bridge.send_command_async(
+                    "application.get_active_document") or {}
+            except Exception as exc:            # noqa: BLE001
+                warnings.append(f"could not read the active document: {exc}")
+            try:
+                docs = await bridge.send_command_async(
+                    "application.get_open_documents") or []
+                if isinstance(docs, dict):
+                    docs = docs.get("documents", [])
+                open_count = len(docs)
+                unsaved = [d.get("file_path", "") for d in docs
+                           if isinstance(d, dict) and d.get("modified")]
+            except Exception as exc:            # noqa: BLE001
+                warnings.append(f"could not list open documents: {exc}")
+
+            if not active.get("file_path"):
+                warnings.append(
+                    "no document is focused, so any tool that acts on the "
+                    "focused document has nothing to act on")
+            if unsaved and not next_step:
+                next_step = (
+                    f"{len(unsaved)} document(s) have unsaved changes. "
+                    "app_save_all flushes them, and reports still_dirty.")
+
+        return {
+            "backend": "altium",
+            "bridge_answering": answering,
+            "script_version_match": version_match,
+            "running_script_version": ping.get("altium_script_version"),
+            "deployed_script_version": ping.get("bundled_script_version"),
+            "altium_version": ping.get("altium_version") or "",
+            "active_document": active,
+            "open_document_count": open_count,
+            "unsaved": unsaved,
+            "warnings": warnings,
+            "next_step": next_step,
+        }
 
     @mcp.tool()
     async def app_attach() -> dict[str, Any]:
@@ -271,12 +387,57 @@ def register_application_tools(mcp):
         Detach also triggers save_all automatically, so you don't need this
         as the very last step.
 
+        CHECK ``still_dirty``, DO NOT ASSUME. Altium refuses to save while
+        a command is active in the editor and asks a human whether to
+        write a copy instead; DoFileSave does not raise when it declines.
+        MEASURED: this returned saved:true while every single save was
+        being refused. It now counts what is still modified afterwards,
+        and ``saved`` is false when anything is. If that happens, run
+        ``app_exit_active_command`` and retry.
+
         Returns:
-            Dictionary confirming save
+            Dict with ``saved``, ``still_dirty``, and a ``reason`` when
+            documents remain unsaved.
         """
         bridge = get_bridge()
         result = await bridge.send_command_async(
             "application.save_all", timeout=60.0
+        )
+        return result
+
+    @mcp.tool()
+    async def app_exit_active_command() -> dict[str, Any]:
+        """Close a transaction a crashed handler left open in Altium.
+
+        THE TOOL FOR "A command is currently active and save cannot be
+        completed at this time". While that state is set, EVERY save is
+        refused and the editor asks whether to write a copy instead.
+
+        IT SURVIVES RESTARTING THE POLLING LOOP, because the state lives
+        in Altium's PCB server rather than in the script, and Escape in
+        the editor does not clear it either. MEASURED on 2026-08-25:
+        saves were being refused on a brand-new library, and the state
+        had been left hours earlier by ``lib_link_3d_model`` faulting
+        between PreProcess and PostProcess on an undeclared identifier.
+        It outlived several restarts.
+
+        Every PreProcess in this bridge is paired, including on its error
+        paths, so this is not routine cleanup: it is recovery from a
+        handler that DIED mid-transaction. AltiumScriptCentral ships the
+        same one-line remedy as ExitActiveCommand.vbs.
+
+        Calling it when nothing is outstanding is harmless.
+
+        It saves nothing by itself. Run ``app_save_all`` afterwards and
+        check ``still_dirty``.
+
+        Returns:
+            Dict reporting whether each server accepted the unwind, plus
+            the count of still-modified documents before and after.
+        """
+        bridge = get_bridge()
+        result = await bridge.send_command_async(
+            "application.exit_active_command", timeout=30.0
         )
         return result
 
@@ -301,6 +462,37 @@ def register_application_tools(mcp):
         from ..config import get_config
         from ..checkpoint import CheckpointStore
         return CheckpointStore(get_config().workspace_dir / "checkpoints")
+
+    @mcp.tool()
+    async def app_close_document(file_path: str,
+                                 discard_changes: bool = False) -> dict[str, Any]:
+        """Close ONE open document, found by its full path, whatever has focus.
+
+        Unlike closing through the workspace manager, which acts on the
+        FOCUSED object, this closes the named document itself. It refuses a
+        document that reads modified, and says whether it is really gone
+        afterwards. The modified read can miss edits held in the editor, so
+        save anything you care about first; a close of an edited document
+        may still raise Altium's save prompt.
+
+        Args:
+            file_path: the document's full path, as app_list_documents
+                reports it.
+            discard_changes: close it even when it reads modified, and
+                LOSE the unsaved edits: the modified flag is cleared first
+                so no save prompt appears. For scratch copies and documents
+                Altium changed by merely opening them, never for work.
+
+        Returns:
+            ``{"closed": bool, "discarded": bool, "file_path": ...}``; an
+            error when the path is not open, or when the document reads
+            modified and ``discard_changes`` is not set.
+        """
+        params = {"file_path": file_path}
+        if discard_changes:
+            params["discard"] = "true"
+        return await get_bridge().send_command_async(
+            "application.close_document", params, timeout=120.0)
 
     @mcp.tool()
     async def app_checkpoint(label: str = "", save_first: bool = True) -> dict[str, Any]:
@@ -455,6 +647,11 @@ def register_application_tools(mcp):
               (empty string if the script is too old to report it)
             - bundled_script_version: version of the on-disk Main.pas
             - version_match: True if Altium matches bundled script version
+            - altium_version: the Altium build itself, as Altium reports
+              it. Reported, never acted on: nothing here refuses to run
+              on an old build, because most of the toolset works on one.
+              It is here because a bug report without it costs a round
+              trip, and twice the answer changed the diagnosis.
             - message: human-readable status (flags stale cache if detected)
         """
         bridge = get_bridge()
@@ -465,6 +662,7 @@ def register_application_tools(mcp):
                 "altium_script_version": None,
                 "bundled_script_version": _bundled_script_version(),
                 "version_match": False,
+                "altium_version": "",
                 "message": "Altium Designer is not running",
             }
 
@@ -477,6 +675,7 @@ def register_application_tools(mcp):
                 "altium_script_version": None,
                 "bundled_script_version": bundled,
                 "version_match": False,
+                "altium_version": "",
                 "message": "Altium script is not responding. Run StartMCPServer in Altium_API.PrjScr.",
             }
 
@@ -507,6 +706,7 @@ def register_application_tools(mcp):
             "altium_script_version": altium_ver,
             "bundled_script_version": bundled,
             "version_match": match,
+            "altium_version": result.get("altium_version") or "",
             "message": msg,
             "_system_reminder": _SESSION_REMINDER,
         }
@@ -604,8 +804,16 @@ def register_application_tools(mcp):
             add_to_project: Attach the new file to the focused project.
                 Default True. Set False to leave it as a free document.
 
+        The new document is focused before this returns, and ``focused``
+        says whether that took: the library and board tools act on the
+        focused document, and a new one left behind the old meant the
+        next call wrote into the old one. A document that could not be
+        saved is an error (a missing folder is named), not a success with
+        ``saved: false``.
+
         Returns:
-            Dictionary with kind, file_path, saved, added_to_project.
+            Dictionary with kind, file_path, saved, focused,
+            added_to_project.
         """
         bridge = get_bridge()
         params: dict[str, Any] = {
@@ -639,6 +847,10 @@ def register_application_tools(mcp):
             - loaded: True if the doc is resident in the editor server.
               False means it's a project member on disk whose editor
               state hasn't been opened yet.
+            - modified: True if the editor holds unsaved edits. A false
+              is a floor rather than a clean bill, since the flag does
+              not always propagate from ProcessControl. app_save_all
+              measures file timestamps instead of trusting it.
         """
         bridge = get_bridge()
         result = await bridge.send_command_async("application.get_open_documents")
@@ -668,7 +880,9 @@ def register_application_tools(mcp):
             - file_name: Document file name
             - file_path: Full file path
             - document_kind: Type of document (SchDoc, PcbDoc, etc.)
-            - modified: Whether the document has unsaved changes
+            - modified: True if the editor holds unsaved edits. A false
+              is a floor rather than a clean bill, since the flag does
+              not always propagate from ProcessControl.
             Returns empty dict if no document is active.
         """
         bridge = get_bridge()
@@ -735,9 +949,23 @@ def register_application_tools(mcp):
 
     @mcp.tool()
     async def app_run_menu(menu_path: str) -> dict[str, Any]:
-        """Execute a menu command by its path.
+        """Dispatch a menu command by path. DISPATCH IS NOT EXECUTION.
 
-        Supports common menu paths which are mapped to internal processes:
+        This sends the command and cannot tell you it ran. Altium's
+        ``RunProcess`` accepts an unknown process id in silence and
+        reports nothing back, so a typo, a command unavailable in the
+        current editor, and a command that worked are indistinguishable
+        from here. MEASURED 2026-08-17: "Tools|Preferences" returned in
+        0.11s with ``success: true`` and no dialog ever appeared. That is
+        why the reply says ``dispatched``, never ``executed``, and carries
+        ``outcome_verified: false``.
+
+        Use ``app_click_menu`` when you need the command to actually
+        happen. It walks the real menu bar and clicks the item, so it
+        fails loudly on a path that does not exist and reaches the many
+        commands that have no process id at all.
+
+        These paths are mapped to internal processes:
         - "File|Save All"
         - "Tools|Design Rule Check"
         - "Tools|Electrical Rules Check"
@@ -747,21 +975,40 @@ def register_application_tools(mcp):
         - "Tools|Preferences"
         - "Tools|Extensions and Updates"
 
-        Unknown paths are attempted via Client.SendMessage.
+        Anything else is REFUSED with UNMAPPED_MENU_PATH. The old
+        fallback guessed a MenuID out of the pipe-separated path and was
+        measured opening nothing while reporting success, so refusing
+        and pointing at ``app_click_menu`` is strictly more useful than
+        a guess that cannot work.
 
         Args:
             menu_path: Menu path using pipe separators (e.g., "File|Save All")
 
         Returns:
-            Dictionary with success status, menu_path, and process used
+            Dictionary with dispatched, outcome_verified (always false),
+            menu_path, and the process used. A reply the bridge could not
+            parse is reported as a failure, not smoothed into a success.
         """
         bridge = get_bridge()
         result = await bridge.send_command_async(
             "application.execute_menu", {"menu_path": menu_path}
         )
+        # Report what the handler said, and nothing it did not say. The
+        # previous ``{"success": True, **result}`` did preserve an
+        # explicit ``success: false`` (the spread wins), but it INVENTED
+        # a success for any reply that carried no verdict at all, and
+        # ``result or {"success": True, ...}`` turned an empty reply
+        # into a success outright. Both manufactured the one fact this
+        # tool has no way to establish.
         if isinstance(result, dict):
-            return {"success": True, **result}
-        return result or {"success": True, "menu_path": menu_path}
+            return result
+        return {
+            "success": False,
+            "dispatched": False,
+            "menu_path": menu_path,
+            "reason": "the bridge returned no usable reply for "
+                      f"{menu_path!r}, so nothing is known about it",
+        }
 
     @mcp.tool()
     async def app_set_intent(intent: str) -> dict[str, Any]:
@@ -796,10 +1043,9 @@ def register_application_tools(mcp):
                 # the script engine surfaces as a modal. Invariant: every
                 # workspace file the Pascal side reads MUST be written this
                 # way (see request files, dashboard.heartbeat).
-                import os as _os
                 tmp = path.with_suffix(".txt.tmp")
                 tmp.write_text(text, encoding="utf-8")
-                _os.replace(tmp, path)
+                replace_with_retry(tmp, path)
             elif path.exists():
                 path.unlink()
         except OSError as e:

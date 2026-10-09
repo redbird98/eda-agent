@@ -1174,6 +1174,66 @@ main > section.full-bleed {
 .recovery-banner .rb-title { font-weight: 600; margin-right: 6px; }
 .recovery-banner ol { margin: 6px 0 0; padding-left: 22px; }
 .recovery-banner li { margin: 2px 0; }
+
+/* Layout tab: the live layout view. Canvas on the left, the decision
+   log on the right; on a narrow screen the log goes underneath. */
+.live-body { flex:1 1 auto; min-height:0; display:flex; }
+.live-stage { position:relative; flex:1 1 auto; min-width:0; background:var(--bg); }
+.live-stage canvas { position:absolute; inset:0; width:100%; height:100%;
+  cursor:grab; outline:none; }
+.live-stage canvas.dragging { cursor:grabbing; }
+.live-tip {
+  position:absolute; pointer-events:none; z-index:2;
+  background:var(--bg-card); color:var(--text);
+  border:1px solid var(--border-hi); border-radius:var(--r-md);
+  box-shadow:var(--shadow-md); padding:var(--s-1) var(--s-2);
+  font-size:var(--fs-xs); line-height:1.5; white-space:nowrap;
+}
+.live-tip b { font-weight:var(--fw-semibold); }
+.live-empty {
+  position:absolute; inset:0; display:flex; align-items:center;
+  justify-content:center; text-align:center; padding:var(--s-6);
+  color:var(--text-dim); font-size:var(--fs-sm); pointer-events:none;
+}
+.live-legend {
+  position:absolute; left:var(--s-3); bottom:var(--s-3); z-index:1;
+  background:var(--bg-elev); border:1px solid var(--border);
+  border-radius:var(--r-md); padding:var(--s-1) var(--s-2);
+  font-size:var(--fs-xs); display:flex; flex-wrap:wrap; gap:var(--s-1) var(--s-3);
+  max-width:calc(100% - 24px);
+}
+.live-legend label { display:flex; align-items:center; gap:4px; cursor:pointer;
+  color:var(--text-mute); }
+.live-legend .sw { width:10px; height:10px; border-radius:2px; display:inline-block; }
+.live-log {
+  flex:0 0 320px; display:flex; flex-direction:column; min-height:0;
+  border-left:1px solid var(--border); background:var(--bg-elev);
+}
+.live-log-head {
+  padding:var(--s-2) var(--s-3); border-bottom:1px solid var(--border);
+  font-weight:var(--fw-semibold); display:flex; gap:var(--s-2); align-items:baseline;
+}
+.live-log-head .count { color:var(--text-dim); font-weight:var(--fw-normal);
+  font-size:var(--fs-xs); }
+.live-log-list { flex:1 1 auto; overflow-y:auto; }
+.live-log-item {
+  padding:var(--s-2) var(--s-3); border-bottom:1px solid var(--row-border);
+  font-size:var(--fs-sm);
+}
+.live-log-item .meta { display:flex; gap:var(--s-2); align-items:center;
+  color:var(--text-dim); font-size:var(--fs-xs); margin-bottom:2px; }
+.live-log-item .text { color:var(--text); white-space:pre-wrap; word-break:break-word; }
+.live-log-item.snap .text { color:var(--text-mute); }
+.live-log-item.fresh { animation:live-fresh 6s ease-out; }
+@keyframes live-fresh {
+  from { background:rgba(122,162,247,0.22); }
+  to   { background:transparent; }
+}
+.live-status-line { font-feature-settings:"tnum"; }
+@media (max-width: 760px) {
+  .live-body { flex-direction:column; }
+  .live-log { flex:0 0 38%; border-left:none; border-top:1px solid var(--border); }
+}
 </style>
 </head>
 <body>
@@ -1202,6 +1262,7 @@ main > section.full-bleed {
 
 <nav class="tabs" id="tabs">
   <button data-tab="drawing" class="active">Drawing</button>
+  <button data-tab="layout" title="The board as the layout engines change it, with every decision logged before it is acted on">Layout</button>
   <button data-tab="project">Project</button>
   <button data-tab="components">Components<span class="tab-count" data-count-for="components"></span></button>
   <button data-tab="nets">Nets<span class="tab-count" data-count-for="nets"></span></button>
@@ -1314,6 +1375,48 @@ main > section.full-bleed {
           rendering...
         </div>
       </div>
+    </div>
+  </section>
+
+  <!-- ========================= LAYOUT TAB ========================= -->
+  <!-- The live layout view (design/live.py): the board as the layout
+       engines change it, and every decision logged before it is acted
+       on. Drawn on a canvas from /api/live, polled once a second while
+       the tab is open. New and moved items glow and fade over 30 s;
+       removed copper stays as a fading ghost. -->
+  <section data-pane="layout" class="full-bleed" hidden
+           style="position:fixed;
+                  top:calc(var(--header-h, 52px) + var(--nav-h, 44px));
+                  left:0; right:0; bottom:0;
+                  width:auto; margin:0;
+                  display:flex; flex-direction:column;
+                  background:var(--bg);
+                  overflow:hidden; z-index:5;">
+    <div class="drawing-toolbar" style="flex:0 0 auto; flex-wrap:wrap;">
+      <span class="mono" id="live-board">no layout yet</span>
+      <span class="live-status-line" id="live-status"></span>
+      <span class="hint" id="live-progress" style="color:var(--text-dim);"></span>
+      <div class="toolbar-right row-actions">
+        <label class="hint" title="Lines for the connections copper does not make yet">
+          <input type="checkbox" id="live-rats" checked> ratsnest</label>
+        <button id="live-fit" title="Fit the board to the view (or focus the board and press 0)">fit</button>
+      </div>
+    </div>
+    <div class="live-body">
+      <div class="live-stage" id="live-stage">
+        <canvas id="live-canvas" tabindex="0" aria-label="Live layout"></canvas>
+        <div id="live-tip" class="live-tip" hidden></div>
+        <div id="live-empty" class="live-empty">No layout has been published yet. The board
+          appears here when a placement or routing job starts, or when
+          design_live_snapshot publishes one.</div>
+        <div id="live-legend" class="live-legend" hidden></div>
+      </div>
+      <aside class="live-log">
+        <div class="live-log-head">Decisions <span class="count" id="live-log-count"></span></div>
+        <div class="live-log-list" id="live-log-list">
+          <div class="empty">No decisions logged yet.</div>
+        </div>
+      </aside>
     </div>
   </section>
 
@@ -2180,6 +2283,7 @@ function showSub(name) {
 async function loadTab(name) {
   let p;
   if (name === "drawing")    p = loadDrawing();
+  else if (name === "layout")     p = loadLayout();
   else if (name === "project")    p = loadProject();
   else if (name === "components") p = loadComponents();
   else if (name === "nets")       p = loadNets();
@@ -2244,6 +2348,10 @@ async function refreshActive() {
       // (no-op for SCH mode). This is what the old per-tab refresh did.
       try { await fetch("/api/refresh/pcb", {method:"POST"}); } catch (e) {}
       return await renderDrawing();
+    }
+    if (state.activeTab === "layout") {
+      liveState.version = null;     // ask for the whole board again
+      return await pollLive();
     }
     if (state.activeTab === "project") {
       await fetchJSON("/api/refresh/project", {method:"POST"});
@@ -8703,6 +8811,703 @@ function emptyBox(reason, hint) {
   return wrap;
 }
 
+/* ============================ LAYOUT (live view) ============================ */
+// The board as the layout engines change it: design/live.py publishes a
+// snapshot in mils, /api/live serves it with the diff from the version
+// before. Drawn on a canvas with y up, so the world geometry goes through
+// one transform untouched. New and moved items glow and fade over
+// LIVE_FADE_MS; removed items stay as fading ghosts for as long.
+const LIVE_FADE_MS = 30000;
+const LIVE_INNER = ["#d9a730", "#3fb97a", "#b06be0", "#e07b3a", "#36b8c9", "#a6a64a"];
+const liveState = {
+  version: null,      // the version drawn; null asks for the whole board
+  snap: null,
+  head: null,         // {version, time, ts, note, kind}
+  progress: null,
+  index: new Map(),   // item key -> {list, item}
+  byLayer: {},        // layer -> {tracks, arcs}
+  colors: {},         // layer -> colour
+  glow: new Map(),    // item key -> ms the change was published
+  ghosts: [],         // {item, t}
+  decisions: [],      // oldest first
+  decisionsLast: 0,
+  view: null,         // {s, ox, oy}: screen = (ox + x*s, oy - y*s)
+  hidden: {},         // layer -> true when switched off in the legend
+  hover: null,        // {list, item}
+  busy: false,
+  wired: false,
+  animTimer: null,
+  frame: 0,
+};
+
+function liveTheme() {
+  const dark = document.documentElement.getAttribute("data-theme") !== "light";
+  const css = getComputedStyle(document.documentElement);
+  function v(name, dflt) { return css.getPropertyValue(name).trim() || dflt; }
+  return {
+    board: dark ? "#13201a" : "#e6eee8",
+    edge:  dark ? "#c9cdd3" : "#4a4f57",
+    part:  dark ? "rgba(220,224,230,0.70)" : "rgba(40,44,52,0.75)",
+    fixed: v("--warn", "#e0af68"),
+    block: v("--accent-2", "#bb9af7"),
+    accent: v("--accent", "#7aa2f7"),
+    err:   v("--err", "#f7768e"),
+    text:  v("--text", "#e7e9ed"),
+    bg:    v("--bg", "#0d0e10"),
+    rats:  dark ? "rgba(235,235,235,0.45)" : "rgba(40,40,40,0.45)",
+    hole:  dark ? "#0b0c0e" : "#2b2e33",
+    via:   dark ? "#b9bec6" : "#7d838c",
+    multi: "#c9a227",
+    // A colour no copper layer is drawn in, so a halo never reads as copper.
+    glow:  dark ? "#4cf0ff" : "#0097a7",
+  };
+}
+
+// Dashed strokes: butt caps, and dashes that grow with the line. With
+// round caps a wide line's dashes ran together into a solid bar.
+function liveDash(ctx, w, px) {
+  ctx.lineCap = "butt";
+  ctx.setLineDash([Math.max(8 * px, 2 * w), Math.max(6 * px, 1.5 * w)]);
+}
+function liveSolid(ctx) {
+  ctx.lineCap = "round";
+  ctx.setLineDash([]);
+}
+
+// Top red, bottom blue, inner layers from a fixed palette, the way
+// Altium colours copper by default.
+function liveColors(snap) {
+  const out = {};
+  const layers = snap.layers || [];
+  layers.forEach(function(l, i){
+    if (i === 0) out[l.name] = "#e5484d";
+    else if (i === layers.length - 1) out[l.name] = "#3e7bf0";
+    else out[l.name] = LIVE_INNER[(i - 1) % LIVE_INNER.length];
+  });
+  return out;
+}
+
+function liveIndex(snap) {
+  const index = new Map(), byLayer = {};
+  ["components", "pads", "tracks", "arcs", "vias", "pours", "blocks", "lanes"]
+    .forEach(function(list){
+      (snap[list] || []).forEach(function(it){
+        if (it.k) index.set(it.k, {list: list, item: it});
+        if (list === "tracks" || list === "arcs") {
+          const b = byLayer[it.layer] || (byLayer[it.layer] = {tracks: [], arcs: []});
+          b[list].push(it);
+        }
+      });
+    });
+  liveState.index = index;
+  liveState.byLayer = byLayer;
+  liveState.colors = liveColors(snap);
+}
+
+function liveFit() {
+  const snap = liveState.snap, stage = $("#live-stage");
+  if (!snap || !stage) return;
+  const W = stage.clientWidth || 1, H = stage.clientHeight || 1;
+  const b = snap.bbox || [0, 0, 1000, 1000];
+  const w = Math.max(b[2] - b[0], 1), h = Math.max(b[3] - b[1], 1);
+  const s = Math.min(W / w, H / h) * 0.9;
+  liveState.view = {s: s, ox: W / 2 - (b[0] + b[2]) / 2 * s,
+                    oy: H / 2 + (b[1] + b[3]) / 2 * s};
+}
+
+function livePoly(ctx, pts) {
+  if (!pts || pts.length < 2) return;
+  ctx.moveTo(pts[0][0], pts[0][1]);
+  for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+  ctx.closePath();
+}
+
+// A rectangle w x h centred on the origin with corner radius r.
+function liveRoundRect(ctx, w, h, r) {
+  r = Math.max(0, Math.min(r, w / 2, h / 2));
+  const x0 = -w / 2, y0 = -h / 2, x1 = w / 2, y1 = h / 2;
+  ctx.moveTo(x0 + r, y0);
+  ctx.lineTo(x1 - r, y0); ctx.arcTo(x1, y0, x1, y0 + r, r);
+  ctx.lineTo(x1, y1 - r); ctx.arcTo(x1, y1, x1 - r, y1, r);
+  ctx.lineTo(x0 + r, y1); ctx.arcTo(x0, y1, x0, y1 - r, r);
+  ctx.lineTo(x0, y0 + r); ctx.arcTo(x0, y0, x0 + r, y0, r);
+  ctx.closePath();
+}
+
+// A pad's copper as a path, grown by `grow` mils (the glow, the hover).
+function livePadPath(ctx, p, grow) {
+  const w = (p.w || 0) + 2 * grow, h = (p.h || 0) + 2 * grow;
+  ctx.save();
+  ctx.translate(p.x, p.y);
+  if (p.rot) ctx.rotate(p.rot * Math.PI / 180);
+  const shape = String(p.shape || "round").toLowerCase();
+  if (shape === "rect") {
+    ctx.rect(-w / 2, -h / 2, w, h);
+  } else if (shape === "octagon") {
+    const c = Math.min(w, h) / 4, hw = w / 2, hh = h / 2;
+    livePoly(ctx, [[-hw + c, -hh], [hw - c, -hh], [hw, -hh + c], [hw, hh - c],
+                   [hw - c, hh], [-hw + c, hh], [-hw, hh - c], [-hw, -hh + c]]);
+  } else if (shape === "roundrect") {
+    liveRoundRect(ctx, w, h, (p.cr || 0) / 100 * Math.min(p.w || 0, p.h || 0) / 2 + grow);
+  } else {
+    liveRoundRect(ctx, w, h, Math.min(w, h) / 2);   // round, or an oval
+  }
+  ctx.restore();
+}
+
+// One item's outline as a path, for the glow, the ghosts and the hover.
+function liveItemPath(ctx, list, it, grow) {
+  if (list === "components" || list === "pours") {
+    livePoly(ctx, it.outline);
+  } else if (list === "blocks") {
+    if (it.rect) ctx.rect(it.rect[0], it.rect[1], it.rect[2] - it.rect[0], it.rect[3] - it.rect[1]);
+  } else if (list === "pads") {
+    livePadPath(ctx, it, grow);
+  } else if (list === "vias") {
+    ctx.moveTo(it.x + it.d / 2 + grow, it.y);
+    ctx.arc(it.x, it.y, it.d / 2 + grow, 0, 2 * Math.PI);
+  } else if (list === "tracks") {
+    ctx.moveTo(it.x1, it.y1); ctx.lineTo(it.x2, it.y2);
+  } else if (list === "arcs") {
+    const a1 = it.a1 * Math.PI / 180, a2 = it.a2 * Math.PI / 180;
+    ctx.moveTo(it.cx + it.r * Math.cos(a1), it.cy + it.r * Math.sin(a1));
+    ctx.arc(it.cx, it.cy, it.r, a1, a2, false);
+  } else if (list === "lanes") {
+    const p = it.path || [];
+    if (p.length) ctx.moveTo(p[0][0], p[0][1]);
+    for (let i = 1; i < p.length; i++) ctx.lineTo(p[i][0], p[i][1]);
+  }
+}
+
+// Stroke an item's outline; copper lines are stroked at their own width
+// plus `extra` mils, outlines at `extra` mils.
+function liveStrokeItem(ctx, list, it, color, extra, px) {
+  ctx.beginPath();
+  liveItemPath(ctx, list, it, list === "pads" || list === "vias" ? extra / 2 : 0);
+  ctx.strokeStyle = color;
+  const line = list === "tracks" || list === "arcs" || list === "lanes";
+  ctx.lineWidth = line ? Math.max(it.w || 0, px) + extra : extra;
+  ctx.stroke();
+}
+
+function liveDraw() {
+  const cv = $("#live-canvas"), stage = $("#live-stage");
+  if (!cv || !stage || state.activeTab !== "layout") return;
+  const dpr = window.devicePixelRatio || 1;
+  const W = stage.clientWidth, H = stage.clientHeight;
+  const cw = Math.max(1, Math.round(W * dpr)), ch = Math.max(1, Math.round(H * dpr));
+  if (cv.width !== cw || cv.height !== ch) { cv.width = cw; cv.height = ch; }
+  const ctx = cv.getContext("2d");
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, cw, ch);
+  const snap = liveState.snap;
+  if (!snap) return;
+  if (!liveState.view) liveFit();
+  const v = liveState.view, th = liveTheme(), px = 1 / v.s, now = Date.now();
+  const hidden = liveState.hidden, colors = liveState.colors;
+  ctx.setTransform(v.s * dpr, 0, 0, -v.s * dpr, v.ox * dpr, v.oy * dpr);
+  ctx.lineJoin = "round"; ctx.lineCap = "round";
+
+  // The board, with its cutouts.
+  if (snap.outline && snap.outline.length > 2) {
+    ctx.beginPath(); livePoly(ctx, snap.outline);
+    (snap.cutouts || []).forEach(function(c){ livePoly(ctx, c); });
+    ctx.fillStyle = th.board; ctx.fill("evenodd");
+    ctx.strokeStyle = th.edge; ctx.lineWidth = 1.5 * px; ctx.stroke();
+  }
+  // Pours under everything else; a polygon's outline dashed.
+  (snap.pours || []).forEach(function(r){
+    if (hidden[r.layer]) return;
+    ctx.beginPath(); livePoly(ctx, r.outline);
+    (r.holes || []).forEach(function(h){ livePoly(ctx, h); });
+    const col = colors[r.layer] || "#888";
+    if (r.kind === "pour_boundary") {
+      liveDash(ctx, px, px);
+      ctx.globalAlpha = 0.7; ctx.strokeStyle = col; ctx.lineWidth = px; ctx.stroke();
+      liveSolid(ctx);
+    } else {
+      ctx.globalAlpha = 0.16; ctx.fillStyle = col; ctx.fill("evenodd");
+    }
+    ctx.globalAlpha = 1;
+  });
+  // Keepouts: red, dashed.
+  (snap.keepouts || []).forEach(function(k){
+    ctx.beginPath();
+    if (k.type === "region") {
+      livePoly(ctx, k.outline);
+      ctx.globalAlpha = 0.08; ctx.fillStyle = th.err; ctx.fill(); ctx.globalAlpha = 1;
+      ctx.lineWidth = px;
+    } else if (k.type === "arc") {
+      liveItemPath(ctx, "arcs", k, 0); ctx.lineWidth = Math.max(k.w, px);
+    } else {
+      ctx.moveTo(k.x1, k.y1); ctx.lineTo(k.x2, k.y2); ctx.lineWidth = Math.max(k.w, px);
+    }
+    liveDash(ctx, ctx.lineWidth, px);
+    ctx.strokeStyle = th.err; ctx.globalAlpha = 0.75; ctx.stroke(); ctx.globalAlpha = 1;
+  });
+  liveSolid(ctx);
+  // Blocks: dashed boxes, named in screen space below.
+  (snap.blocks || []).forEach(function(b){
+    if (!b.rect) return;
+    ctx.beginPath(); liveItemPath(ctx, "blocks", b, 0);
+    ctx.globalAlpha = 0.05; ctx.fillStyle = th.block; ctx.fill(); ctx.globalAlpha = 1;
+    liveDash(ctx, 1.5 * px, px);
+    ctx.strokeStyle = th.block; ctx.lineWidth = 1.5 * px; ctx.stroke();
+  });
+  liveSolid(ctx);
+  // New and moved items: a halo that fades, drawn under the items so
+  // the copper itself stays readable inside it.
+  liveState.glow.forEach(function(t, k){
+    const a = 1 - (now - t) / LIVE_FADE_MS;
+    const hit = liveState.index.get(k);
+    if (a <= 0 || !hit) return;
+    ctx.globalAlpha = 0.9 * a;
+    liveStrokeItem(ctx, hit.list, hit.item, th.glow, 8 * px, px);
+  });
+  ctx.globalAlpha = 1;
+  // Parts: fixed ones solid and tinted, bottom-side ones dashed.
+  (snap.components || []).forEach(function(c){
+    ctx.beginPath(); livePoly(ctx, c.outline);
+    if (c.fixed) {
+      ctx.globalAlpha = 0.14; ctx.fillStyle = th.fixed; ctx.fill(); ctx.globalAlpha = 1;
+    }
+    if (c.side === "bottom") liveDash(ctx, px, px); else liveSolid(ctx);
+    ctx.strokeStyle = c.fixed ? th.fixed : th.part;
+    ctx.lineWidth = (c.fixed ? 2 : 1) * px; ctx.stroke();
+  });
+  liveSolid(ctx);
+  // Copper, bottom layer first so the top reads on top.
+  const order = (snap.layers || []).map(function(l){ return l.name; }).reverse();
+  order.forEach(function(layer){
+    const b = liveState.byLayer[layer];
+    if (!b || hidden[layer]) return;
+    ctx.strokeStyle = colors[layer] || "#888"; ctx.globalAlpha = 0.85;
+    b.tracks.forEach(function(t){
+      ctx.beginPath(); ctx.moveTo(t.x1, t.y1); ctx.lineTo(t.x2, t.y2);
+      ctx.lineWidth = Math.max(t.w, px); ctx.stroke();
+    });
+    b.arcs.forEach(function(a){
+      ctx.beginPath(); liveItemPath(ctx, "arcs", a, 0);
+      ctx.lineWidth = Math.max(a.w, px); ctx.stroke();
+    });
+    ctx.globalAlpha = 1;
+  });
+  // Pads: bottom-only first, then through-hole, then top.
+  const top = order.length ? order[order.length - 1] : "";
+  function padRank(p) { return p.side === top ? 2 : (p.side === "multi" ? 1 : 0); }
+  [0, 1, 2].forEach(function(rank){
+    (snap.pads || []).forEach(function(p){
+      if (padRank(p) !== rank || !p.w) return;
+      if (p.side !== "multi" && hidden[p.side]) return;
+      ctx.beginPath(); livePadPath(ctx, p, 0);
+      ctx.fillStyle = p.side === "multi" ? th.multi : (colors[p.side] || "#888");
+      ctx.fill();
+    });
+  });
+  // Vias, then every drill hole.
+  (snap.vias || []).forEach(function(vi){
+    ctx.beginPath(); ctx.arc(vi.x, vi.y, vi.d / 2, 0, 2 * Math.PI);
+    ctx.fillStyle = th.via; ctx.fill();
+    ctx.beginPath(); ctx.arc(vi.x, vi.y, Math.max(vi.hole, 0) / 2, 0, 2 * Math.PI);
+    ctx.fillStyle = th.hole; ctx.fill();
+  });
+  (snap.holes || []).forEach(function(h){
+    ctx.beginPath();
+    if (h.slot) {
+      livePadPath(ctx, {x: h.x, y: h.y, w: h.slot, h: h.d, rot: h.rot, shape: "round"}, 0);
+    } else {
+      ctx.arc(h.x, h.y, h.d / 2, 0, 2 * Math.PI);
+    }
+    ctx.fillStyle = th.hole; ctx.fill();
+  });
+  // Ratsnest: the connections copper does not make yet.
+  const rats = $("#live-rats");
+  if (!rats || rats.checked) {
+    ctx.beginPath();
+    (snap.rats || []).forEach(function(r){ ctx.moveTo(r[0], r[1]); ctx.lineTo(r[2], r[3]); });
+    ctx.strokeStyle = th.rats; ctx.lineWidth = px; ctx.stroke();
+  }
+  // Planned lanes, dashed.
+  (snap.lanes || []).forEach(function(l){
+    ctx.beginPath(); liveItemPath(ctx, "lanes", l, 0);
+    ctx.lineWidth = Math.max(l.w || 0, 2 * px);
+    liveDash(ctx, ctx.lineWidth, px);
+    ctx.strokeStyle = colors[l.layer] || th.accent; ctx.globalAlpha = 0.9;
+    ctx.stroke(); ctx.globalAlpha = 1;
+  });
+  liveSolid(ctx);
+  // Removed items: fading ghosts.
+  liveState.ghosts.forEach(function(g){
+    const a = 1 - (now - g.t) / LIVE_FADE_MS;
+    if (a <= 0) return;
+    ctx.globalAlpha = 0.6 * a;
+    liveDash(ctx, Math.max(g.item.w || 0, px), px);
+    liveStrokeItem(ctx, g.item.list, g.item, th.err, 1.5 * px, px);
+  });
+  liveSolid(ctx);
+  ctx.globalAlpha = 1;
+  // The hovered item.
+  if (liveState.hover) {
+    liveStrokeItem(ctx, liveState.hover.list, liveState.hover.item, th.accent, 2.5 * px, px);
+  }
+  // Labels in screen space: block names always, part designators when
+  // the part is big enough on screen to carry one.
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.textBaseline = "middle"; ctx.textAlign = "center";
+  ctx.font = "10px -apple-system, Segoe UI, sans-serif";
+  ctx.fillStyle = th.text;
+  (snap.components || []).forEach(function(c){
+    const b = c.bbox;
+    if ((b[2] - b[0]) * v.s < 28) return;
+    const sx = v.ox + (b[0] + b[2]) / 2 * v.s, sy = v.oy - (b[1] + b[3]) / 2 * v.s;
+    if (sx < -50 || sy < -20 || sx > W + 50 || sy > H + 20) return;
+    ctx.globalAlpha = 0.85; ctx.fillText(c.ref, sx, sy); ctx.globalAlpha = 1;
+  });
+  ctx.textAlign = "left"; ctx.textBaseline = "bottom";
+  ctx.font = "600 11px -apple-system, Segoe UI, sans-serif";
+  ctx.fillStyle = th.block;
+  (snap.blocks || []).forEach(function(b){
+    if (!b.rect) return;
+    ctx.fillText(b.name, v.ox + b.rect[0] * v.s + 2, v.oy - b.rect[3] * v.s - 2);
+  });
+}
+
+function liveRequestDraw() {
+  if (liveState.frame) return;
+  liveState.frame = requestAnimationFrame(function(){
+    liveState.frame = 0;
+    liveDraw();
+  });
+}
+
+// Redraw while anything is still fading, four times a second.
+function liveTick() {
+  const now = Date.now();
+  liveState.glow.forEach(function(t, k){
+    if (now - t > LIVE_FADE_MS) liveState.glow.delete(k);
+  });
+  liveState.ghosts = liveState.ghosts.filter(function(g){ return now - g.t <= LIVE_FADE_MS; });
+  liveDraw();
+  clearTimeout(liveState.animTimer);
+  if ((liveState.glow.size || liveState.ghosts.length) && state.activeTab === "layout") {
+    liveState.animTimer = setTimeout(liveTick, 250);
+  }
+}
+
+function liveWorld(ev) {
+  const cv = $("#live-canvas"), v = liveState.view;
+  const r = cv.getBoundingClientRect();
+  const mx = ev.clientX - r.left, my = ev.clientY - r.top;
+  return {mx: mx, my: my, x: (mx - v.ox) / v.s, y: (v.oy - my) / v.s};
+}
+
+function liveInPoly(x, y, pts) {
+  let inside = false;
+  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+    const xi = pts[i][0], yi = pts[i][1], xj = pts[j][0], yj = pts[j][1];
+    if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) inside = !inside;
+  }
+  return inside;
+}
+
+function liveSegDist(x, y, x1, y1, x2, y2) {
+  const dx = x2 - x1, dy = y2 - y1, L = dx * dx + dy * dy;
+  let t = L ? ((x - x1) * dx + (y - y1) * dy) / L : 0;
+  t = Math.max(0, Math.min(1, t));
+  return Math.hypot(x - (x1 + t * dx), y - (y1 + t * dy));
+}
+
+// What is under the cursor: a pad first, then a via, a track, a part.
+function liveHit(x, y) {
+  const snap = liveState.snap, hidden = liveState.hidden;
+  if (!snap) return null;
+  const tol = 3 / liveState.view.s;
+  const pads = snap.pads || [];
+  for (let i = pads.length - 1; i >= 0; i--) {
+    const p = pads[i];
+    if (!p.w || (p.side !== "multi" && hidden[p.side])) continue;
+    const a = -(p.rot || 0) * Math.PI / 180;
+    const dx = x - p.x, dy = y - p.y;
+    const lx = dx * Math.cos(a) - dy * Math.sin(a), ly = dx * Math.sin(a) + dy * Math.cos(a);
+    if (Math.abs(lx) <= p.w / 2 + tol && Math.abs(ly) <= p.h / 2 + tol) return {list: "pads", item: p};
+  }
+  for (const vi of snap.vias || []) {
+    if (Math.hypot(x - vi.x, y - vi.y) <= vi.d / 2 + tol) return {list: "vias", item: vi};
+  }
+  const layers = (snap.layers || []).map(function(l){ return l.name; });
+  for (const layer of layers) {
+    const b = liveState.byLayer[layer];
+    if (!b || hidden[layer]) continue;
+    for (const t of b.tracks) {
+      if (liveSegDist(x, y, t.x1, t.y1, t.x2, t.y2) <= t.w / 2 + tol) return {list: "tracks", item: t};
+    }
+    for (const a of b.arcs) {
+      const d = Math.abs(Math.hypot(x - a.cx, y - a.cy) - a.r);
+      if (d <= a.w / 2 + tol) return {list: "arcs", item: a};
+    }
+  }
+  const comps = snap.components || [];
+  for (let i = comps.length - 1; i >= 0; i--) {
+    const c = comps[i];
+    if (liveInPoly(x, y, c.outline)) return {list: "components", item: c};
+  }
+  return null;
+}
+
+function liveNetState(net) {
+  const s = (liveState.snap && liveState.snap.status) || {};
+  if (!net) return "";
+  const u = (s.unrouted || {})[net];
+  return u === "partly" ? "partly routed" : (u === "open" ? "not routed" : "routed");
+}
+
+function liveTipHtml(hit) {
+  const it = hit.item;
+  const esc = function(s){ return String(s == null ? "" : s).replace(/[&<>"]/g,
+    function(c){ return {"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[c]; }); };
+  const compOf = function(ref){
+    return (liveState.snap.components || []).find(function(c){ return c.ref === ref; });
+  };
+  const blockLine = function(c){ return c && c.block ? "<br>block " + esc(c.block) : ""; };
+  if (hit.list === "pads") {
+    const c = compOf(it.comp);
+    return "<b>" + esc(it.comp ? it.comp + "." + it.name : it.name) + "</b> pad"
+      + (it.net ? "<br>net <b>" + esc(it.net) + "</b> (" + liveNetState(it.net) + ")" : "<br>no net")
+      + blockLine(c);
+  }
+  if (hit.list === "vias") {
+    return "<b>via</b> " + it.d + "/" + it.hole + " mil"
+      + (it.net ? "<br>net <b>" + esc(it.net) + "</b>" : "");
+  }
+  if (hit.list === "tracks" || hit.list === "arcs") {
+    return "<b>" + (hit.list === "arcs" ? "arc" : "track") + "</b> " + esc(it.layer)
+      + ", " + it.w + " mil" + (it.net ? "<br>net <b>" + esc(it.net) + "</b>" : "");
+  }
+  if (hit.list === "components") {
+    return "<b>" + esc(it.ref) + "</b>" + (it.fixed ? " (fixed)" : "")
+      + (it.footprint ? "<br>" + esc(it.footprint) : "")
+      + "<br>" + esc(it.side) + " side" + blockLine(it);
+  }
+  return "";
+}
+
+function liveWire() {
+  if (liveState.wired) return;
+  const cv = $("#live-canvas"), stage = $("#live-stage"), tip = $("#live-tip");
+  if (!cv || !stage) return;
+  liveState.wired = true;
+  let drag = null;
+  cv.addEventListener("mousedown", function(ev){
+    if (!liveState.view || ev.button !== 0) return;
+    drag = {x: ev.clientX, y: ev.clientY, ox: liveState.view.ox, oy: liveState.view.oy};
+    cv.classList.add("dragging");
+    tip.hidden = true;
+    ev.preventDefault();
+  });
+  window.addEventListener("mousemove", function(ev){
+    if (!drag) return;
+    liveState.view.ox = drag.ox + ev.clientX - drag.x;
+    liveState.view.oy = drag.oy + ev.clientY - drag.y;
+    liveRequestDraw();
+  });
+  window.addEventListener("mouseup", function(){
+    if (!drag) return;
+    drag = null;
+    cv.classList.remove("dragging");
+  });
+  cv.addEventListener("mousemove", function(ev){
+    if (drag || !liveState.view || !liveState.snap) return;
+    const w = liveWorld(ev);
+    const hit = liveHit(w.x, w.y);
+    const same = hit && liveState.hover && hit.item === liveState.hover.item;
+    if (!same) { liveState.hover = hit; liveRequestDraw(); }
+    if (!hit) { tip.hidden = true; return; }
+    tip.innerHTML = liveTipHtml(hit);
+    tip.hidden = false;
+    const left = Math.min(w.mx + 14, stage.clientWidth - tip.offsetWidth - 4);
+    const topY = Math.min(w.my + 14, stage.clientHeight - tip.offsetHeight - 4);
+    tip.style.left = Math.max(4, left) + "px";
+    tip.style.top = Math.max(4, topY) + "px";
+  });
+  cv.addEventListener("mouseleave", function(){
+    tip.hidden = true;
+    if (liveState.hover) { liveState.hover = null; liveRequestDraw(); }
+  });
+  cv.addEventListener("wheel", function(ev){
+    if (!liveState.view) return;
+    ev.preventDefault();
+    const w = liveWorld(ev), v = liveState.view;
+    const f = Math.exp(-ev.deltaY * 0.0015);
+    const s = Math.max(1e-4, Math.min(v.s * f, 500));
+    const k = s / v.s;
+    v.ox = w.mx - (w.mx - v.ox) * k;
+    v.oy = w.my - (w.my - v.oy) * k;
+    v.s = s;
+    liveRequestDraw();
+  }, {passive: false});
+  cv.addEventListener("keydown", function(ev){
+    // The document-level keydown binds 0 to the Status tab; on the
+    // focused board it fits the view instead.
+    if (ev.key === "0") {
+      liveFit(); liveRequestDraw(); ev.preventDefault(); ev.stopPropagation();
+    }
+  });
+  $("#live-fit").addEventListener("click", function(){ liveFit(); liveRequestDraw(); });
+  $("#live-rats").addEventListener("change", liveRequestDraw);
+  if (typeof ResizeObserver !== "undefined") {
+    new ResizeObserver(liveRequestDraw).observe(stage);
+  } else {
+    window.addEventListener("resize", liveRequestDraw);
+  }
+}
+
+function liveLegend() {
+  const box = $("#live-legend"), snap = liveState.snap;
+  if (!box || !snap) return;
+  box.innerHTML = "";
+  (snap.layers || []).forEach(function(l){
+    const cb = el("input", {type: "checkbox"});
+    cb.checked = !liveState.hidden[l.name];
+    cb.addEventListener("change", function(){
+      if (cb.checked) delete liveState.hidden[l.name];
+      else liveState.hidden[l.name] = true;
+      liveRequestDraw();
+    });
+    box.appendChild(el("label", {title: l.kind + " layer"}, cb,
+      el("span", {class: "sw", style: "background:" + (liveState.colors[l.name] || "#888")}),
+      l.name));
+  });
+}
+
+function livePaintStatus() {
+  const snap = liveState.snap, head = liveState.head;
+  const empty = $("#live-empty"), legend = $("#live-legend");
+  if (empty) empty.hidden = !!snap;
+  if (legend) legend.hidden = !snap;
+  const boardEl = $("#live-board"), st = $("#live-status"), pr = $("#live-progress");
+  if (!boardEl) return;
+  if (!snap) {
+    boardEl.textContent = "no layout yet";
+    st.textContent = "";
+    st.title = "";
+  } else {
+    const s = snap.status || {};
+    boardEl.textContent = (snap.board || "(unnamed board)") + "  v" + (head ? head.version : "?");
+    st.textContent = "routed " + (s.routed || 0) + " / " + (s.nets || 0) + " nets, "
+      + (s.partly || 0) + " partly"
+      + (s.missing_connections ? ", " + s.missing_connections + " connections missing" : "");
+    st.title = (s.worst && s.worst.length)
+      ? "most connections missing: " + s.worst.slice(0, 12).join(", ") : "";
+  }
+  // A running job's progress, when it is newer than the snapshot drawn.
+  const p = liveState.progress;
+  if (p && p.text && (!head || p.time > (head.time || 0))
+      && Date.now() / 1000 - p.time < 600) {
+    pr.textContent = (p.kind ? p.kind + ": " : "") + p.text + " (" + fmtAgo(p.time) + ")";
+  } else if (head && head.note) {
+    pr.textContent = head.note + " (" + fmtAgo(head.time) + ")";
+  } else {
+    pr.textContent = "";
+  }
+}
+
+function liveApply(r) {
+  liveState.progress = r.progress || null;
+  if (r.empty) {
+    liveState.version = 0;
+    liveState.snap = null; liveState.head = null; liveState.hover = null;
+    livePaintStatus(); liveDraw();
+    return;
+  }
+  const head = {version: r.version, time: r.time, ts: r.ts, note: r.note, kind: r.kind};
+  if (r.unchanged) {
+    // Same number, another publish (the live folder was cleared and the
+    // count started again): ask for the whole board on the next poll.
+    if (liveState.head && liveState.head.time !== r.time) liveState.version = null;
+    livePaintStatus();
+    return;
+  }
+  const snap = r.snapshot;
+  if (!snap) return;
+  const fresh = !liveState.snap || liveState.snap.board !== snap.board;
+  liveState.snap = snap;
+  liveState.head = head;
+  liveState.version = r.version;
+  liveState.hover = null;
+  liveIndex(snap);
+  if (fresh) { liveState.view = null; liveState.glow.clear(); liveState.ghosts = []; }
+  // A change glows from when it was published, so a page opened late
+  // does not light up something an hour old.
+  const t = Math.min(Date.now(), (r.time || 0) * 1000 || Date.now());
+  if (r.diff && Date.now() - t < LIVE_FADE_MS) {
+    (r.diff.added || []).concat(r.diff.moved || []).forEach(function(k){
+      liveState.glow.set(k, t);
+    });
+    (r.diff.removed || []).forEach(function(it){ liveState.ghosts.push({item: it, t: t}); });
+    if (liveState.ghosts.length > 20000) liveState.ghosts = liveState.ghosts.slice(-20000);
+  }
+  liveLegend();
+  livePaintStatus();
+  liveTick();
+}
+
+function liveApplyDecisions(d) {
+  if ((d.last || 0) < liveState.decisionsLast) {
+    // The log was cleared: start over on the next poll.
+    liveState.decisions = []; liveState.decisionsLast = 0;
+  }
+  const rows = d.decisions || [];
+  const first = liveState.decisionsLast === 0;
+  const prevLast = liveState.decisionsLast;
+  rows.forEach(function(row){
+    if (row.seq > liveState.decisionsLast) {
+      liveState.decisions.push(row);
+      liveState.decisionsLast = row.seq;
+    }
+  });
+  if (liveState.decisions.length > 1000) liveState.decisions = liveState.decisions.slice(-1000);
+  const list = $("#live-log-list"), count = $("#live-log-count");
+  if (!list) return;
+  if (count) count.textContent = liveState.decisions.length ? String(liveState.decisions.length) : "";
+  if (!rows.length && list.children.length && !first) return;
+  list.innerHTML = "";
+  if (!liveState.decisions.length) {
+    list.appendChild(el("div", {class: "empty"}, "No decisions logged yet."));
+    return;
+  }
+  const freshFrom = first ? Infinity : prevLast;
+  for (let i = liveState.decisions.length - 1; i >= 0; i--) {
+    const row = liveState.decisions[i];
+    const when = row.ts ? String(row.ts).slice(11, 19) : "";
+    const meta = el("div", {class: "meta"}, el("span", {class: "mono"}, when),
+      el("span", {class: "tag" + (row.version ? " muted" : " info")}, row.section || "note"));
+    if (row.version) meta.appendChild(el("span", {class: "mono"}, "v" + row.version));
+    list.appendChild(el("div", {
+        class: "live-log-item" + (row.version ? " snap" : "") + (row.seq > freshFrom ? " fresh" : "")},
+      meta, el("div", {class: "text"}, row.text || "")));
+  }
+}
+
+async function pollLive() {
+  if (state.activeTab !== "layout" || liveState.busy) return;
+  liveState.busy = true;
+  try {
+    const q = liveState.version == null ? "" : "?since=" + liveState.version;
+    const r = await fetchJSON("/api/live" + q);
+    if (r && r.ok) liveApply(r);
+    const d = await fetchJSON("/api/live/decisions?since=" + liveState.decisionsLast);
+    if (d && d.ok) liveApplyDecisions(d);
+  } finally {
+    liveState.busy = false;
+  }
+}
+
+function loadLayout() {
+  liveWire();
+  liveTick();       // draws, and restarts the fading if a change still glows
+  return pollLive();
+}
+
 /* ============================ Init ============================ */
 window.addEventListener("DOMContentLoaded", function(){
   $$("nav.tabs button[data-tab]").forEach(function(b){
@@ -9069,6 +9874,10 @@ async function runLint() {
     find_orphan_net_labels: {
       group: "sch",
       label: "Net labels not on any wire (silent phantom net)",
+    },
+    find_net_label_conflicts: {
+      group: "sch",
+      label: "Net labels that merge, short, or sit on a pin root",
     },
     find_orphan_power_objects: {
       group: "sch",
@@ -9445,12 +10254,19 @@ window.addEventListener("DOMContentLoaded", function dlPlaceholder(){
   // paint instead of triggering a re-render flicker.
   const persisted = restorePersistedUI();
   connectSSE();
-  // If the user was on a different tab last time, jump there instead
-  // of forcing them back to Drawing. The Drawing pane still gets
-  // initialised below so its first click is instant.
-  if (persisted && persisted.tab && persisted.tab !== "drawing") {
+  // A tab named in the URL (design_live_view hands out /#layout) wins
+  // over the one persisted from last time. Otherwise, if the user was on
+  // a different tab last time, jump there instead of forcing them back
+  // to Drawing. The Drawing pane still gets initialised below so its
+  // first click is instant.
+  const hashTab = (location.hash || "").replace(/^#/, "");
+  if (/^[a-z]+$/.test(hashTab)
+      && $('nav.tabs button[data-tab="' + hashTab + '"]')) {
+    showTab(hashTab);
+  } else if (persisted && persisted.tab && persisted.tab !== "drawing") {
     showTab(persisted.tab);
   }
+  setInterval(pollLive, 1000);
   loadDrawing();
   pollIntent();
   pollRecovery();

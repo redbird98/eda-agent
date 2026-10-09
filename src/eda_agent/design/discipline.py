@@ -116,8 +116,8 @@ these rules before producing a plan; they bound your choices.
    F# fuses, FB# ferrites. Number from 1 per refdes-letter, no gaps.
 
 10. **Sheets default to one called "main".** Multiple sheets only when
-    the spec obviously needs sectioning (>30 parts, or distinct
-    functional blocks).
+    the spec needs sectioning (>30 parts, or distinct functional
+    blocks).
 
 11. **Zones are optional** placement guidance for the executor. Use them
     to cluster decoupling near its IC, separate analog from digital, etc.
@@ -599,7 +599,7 @@ buck, an LDO, an MCU board, an audio amp, or a sensor frontend.
   nets with `is_power` / `is_ground` set are exempt because the power
   port carries the connection.
 
-## PCB placement discipline (post-ECO, layout phase)
+## PCB placement discipline (once the netlist is on the board)
 
 Once parts are on the PCB, moving them is a separate concern from the
 DesignPlan executor above. The same agent often drives both phases.
@@ -650,16 +650,259 @@ Apply these rules whenever calling `pcb_move_components`.
    component to bottom and place it under a top-side IC, that's a
    legal solid-geometry overlap (different layers). Use DRC if you
    need actual clearance rules enforced.
+
+## PCB routing discipline
+
+These are conventions a fabricator and a reviewer both expect. A board
+can be netlist-correct and DRC-clean while breaking every one of them,
+which is why they are written down rather than left to the checker.
+
+1. **45 degree corners, not 90.** A right-angle corner in signal
+   copper is the first thing a reviewer notices and the standard house
+   rule on nearly every board. Turn with two 45 degree bends instead.
+   `route_plan` does this by default; if you place tracks yourself with
+   `pcb_place_tracks`, emit the chamfer segment rather than a single
+   corner point. Acute (less than 90 degree) corners are worse than
+   either and are what `audit_find_acute_angles` looks for.
+
+2. **No via in a pad unless the part forces it.** A via inside a
+   surface-mount pad wicks solder off the joint and has to be filled
+   and capped, which is a different and more expensive process. Put the
+   via beside the pad with a short stub. `route_plan` refuses via-in-pad
+   by default and takes `allow_via_in_pad=True` for the cases that
+   genuinely need it: BGA fanout with no room to escape, and a thermal
+   pad being stitched to a plane, where the via is intentional and the
+   fabricator is told about it.
+
+3. **One of these DRC can enforce and one it cannot.** Altium has a
+   Vias Under SMD rule, and switching it on is worth more than care
+   while placing, because it checks the whole board every time.
+   `pcb_create_design_rule(rule_type="vias_under_smd", allowed=False)`
+   creates it. For right angles there is no rule at all: the nearest
+   check fires below 90 degrees, so a board full of right-angle corners
+   passes DRC silently. Look at it, or read back what you placed.
+
+## Board layout method
+
+A board is finished when it is correct, verified against the
+datasheets, and organised: blocks recognisable, parts in aligned rows
+and columns, signal flow readable. A board with every net connected and
+parts strewn about is not finished. People judge a layout by its
+organisation first, and function and routability follow from the same
+discipline.
+
+1. **Floorplan before placement.** In this order: the fixed skeleton
+   (outline, mounting holes and their keep-outs on both sides,
+   connectors at their mechanical positions, modules, and any part a
+   datasheet pins down); the corridors of critical routes (high-speed
+   pairs, high current), run along region edges and never through a
+   region that must stay contiguous, such as an analog section; the
+   sections (analog, power, digital, IO), each one contiguous area
+   sized from about twice its parts' area; then one rectangle per
+   sub-block, in signal-flow order (connector, protection,
+   conditioning, processing), next to the blocks it shares nets with.
+   The plan's functional blocks are these sub-blocks, so the same names
+   drive the schematic and the board. Moving a corridor is cheap now
+   and expensive after routing.
+
+2. **Lay each block out to a pattern.** An IC at the centre, turned so
+   its pads face what they connect to, and each part on a pin in a
+   column on that pin's side: decoupling caps closest, then the other
+   parts on the pin, then the parts chained to them. Caps on a shared
+   rail are spread over its ICs, one each first. A pull-up sits by its
+   signal pin, not its rail pin. Passive-only blocks go in rows, same
+   orientation, uniform pitch. Repeated channels are identical tiles
+   on a grid.
+
+3. **Read the legaliser's moves.** A part pushed more than about 2 mm
+   to clear a collision means the floorplan is wrong there: fix the
+   floorplan, not the part. If a placement looks scattered, the method
+   is wrong, and tuning a cost-driven placer's weights will not fix it.
+
+4. **Route in stages, critical first.** Differential pairs (coupled,
+   45 degree corners, skew matched with bumps on the shorter track),
+   sense lines, power paths as copper areas, plane fan-out (a dog-bone
+   from each plane pad to a via beside it; a via in a pad only on an
+   exposed or thermal pad, or a BGA ball with no room, and each one
+   listed as a fab note), buses planned as a whole (one lane per net at
+   a fixed pitch, taken outside-in so lanes nest), then the rest by
+   class, then leftovers. Copper from an earlier stage is fixed for the
+   later ones. When earlier copper blocks a bus, rip it up and re-plan
+   it with the bus instead of detouring round it. A pin that cannot be
+   reached is a placement problem at that pin: fix the placement there
+   rather than re-running the router.
+
+5. **Silkscreen on a dense board.** Keep designators on the assembly
+   drawing (`pcb_copy_designators_to_mech`, then
+   `pcb_set_text_visibility`) and keep only what a person handling the
+   board needs: board name and revision, connector functions, LED and
+   test-point labels, pin-1 marks. Where designators stay, size them to
+   the fabricator's minimum with `pcb_set_text_style`.
+
+6. **Small steps, each one checked.** Open `design_live_view` at the
+   start so the person can watch the board change. Make one change,
+   look at the result (the live view, `pcb_render_svg`,
+   `design_visual_review`), fix what you see, then make the next.
+   Record each decision with its reason before acting on it
+   (`design_live_note`), so the person following the run can see why
+   the board looks the way it does. A long unchecked run that ends in
+   one big reveal is how a broken board gets delivered.
+
+7. **Every phase ends with numbers.** Overlaps, pad gaps, parts on
+   keep-outs, routed nets out of the total, corners sharper than 45
+   degrees, return vias, plane regions in one piece, DRC: all from
+   `pcb_layout_audit`. A phase is done when its numbers say so, not
+   when it looks done. At the end, `design_session_report` assembles
+   the design report from what the run recorded.
 """
 
 
+#: What runs a plan, per backend. The discipline text was written for
+#: Altium and says so in its opening paragraph; on another backend that
+#: sentence names the wrong editor AND the wrong tool, which is the
+#: first thing a planner reads.
+_EXECUTOR = {
+    "altium": ("Altium Designer", "design_execute_plan"),
+    "easyeda": ("EasyEDA Pro", "easyeda_emit_plan then easyeda_run_plan"),
+    "kicad": ("KiCad", "design_execute_plan"),
+}
+
+#: The first line of the schematic-to-PCB block, used as an anchor. The
+#: block runs from here to the start of rule 8.
+_ECO_ANCHOR = "6. **ECO (schematic → PCB) is not headless.**"
+_RULE_8_ANCHOR = "8. **Connectivity review uses the netlist, never the render.**"
+
+#: Rules 6 and 7 explain Altium's Engineering Change Order: a dialog a
+#: human must click, and the trick for populating a board without it.
+#: Every sentence is about a mechanism only Altium has, so swapping the
+#: tool names produces the worst possible result: an EasyEDA tool name
+#: wrapped in Altium mechanics, which reads as authoritative and
+#: describes nothing that exists. The block is replaced wholesale
+#: instead.
+#:
+#: What replaces it says only what has been measured. Whether these
+#: editors raise a dialog for the transfer has NOT been checked on a
+#: live session, so the text says to treat it as attended rather than
+#: guessing either way; claiming it is headless would be inventing a
+#: capability, and claiming it is modal would be inventing a
+#: limitation.
+_SCH_TO_PCB_BLOCK = {
+    "easyeda": """6. **Schematic to PCB transfer is `easyeda_import_schematic_changes`.**
+   Whether the editor raises a dialog for it has not been verified on a
+   live session, so treat the call as attended: do not put it in an
+   unattended run until someone has watched it once and recorded what
+   happened.
+
+7. **Placing a footprint is not the same as connecting it.**
+   `easyeda_place_pcb_components` puts geometry on the board. Do not
+   assume a placed part is a connected one: confirm with
+   `easyeda_compare_schematic_pcb`, and read the remaining opens with
+   `easyeda_get_unconnected_pins` before treating the transfer as done.
+""",
+    "kicad": """6. **Schematic to PCB transfer is `kicad_generate_pcb`.**
+   Whether it prompts has not been verified here, so treat the call as
+   attended until it has been.
+
+7. **Placing a footprint is not the same as connecting it.** Confirm
+   the board matches the schematic with `kicad_compare_sch_pcb`, and
+   read the remaining opens with `kicad_get_unconnected_pins`, rather
+   than assuming a placed part is a connected one.
+""",
+}
+
+
 def get_discipline() -> str:
-    """Return the discipline doc + the embedded DesignPlan JSON schema."""
+    """Return the discipline doc + the embedded DesignPlan JSON schema.
+
+    The opening paragraph is rewritten for the active backend. Only
+    that paragraph: the rest of the text names Altium tools inside
+    sentences that sometimes EXPLAIN why a tool is Altium-only, and
+    substituting there would produce prose contradicting itself. That
+    wider split is task #58; this fixes the sentence a planner reads
+    first, which otherwise tells an EasyEDA user their plan is going
+    into Altium.
+    """
+    from ..core.backends import active_backend_name
+
     schema_obj = DesignPlan.model_json_schema()
     schema_blob = json.dumps(schema_obj, indent=2)
 
+    backend = active_backend_name()
+    editor, executor = _EXECUTOR.get(backend, _EXECUTOR["altium"])
+    text = _DISCIPLINE
+    if backend != "altium":
+        # Substitute the tool names too, not just the framing. This is
+        # safe HERE and was checked rather than assumed: the document
+        # contains no sentence explaining that a tool is unavailable
+        # ("not offered", "Altium-only", "does not exist" and four more
+        # phrasings all return nothing), so every reference is a plain
+        # "use X to do Y" instruction where the equivalent reads
+        # correctly. The same substitution over autonomy.py's prose,
+        # which DOES explain unavailability, would produce text
+        # contradicting itself; that is still task #58.
+        #
+        # Only backticked names are touched, and only where the
+        # replacement is a tool this backend registers.
+        from .autonomy import _EQUIVALENTS, _registered_tools
+
+        # Two spellings, because the document uses both and only one
+        # was being caught. A name written with its call signature,
+        # `lib_create_standard_footprint(name, family, ...)`, is inside
+        # a backtick span but is not followed by one, so matching on
+        # the closing backtick alone skipped every worked example: the
+        # three one-call generators in rule 9 all survived untouched
+        # while the prose around them was adapted. Matching the opening
+        # parenthesis as well reaches them. Both forms keep a delimiter
+        # after the name, which is what stops a shorter key rewriting
+        # the front of a longer name: `lib_add_footprint_pad` and
+        # `lib_add_footprint_pads` are both real and both mapped.
+        #
+        # Naming the shorter-name hazard with an INVENTED example here
+        # broke a guard that scans this file for tool-shaped names and
+        # correctly reported it as a reference to a tool that does not
+        # exist. A comment in this file is part of the surface that
+        # guard reads, so examples in it have to be real.
+        available = _registered_tools(backend)
+        for altium_tool, swap in _EQUIVALENTS.items():
+            if swap in available:
+                text = text.replace(f"`{altium_tool}`", f"`{swap}`")
+                text = text.replace(f"`{altium_tool}(", f"`{swap}(")
+
+        # Rules 6 and 7 are replaced wholesale rather than translated.
+        # Slicing between two anchors that contain no tool names means
+        # the substitution above cannot have moved them, whichever
+        # order these two steps run in.
+        block = _SCH_TO_PCB_BLOCK.get(backend)
+        start = text.find(_ECO_ANCHOR)
+        end = text.find(_RULE_8_ANCHOR)
+        if block and 0 <= start < end:
+            text = text[:start] + block + "\n" + text[end:]
+        elif block:
+            # The anchors moved. Saying so beats shipping the Altium ECO
+            # rules to a backend that has no ECO, which is what a silent
+            # miss would do.
+            text += (
+                "\n\n> NOTE: rules 6 and 7 describe Altium's Engineering "
+                "Change Order, which this backend does not have, and they "
+                "could not be replaced automatically. Ignore them here.\n")
+
+        target = "the executor can instantiate in Altium Designer."
+        replaced = text.replace(
+            target,
+            f"the executor can instantiate in {editor} (via {executor}).",
+            1)
+        if replaced == text:
+            # A silent no-op is the failure mode here: the planner
+            # would read the Altium framing believing it was corrected.
+            # Say so in the text rather than pretending.
+            replaced = text + (
+                f"\n\n> NOTE: this document was written for Altium and "
+                f"its opening could not be adapted. The active backend "
+                f"is {editor}; a plan is run there with {executor}.\n")
+        text = replaced
+
     return (
-        _DISCIPLINE
+        text
         + "\n## DesignPlan JSON schema\n\nYour DesignPlan must validate "
         + "against this schema:\n\n```json\n"
         + schema_blob

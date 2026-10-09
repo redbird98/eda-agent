@@ -79,11 +79,40 @@ def _dominant(values) -> Optional[Any]:
 # layer, whatever it has been renamed to. Compared with spaces stripped and
 # case folded, so "Top Overlay" and "TopOverlay" are the same layer.
 _STANDARD_LAYERS = frozenset({
+    # Altium's names.
     "toplayer", "bottomlayer", "multilayer",
     "topoverlay", "bottomoverlay",
     "toppaste", "bottompaste",
     "topsolder", "bottomsolder",
     "keepoutlayer", "drillguide", "drilldrawing",
+    # EasyEDA's names, MEASURED from pcb.layers on a live
+    # 92-layer board rather than guessed. Only the two copper layers
+    # happen to normalise to the same string as Altium's; every other
+    # name differs, so this audit saw a standard EasyEDA stackup as a
+    # pile of non-standard layers.
+    #
+    # The inner layers cannot be listed. EasyEDA reports them with
+    # type SIGNAL and whatever name the user gave them, measured as
+    # "Int1 (GND)" and "Inner7" on that board, so a name alone cannot
+    # say they are standard. _STANDARD_PREFIXES below catches Altium's
+    # midlayer convention and nothing catches EasyEDA's, which is a
+    # known limit rather than an oversight: the type field says it and
+    # this function only receives a name.
+    "topsilkscreenlayer", "bottomsilkscreenlayer",
+    "topsoldermasklayer", "bottomsoldermasklayer",
+    "toppastemasklayer", "bottompastemasklayer",
+    "topassemblylayer", "bottomassemblylayer",
+    "boardoutlinelayer", "multi-layer", "documentlayer",
+    "mechanicallayer",
+    # The rest of the measured stackup. These are standard EasyEDA
+    # layers a footprint can legitimately draw on, and leaving them out
+    # made the audit report a perfectly ordinary part as using thirteen
+    # non-standard layers.
+    "holelayer", "componentshapelayer", "componentmarkinglayer",
+    "pinsolderinglayer", "pinfloatinglayer", "componentmodellayer",
+    "3dshelloutlinelayer", "3dshelltoplayer", "3dshellbottomlayer",
+    "drilldrawinglayer", "ratlinelayer",
+    "topstiffenerlayer", "bottomstiffenerlayer",
 })
 _STANDARD_PREFIXES = ("midlayer", "internalplane")
 

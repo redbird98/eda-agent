@@ -131,10 +131,24 @@ def dist_point_seg(px: float, py: float,
     return math.hypot(px - (x1 + t * dx), py - (y1 + t * dy))
 
 
+def to_rect_frame(px: float, py: float, cx: float, cy: float,
+                  rot: float) -> tuple[float, float]:
+    """A point in a rect's own frame: rotated by -rot degrees about the
+    rect's centre, so the rect is axis-aligned there."""
+    if not rot:
+        return px, py
+    a = math.radians(rot)
+    c, s = math.cos(a), math.sin(a)
+    dx, dy = px - cx, py - cy
+    return cx + dx * c + dy * s, cy - dx * s + dy * c
+
+
 def dist_point_rect(px: float, py: float,
-                    cx: float, cy: float, hw: float, hh: float) -> float:
-    """Distance from point to an axis-aligned rect (center + half-extents),
-    0 inside, all mils."""
+                    cx: float, cy: float, hw: float, hh: float,
+                    rot: float = 0.0) -> float:
+    """Distance from point to a rect (center + half-extents, turned
+    ``rot`` degrees counter-clockwise), 0 inside, all mils."""
+    px, py = to_rect_frame(px, py, cx, cy, rot)
     dx = max(0.0, abs(px - cx) - hw)
     dy = max(0.0, abs(py - cy) - hh)
     return math.hypot(dx, dy)
@@ -171,9 +185,12 @@ def dist_seg_seg(ax1: float, ay1: float, ax2: float, ay2: float,
 
 
 def dist_seg_rect(x1: float, y1: float, x2: float, y2: float,
-                  cx: float, cy: float, hw: float, hh: float) -> float:
-    """Minimum distance from a segment to an axis-aligned rect, 0 if the
-    segment touches or enters the rect, all mils."""
+                  cx: float, cy: float, hw: float, hh: float,
+                  rot: float = 0.0) -> float:
+    """Minimum distance from a segment to a rect turned ``rot`` degrees,
+    0 if the segment touches or enters the rect, all mils."""
+    x1, y1 = to_rect_frame(x1, y1, cx, cy, rot)
+    x2, y2 = to_rect_frame(x2, y2, cx, cy, rot)
     if dist_point_rect(x1, y1, cx, cy, hw, hh) == 0.0:
         return 0.0
     if dist_point_rect(x2, y2, cx, cy, hw, hh) == 0.0:
@@ -238,10 +255,23 @@ class RoutingProblem:
             {} for _ in self.layers]
         self.via_blocked: list[dict[tuple[int, int], set[str | None]]] = [
             {} for _ in self.layers]
+        # Cells whose centre sits ON pad copper, per layer, with no
+        # clearance inflation: this is the pad itself, not its keep-out.
+        # A via here is a via IN a pad, which wicks solder off the joint
+        # and turns the board into a filled-and-capped process. Kept
+        # apart from ``via_blocked`` because that map is about what a
+        # via would collide with, and this one is about what it would
+        # sit inside, which is a manufacturing question rather than a
+        # geometric one.
+        self.pad_cells: list[set[tuple[int, int]]] = [
+            set() for _ in self.layers]
         self._margin_track = rules.clearance_mils + rules.max_track_halfwidth
         self._margin_via = rules.clearance_mils + rules.via_size_mils / 2.0
         # net -> terminals (pad centers).
         self.terminals: dict[str, list[Terminal]] = {}
+        # Blocked terminals whose pad no cell centre lands on: the grid
+        # is coarser than the pad, and a finer grid_pitch_mils fixes it.
+        self.off_grid_terminals = 0
         # Static obstacle geometry retained for validate_solution():
         # {"kind": "rect"|"seg"|"circle", "layer": index|None(all),
         #  "net": str|None, ...shape fields...}
@@ -270,13 +300,27 @@ class RoutingProblem:
             return True
         return all(o == net for o in owners)
 
-    def via_ok(self, ix: int, iy: int, net: str) -> bool:
+    def via_ok(self, ix: int, iy: int, net: str,
+               allow_in_pad: bool = False) -> bool:
         """True if a through-via for ``net`` may land on this cell. The
         barrel spans every routing layer, so the cell must clear the
         wider via inflation on all of them (plus be track-passable for
-        the entry/exit centerlines)."""
+        the entry/exit centerlines).
+
+        NOT INSIDE A PAD unless the caller asks. The clearance maps let
+        a net sit on its own copper, which is right for a track and
+        wrong for a via: the result is a via in the pad, which wicks
+        solder off the joint and has to be filled and capped. The via
+        belongs beside the pad, and there is almost always a cell there.
+        ``allow_in_pad`` is for the cases that genuinely need it, BGA
+        fanout and a thermal pad stitched to a plane.
+        """
         if not (0 <= ix < self.nx and 0 <= iy < self.ny):
             return False
+        if not allow_in_pad:
+            for li in range(len(self.layers)):
+                if (ix, iy) in self.pad_cells[li]:
+                    return False
         for li in range(len(self.layers)):
             if not self.passable(li, ix, iy, net):
                 return False
@@ -331,10 +375,11 @@ class RoutingProblem:
         all_idx = tuple(range(len(prob.layers)))
         layer_idx = {name.lower(): i for i, name in enumerate(prob.layers)}
 
+        pad_terms: list[tuple[str, int, float, float, float, float, float]] = []
         for p in geometry.get("pads") or []:
             cx = float(p.get("x", 0))
             cy = float(p.get("y", 0))
-            hw, hh = _pad_half_extents(p)
+            hw, hh, rot = _pad_shape(p)
             lay = str(p.get("layer", "") or "").lower()
             net = str(p.get("net", "") or "") or None
             owner = net  # None (unnetted) blocks every net.
@@ -346,17 +391,22 @@ class RoutingProblem:
                 indices = (layer_idx[lay],)
             else:
                 continue  # mask/paste/mech artwork: not routing copper
-            prob._block_rect(indices, cx, cy, hw, hh, owner)
+            prob._block_rect(indices, cx, cy, hw, hh, owner, rot)
+            if lay != "keepoutlayer":
+                prob._mark_pad_cells(indices, cx, cy, hw, hh, rot)
             prob.geoms.append({
                 "kind": "rect",
                 "layer": None if len(indices) > 1 else indices[0],
                 "net": net, "cx": cx, "cy": cy, "hw": hw, "hh": hh,
+                "rot": rot,
             })
             if net:
                 term = Terminal(
                     x=int(round(cx)), y=int(round(cy)),
                     cell=prob.snap_cell(cx, cy), layers=indices)
                 prob.terminals.setdefault(net, []).append(term)
+                pad_terms.append((net, len(prob.terminals[net]) - 1,
+                                  cx, cy, hw, hh, rot))
 
         for t in geometry.get("tracks") or []:
             tx1 = float(t.get("x1", 0))
@@ -392,9 +442,46 @@ class RoutingProblem:
                 "x": vx, "y": vy, "r": r,
             })
 
+        for net, i, cx, cy, hw, hh, rot in pad_terms:
+            prob.terminals[net][i] = prob._reachable_terminal(
+                net, prob.terminals[net][i], cx, cy, hw, hh, rot)
         for net in prob.terminals:
             prob.terminals[net].sort(key=lambda t: (t.x, t.y, t.layers))
         return prob
+
+    def _reachable_terminal(self, net: str, term: Terminal, cx: float,
+                            cy: float, hw: float, hh: float,
+                            rot: float) -> Terminal:
+        """Put a terminal on a free cell of its own pad's copper.
+
+        The pad centre snaps to the nearest cell, and on fine-pitch pads
+        that cell can sit off the pad, in a NEIGHBOUR's keep-out, so the
+        search could never leave the pad and called it unreachable. Any
+        cell whose centre is on this pad's copper does as well, and the
+        stub from the pad centre to it stays inside the pad. When no
+        cell centre lands on the copper at all, the grid is coarser than
+        the pad, the stub has to cross bare board, and the terminal is
+        counted in ``off_grid_terminals``.
+        """
+        def free(cell: tuple[int, int]) -> bool:
+            return any(self.passable(li, *cell, net) for li in term.layers)
+
+        ex, ey = rect_extents(hw, hh, rot)
+        on_copper: list[tuple[float, tuple[int, int]]] = []
+        for ix, iy in self._cells_in_window(cx - ex, cy - ey, cx + ex, cy + ey):
+            x, y = self.cell_center(ix, iy)
+            if dist_point_rect(x, y, cx, cy, hw, hh, rot) == 0.0:
+                on_copper.append((math.hypot(x - cx, y - cy), (ix, iy)))
+        if not on_copper:
+            self.off_grid_terminals += 1
+            return term
+        if term.cell in {c for _d, c in on_copper} and free(term.cell):
+            return term
+        for _d, cell in sorted(on_copper):
+            if free(cell):
+                return Terminal(x=term.x, y=term.y, cell=cell,
+                                layers=term.layers)
+        return term
 
     # -- mutation ----------------------------------------------------------
 
@@ -437,15 +524,32 @@ class RoutingProblem:
         return ((self.blocked, self._margin_track),
                 (self.via_blocked, self._margin_via))
 
+    def _mark_pad_cells(self, indices: Iterable[int], cx: float, cy: float,
+                        hw: float, hh: float, rot: float = 0.0) -> None:
+        """Record the cells the pad copper actually covers.
+
+        No margin: a cell beside a pad is a fine place for a via, and
+        that is where a via belongs when a pad needs one.
+        """
+        ex, ey = rect_extents(hw, hh, rot)
+        for li in indices:
+            for ix, iy in self._cells_in_window(cx - ex, cy - ey,
+                                                cx + ex, cy + ey):
+                x, y = self.cell_center(ix, iy)
+                if dist_point_rect(x, y, cx, cy, hw, hh, rot) == 0.0:
+                    self.pad_cells[li].add((ix, iy))
+
     def _block_rect(self, indices: Iterable[int], cx: float, cy: float,
-                    hw: float, hh: float, owner: str | None) -> None:
+                    hw: float, hh: float, owner: str | None,
+                    rot: float = 0.0) -> None:
         indices = tuple(indices)
         r_max = max(self._margin_track, self._margin_via)
+        ex, ey = rect_extents(hw, hh, rot)
         for ix, iy in self._cells_in_window(
-                cx - hw - r_max, cy - hh - r_max,
-                cx + hw + r_max, cy + hh + r_max):
+                cx - ex - r_max, cy - ey - r_max,
+                cx + ex + r_max, cy + ey + r_max):
             px, py = self.cell_center(ix, iy)
-            d = dist_point_rect(px, py, cx, cy, hw, hh)
+            d = dist_point_rect(px, py, cx, cy, hw, hh, rot)
             for grid, margin in self._maps():
                 if d < margin:
                     for li in indices:
@@ -480,20 +584,38 @@ class RoutingProblem:
                         grid[li].setdefault((ix, iy), set()).add(owner)
 
 
-def _pad_half_extents(p: dict[str, Any]) -> tuple[float, float]:
-    """Pad copper half-extents in mils, axis-aligned. 90/270 rotations
-    swap the axes; arbitrary rotations use the enclosing AABB
-    (conservative)."""
+def _pad_shape(p: dict[str, Any]) -> tuple[float, float, float]:
+    """Pad copper as (half-width, half-height, rotation in degrees).
+
+    A quarter turn swaps the axes and leaves rotation 0, so the common
+    case stays axis-aligned. Any other angle keeps the pad's own size
+    and its rotation: the enclosing box it used to become, at 329.5
+    degrees on a 0.5 mm pitch connector, covered the neighbouring pads'
+    centres and made every one of them unreachable.
+    """
     hw = float(p.get("x_size", 0) or 0) / 2.0
     hh = float(p.get("y_size", 0) or 0) / 2.0
     rot = float(p.get("rotation", 0) or 0) % 180.0
     if abs(rot - 90.0) < 1e-6:
-        return hh, hw
-    if abs(rot) < 1e-6:
+        return hh, hw, 0.0
+    if abs(rot) < 1e-6 or abs(rot - 180.0) < 1e-6:
+        return hw, hh, 0.0
+    return hw, hh, rot
+
+
+def rect_extents(hw: float, hh: float, rot: float) -> tuple[float, float]:
+    """Half-extents of the axis-aligned box around a turned rect."""
+    if not rot:
         return hw, hh
     a = math.radians(rot)
     c, s = abs(math.cos(a)), abs(math.sin(a))
     return hw * c + hh * s, hw * s + hh * c
+
+
+def _pad_half_extents(p: dict[str, Any]) -> tuple[float, float]:
+    """Pad copper half-extents in mils, axis-aligned: the box around the
+    pad, for windows and bounds. Quarter turns swap the axes."""
+    return rect_extents(*_pad_shape(p))
 
 
 def _board_bounds(geometry: dict[str, Any]) -> tuple[float, float, float, float]:
@@ -526,5 +648,7 @@ __all__ = [
     "dist_point_seg",
     "dist_seg_rect",
     "dist_seg_seg",
+    "rect_extents",
     "rules_from_dict",
+    "to_rect_frame",
 ]

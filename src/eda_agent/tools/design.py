@@ -54,6 +54,9 @@ from ..design.inventory import LibraryInventory, snapshot_live
 from ..design.learner import learn_from_layout
 from ..design.orchestrator import (
     execute_plan_via_canvas_from_json,
+    hints_from_sheet,
+    layout_plan_from_json,
+    plan_from_live_sheet,
     preview_plan_from_json,
 )
 from ..design.motif_descriptions import describe_motifs
@@ -72,10 +75,6 @@ from ..design.plan_blocks import (
 from ..design.plan_edit import edit_plan
 from ..design.plan_erc import check_plan_erc
 from ..design.plan_stats import summarize_plan
-from ..design.schematic_layout import (
-    compute_schematic_layout,
-    to_executor_payload,
-)
 from ..design.validator import validate as run_validate
 
 
@@ -143,6 +142,68 @@ def register_design_tools(mcp) -> None:
 
     # --- session journal (autonomy-harness durable state) ----------------
 
+    def _adapt_action(action: dict) -> dict:
+        """Translate one next_action reply for the active backend.
+
+        The state machine is deliberately pure: it knows the pipeline,
+        not which editor is attached, and adapting inside it would put
+        a backend import in the one module that is fully unit-testable
+        without one. So the translation happens here, at the boundary
+        where the reply is handed to a client.
+
+        This is the tool an autonomous run calls on every iteration, so
+        an Altium-only name in its reply is not a cosmetic wart: the
+        client does what the reply says. Before this, `goal`,
+        `guidance`, `exit_gate` and `suggested_tools` all reached an
+        EasyEDA client naming tools it does not register.
+        """
+        from ..core.backends import active_backend_name
+        from ..design.autonomy import (_EQUIVALENTS, _adapt_lines,
+                                       _registered_tools)
+
+        backend = active_backend_name()
+        if backend == "altium":
+            return action
+
+        available = _registered_tools(backend)
+        keys = [k for k in ("goal", "guidance", "exit_gate", "open_question")
+                if action.get(k)]
+        adapted = _adapt_lines([action[k] for k in keys], backend, available)
+        for key, line in zip(keys, adapted):
+            action[key] = line
+
+        # The tool list is names, not prose, so the "(not available on
+        # this backend)" annotation _adapt_lines adds to a sentence
+        # would corrupt it into an uncallable name.
+        action["suggested_tools"] = [
+            _EQUIVALENTS[t] if _EQUIVALENTS.get(t) in available else t
+            for t in action.get("suggested_tools") or []
+        ]
+        return action
+
+    def _mirror_to_live_view(event, stage, status, text, path, kind, question,
+                             revision, topic) -> None:
+        """The live view's decision log shows the run's journal entries
+        beside the board, so a run that logs to the journal is visible
+        without also calling design_live_note. Never fails the log."""
+        line = {
+            "stage_enter": f"Starting {stage}.",
+            "stage_result": f"{stage}: {status}" + (f". {text}" if text else "."),
+            "plan_revision": f"Plan revision {revision}" + (f": {text}" if text else "."),
+            "artifact": f"Wrote {kind or 'a file'}: {path}",
+            "blocked": f"Blocked: {question}",
+            "resolved": f"Resolved: {text}",
+            "note": text,
+        }.get(event, "")
+        if not line.strip():
+            return
+        section = (topic or "note") if event == "note" else (stage or event)
+        try:
+            from ..design import live
+            live.note(section, line)
+        except Exception:  # noqa: BLE001 - the view never fails the journal
+            pass
+
     def _session_store():
         from ..config import get_config
         from ..design.session import SessionStore
@@ -187,6 +248,8 @@ def register_design_tools(mcp) -> None:
         kind: str = "",
         question: str = "",
         revision: int = 0,
+        topic: str = "",
+        data: Optional[Union[dict, str]] = None,
     ) -> dict[str, Any]:
         """Append one event to a design-session journal.
 
@@ -195,15 +258,34 @@ def register_design_tools(mcp) -> None:
         ``plan_revision`` (``revision``), ``artifact`` (``path``, ``kind``),
         ``blocked`` (``question``), ``resolved`` (``text`` = answer),
         ``note`` (``text``). Returns the updated derived state.
+
+        ``data`` (a dict, or JSON text) goes with a ``stage_result`` or a
+        ``note``. On a stage_result it is the evidence for the exit gate:
+        for placement, routing, pours_tuning and verification, pass the
+        ``pcb_layout_audit`` result (and the ``pcb_calc_length_match`` or
+        ``proj_run_erc`` reply under its own tool name) and the reply
+        carries ``gate``, the verdict on those numbers. A stage logged ok
+        whose numbers fail its gate is sent back by
+        ``design_next_action``. ``topic`` files a note under a section of
+        ``design_session_report``: placement, stackup, critical_routes,
+        power, planes (fan-out and via-in-pad too), silkscreen,
+        verification, simulation, issue, or decision.
         """
         journal = _resolve_journal(session_id)
         if journal is None:
             return {"error": "no active design session; call design_session_start first"}
+        if isinstance(data, str):
+            try:
+                data = json.loads(data) if data.strip() else None
+            except json.JSONDecodeError as exc:
+                return {"error": f"data is not valid JSON: {exc}"}
+        if data is not None and not isinstance(data, dict):
+            return {"error": "data must be a JSON object"}
         try:
             if event == "stage_enter":
                 journal.enter_stage(stage)
             elif event == "stage_result":
-                journal.stage_result(stage, status, verdict=text)
+                journal.stage_result(stage, status, verdict=text, data=data)
             elif event == "plan_revision":
                 journal.plan_revision(revision, summary=text)
             elif event == "artifact":
@@ -213,12 +295,20 @@ def register_design_tools(mcp) -> None:
             elif event == "resolved":
                 journal.resolved(text)
             elif event == "note":
-                journal.note(text)
+                journal.note(text, topic=topic, data=data)
             else:
                 return {"error": f"unknown event kind: {event!r}"}
         except ValueError as e:
             return {"error": str(e)}
-        return {"session_id": journal.session_id, "state": asdict(journal.state())}
+        _mirror_to_live_view(event, stage, status, text, path, kind, question,
+                             revision, topic)
+        out: dict[str, Any] = {"session_id": journal.session_id,
+                               "state": asdict(journal.state())}
+        if event == "stage_result" and data:
+            from ..design.autonomy import MEASURED_GATES, evaluate_gate
+            if stage in MEASURED_GATES:
+                out["gate"] = evaluate_gate(stage, data)
+        return out
 
     @mcp.tool()
     async def design_session_status(session_id: str = "") -> dict[str, Any]:
@@ -243,17 +333,23 @@ def register_design_tools(mcp) -> None:
         journal = _resolve_journal(session_id)
         if journal is None:
             return {"error": "no design sessions found; start one with design_session_start"}
-        state = journal.state()
+        from ..design.autonomy import apply_measured_gates
+        state, gates = apply_measured_gates(journal.state(), journal.events())
         if state.open_question:
             guidance = f"BLOCKED: ask the user: {state.open_question}"
         elif state.complete:
             guidance = "All 13 pipeline stages complete."
         else:
             guidance = f"Next stage: {state.next_stage}"
+            sent_back = gates.get(state.next_stage)
+            if sent_back and sent_back["verdict"] == "fail":
+                guidance += (" (its logged numbers fail the exit gate: "
+                             + "; ".join(sent_back["failed"]) + ")")
         return {
             "session_id": journal.session_id,
             "guidance": guidance,
             "state": asdict(state),
+            "gates": gates,
         }
 
     @mcp.tool()
@@ -270,13 +366,19 @@ def register_design_tools(mcp) -> None:
         the ``exit_gate`` that marks it done, and, on ``blocked``, the
         ``open_question`` to put to the user. Bounded retries: a stage that
         fails repeatedly escalates to ``blocked`` instead of looping forever.
+
+        The layout stages (placement, routing, pours_tuning, verification)
+        have measured gates: the reply also carries ``gate``, the numbers
+        and the values that pass, and ``last_gate``, the verdict on numbers
+        already logged for the stage. A stage logged ok whose logged numbers
+        fail its gate comes back as ``retry``, with the failing numbers in
+        ``guidance``. A stage logged with no numbers is taken as logged.
         """
         journal = _resolve_journal(session_id)
         if journal is None:
             return {"error": "no design sessions found; start one with design_session_start"}
-        from ..design.state_machine import next_action as _next_action
-        action = _next_action(journal.state())
-        return asdict(action)
+        from ..design.autonomy import measured_next_action
+        return _adapt_action(measured_next_action(journal.state(), journal.events()))
 
     @mcp.tool()
     async def design_autonomy_guide() -> dict[str, Any]:
@@ -290,6 +392,146 @@ def register_design_tools(mcp) -> None:
         """
         from ..design.autonomy import autonomy_guide
         return autonomy_guide()
+
+    @mcp.tool()
+    async def design_session_report(session_id: str = "",
+                                    output_path: str = "") -> dict[str, Any]:
+        """Write up a design run from its session journal, as markdown.
+
+        Assembled only from what the run recorded: the requirement, each
+        stage's outcome with the gate numbers logged for it, decisions,
+        audit results, simulations and open issues. The body sections come
+        in a fixed order: placement strategy, stack-up and impedance,
+        critical routes (lengths, skews, layer changes, return vias,
+        exceptions), power paths, planes and fan-out (where via-in-pad was
+        used and why), silkscreen policy, verification results, simulations,
+        open issues. A section nothing was logged for says so in one line.
+        Notes reach a section through their ``topic`` (see
+        ``design_session_log``).
+
+        Args:
+            session_id: the session to report; blank uses the most recently
+                active one.
+            output_path: also write the markdown to this file. Its folder
+                must exist, and a path inside the installed eda_agent
+                package is refused. Blank writes nothing.
+
+        Returns:
+            ``{"session_id", "markdown", "path"}`` (``path`` is "" when
+            nothing was written), or ``{"error": ...}``.
+        """
+        journal = _resolve_journal(session_id)
+        if journal is None:
+            return {"error": "no design sessions found; start one with design_session_start"}
+        if session_id and not journal.path.exists():
+            return {"error": f"no design session {session_id!r}"}
+        from ..design.report import build_report
+        markdown = build_report(journal)
+        out: dict[str, Any] = {"session_id": journal.session_id,
+                               "markdown": markdown, "path": ""}
+        if not output_path:
+            return out
+        import eda_agent
+        target = Path(output_path).expanduser().resolve()
+        package = Path(eda_agent.__file__).resolve().parent
+        if target == package or package in target.parents:
+            return {"error": f"refusing to write inside the installed package ({package}); "
+                             "choose a path outside it"}
+        if target.is_dir():
+            return {"error": f"{target} is a folder; give a file path"}
+        if not target.parent.is_dir():
+            return {"error": f"the folder {target.parent} does not exist"}
+        target.write_text(markdown, encoding="utf-8")
+        out["path"] = str(target)
+        return out
+
+    @mcp.tool()
+    async def pcb_layout_audit(
+        checks: Optional[list[str]] = None,
+        expect_file: str = "",
+        board_json_path: str = "",
+        nets: Optional[list[str]] = None,
+        max_distance_mils: float = 40.0,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        """Measure a board for the layout stages' exit gates. Changes nothing.
+
+        Reads the focused board exactly, the way ``pcb_autoroute`` does
+        (``pcb.get_layout_model``), or a saved LayoutBoard JSON, and runs the
+        in-house checks over it. Every check returns counts and itemised
+        findings with coordinates in mils:
+
+        - ``placement_audit``: overlapping bodies on one side, pads of
+          different nets closer than the clearance rule, parts on keepouts
+          or mounting holes, parts off the board.
+        - ``connectivity_summary``: nets routed / partly routed / not
+          started, and every unreached pad.
+        - ``drc``: the exact clearance check.
+        - ``corner_audit``: track junctions bending sharper than 45 degrees.
+        - ``return_via_audit``: signal vias with no ground or plane via
+          within ``max_distance_mils``.
+        - ``plane_region_audit``: pour and plane copper broken into islands.
+
+        Log the result as ``data`` on the stage_result
+        (``design_session_log``); ``design_next_action`` checks the numbers
+        against the stage's gate.
+
+        Args:
+            checks: names from the list above; None runs them all.
+            expect_file: full path of the focused board, for a live read.
+                The read refuses on the first reply if another board is
+                focused.
+            board_json_path: a saved LayoutBoard (.json or .json.gz) to audit
+                offline instead; nothing is read from the editor.
+            nets: the signal nets ``return_via_audit`` checks. None checks
+                differential-pair and high-speed-class nets, or every signal
+                via when the board names neither.
+            max_distance_mils: how near a return via must be (centre to
+                centre). Default 40.
+            limit: findings listed per kind; counts are never cut.
+
+        Returns:
+            ``{"board", "pass", "summary": {check: {pass, counts...}},
+            "checks": {check: full result}, "source": "live"|"file"}``, or
+            ``{"error": ...}``.
+        """
+        import asyncio
+
+        from ..layout.audit import CHECKS, run_audits
+
+        names = list(checks) if checks else None
+        unknown = [n for n in names or [] if n not in CHECKS]
+        if unknown:
+            return {"error": f"unknown check(s) {unknown}; known: {list(CHECKS)}"}
+        if board_json_path:
+            from ..layout.model import LayoutBoard
+            source_path = Path(board_json_path)
+            if not source_path.is_file():
+                return {"error": f"no such file: {board_json_path}"}
+            try:
+                board = await asyncio.to_thread(LayoutBoard.load, source_path)
+            except Exception as exc:  # noqa: BLE001 - reported to the caller
+                return {"error": f"could not load {board_json_path}: {exc}"}
+            source = "file"
+        elif expect_file:
+            from ..layout.read_altium import WrongBoard, read_live_board
+            try:
+                board = await asyncio.to_thread(read_live_board, expect_file)
+            except WrongBoard as exc:
+                return {"error": str(exc)}
+            except Exception as exc:  # noqa: BLE001 - reported to the caller
+                return {"error": f"board read failed: {exc}"}
+            source = "live"
+        else:
+            return {"error": "pass expect_file (the focused board's full path) to read "
+                             "it live, or board_json_path to audit a saved LayoutBoard"}
+        result = await asyncio.to_thread(
+            run_audits, board, names, nets=nets,
+            max_distance_mils=float(max_distance_mils), limit=max(1, int(limit)))
+        result["source"] = source
+        result["next_step"] = ("log this result as data on the stage_result "
+                               "(design_session_log event='stage_result', data=...)")
+        return result
 
     # Register the MCP prompt only on a real FastMCP; test harnesses that
     # register tools with a minimal fake mcp (``.tool()`` only, no
@@ -1704,142 +1946,60 @@ def register_design_tools(mcp) -> None:
         placement_hints: Optional[dict[str, dict[str, int]]] = None,
         render_png: Optional[str] = None,
     ) -> dict[str, Any]:
-        """Compute a full schematic layout for a DesignPlan, as pure data.
+        """Compute the schematic layout for a DesignPlan, as pure data.
 
-        Runs the deterministic layout engine over the supplied plan and
-        returns the result WITHOUT touching Altium: per-symbol position
-        and rotation, the per-net representation decision
-        (wire / net_label / power_port), orthogonal wire routes for the
-        wire-tier nets, power-port / net-label glyph placements, junction
-        points, and an aesthetic score breakdown. The whole computation
-        is offline, so no project needs to be open and no Altium session
-        is required.
+        THE ONE SCHEMATIC ENGINE. Every schematic tool now runs the same
+        canvas pipeline, so whenever you are asked to draw or lay out a
+        schematic, reach for this family and nothing else: this tool for
+        the geometry as data, ``design_preview_plan`` for the same layout
+        rendered to SVG, ``design_execute_plan`` to place it in Altium.
+        There is no longer a second engine to choose between.
 
-        Use this to evaluate or compare layouts cheaply. The returned shape
-        matches the ``sch_place_*`` tool surface so a caller can drive an
-        emit directly from this payload.
+        It used to run a second, standalone engine whose placements and
+        score described a layout nobody would ever see. That engine is no
+        longer reachable: measured over ten held-out corpus sheets it lost
+        the shared objective on seven and produced four pairs of
+        OVERLAPPING BODIES where this pipeline produced none, so the
+        shorter wire it appeared to draw was partly bought by stacking
+        parts on top of one another.
 
-        IMPORTANT -- this is a DIFFERENT engine from what executes.
-        ``design_layout_schematic`` runs the standalone deterministic
-        neat-layout engine (``schematic_layout.py``). ``design_execute_plan``
-        does NOT use it: it runs the canvas pipeline (Sugiyama placement +
-        motif/prior overlays), which places and routes differently. So the
-        ``score`` and ``placements`` here are NOT guaranteed to match what
-        gets emitted. For an execution-accurate preview (same placement the
-        emit will use, same score), use ``design_preview_plan`` -- it shares
-        the canvas pipeline with ``design_execute_plan``. Reach for this tool
-        when you specifically want the neat engine's crossing-minimal routing
-        as a standalone artifact.
+        Runs OFFLINE and never reaches Altium, so it works on every
+        backend. That costs one thing and the result says which: symbol
+        geometry is synthesised from the plan's pin lists rather than
+        read from a library, so ``symbols`` comes back ``"synthetic"``
+        and ``execution_accurate`` is False. The placement and routing
+        RULES are the ones that execute. When you need the exact
+        geometry, use ``design_preview_plan`` (same pipeline, real
+        symbols, renders SVG) or ``design_execute_plan`` to emit.
 
         Args:
             plan_json: A DesignPlan as a JSON string or a JSON object/dict.
-            sheet: Sheet name to lay out (default ``"main"``).
-            grid_mils: Snap grid for final coordinates (default 100).
-            fr_iterations: Force-directed relaxation budget (default 80).
-                Higher spreads a dense sheet more, at more compute.
+            sheet: Sheet name to report (default ``"main"``).
+            grid_mils: Accepted for compatibility; the canvas pipeline
+                snaps to its own 100-mil grid.
+            fr_iterations: Accepted for compatibility; the pipeline sweeps
+                its own force-directed budget and scores the results.
             placement_hints: Optional ``{refdes: {"x", "y", "rotation"}}``
-                pinned positions that override the computed placement for
-                those parts; everything else flows through the algorithm.
-            render_png: Optional file path. When set, also render a preview
-                image of the computed layout to that path and return it as
-                ``preview_png`` (offline, matplotlib). Rendering never breaks
-                the data result; failures surface as ``preview_error``.
+                pinned positions, same as ``design_execute_plan``.
+            render_png: Optional path for a preview image of the layout.
 
         Returns:
-            Dict with:
-              - ``ok``: bool
-              - ``sheet``: the sheet laid out
-              - ``summary``: one-line plain-language verdict (crossings,
-                bends, part count, net representation mix) -- read first
-              - ``placements``: per-symbol ``{designator, x, y, rotation}``
-                (mils / degrees)
-              - ``net_representation``: ``{net_name: kind}`` where kind is
-                ``wire`` / ``net_label`` / ``power_port``
-              - ``wires``: ``[{x1, y1, x2, y2}]`` route segments
-              - ``net_labels`` / ``power_ports``: glyph placements
-              - ``junctions``: ``[{x, y}]``
-              - ``score``: aesthetic breakdown (crossings, bends,
-                alignment, aspect, length, total)
-              - ``notes``: plan cross-check + layout notes
-            On a bad plan: ``{"ok": False, "errors": [...]}``.
+            Dict with ``ok`` / ``sheet`` / ``engine`` ("canvas") /
+            ``execution_accurate`` (True) / ``summary`` / ``placements`` /
+            ``net_representation`` / ``wires`` / ``net_labels`` /
+            ``power_ports`` / ``junctions`` / ``score`` / ``notes`` /
+            ``failures``. On a bad plan: ``{"ok": False, "errors": [...]}``.
         """
-        if isinstance(plan_json, dict):
-            payload = plan_json
-        else:
-            try:
-                payload = json.loads(plan_json)
-            except json.JSONDecodeError as exc:
-                return {"ok": False, "errors": [f"invalid JSON: {exc}"]}
-
-        try:
-            plan = DesignPlan.model_validate(payload)
-        except ValidationError as exc:
-            return {
-                "ok": False,
-                "errors": [
-                    f"{'.'.join(str(p) for p in err['loc'])}: {err['msg']}"
-                    for err in exc.errors()
-                ],
-            }
-
-        cross = plan.cross_check()
-        if cross:
-            return {"ok": False, "errors": cross}
-
-        layout = compute_schematic_layout(
-            plan,
-            sheet=sheet,
-            grid_mils=int(grid_mils),
-            fr_iterations=int(fr_iterations),
-            placement_hints=placement_hints,
+        result = layout_plan_from_json(
+            plan_json, sheet=sheet, placement_hints=placement_hints,
+            render_png=render_png,
         )
-        flat = to_executor_payload(layout)
-
-        net_representation = {
-            name: dec.kind for name, dec in layout.decisions.items()
-        }
-        placements = [
-            {
-                "designator": p["designator"],
-                "x": p["x"],
-                "y": p["y"],
-                "rotation": p["rotation"],
-            }
-            for p in flat["placements"]
-        ]
-        notes = list(layout.notes)
-        notes.append(
-            "engine=neat (schematic_layout.py); this is NOT the execution "
-            "engine. design_execute_plan uses the canvas pipeline and may "
-            "place/route differently. Use design_preview_plan for an "
-            "execution-accurate layout and score."
-        )
-        result = {
-            "ok": True,
-            "sheet": flat["sheet"],
-            "engine": "neat",
-            "execution_accurate": False,
-            "summary": _schematic_summary(
-                flat["score"], net_representation, len(placements)),
-            "placements": placements,
-            "net_representation": net_representation,
-            "wires": flat["wires"],
-            "net_labels": flat["net_labels"],
-            "power_ports": flat["power_ports"],
-            "junctions": flat["junctions"],
-            "score": flat["score"],
-            "notes": notes,
-        }
-        if render_png:
-            try:
-                from pathlib import Path
-                from ..design.illustrate import schematic_png
-                out = Path(render_png)
-                out.parent.mkdir(parents=True, exist_ok=True)
-                schematic_png(layout, str(out), title=f"schematic: {sheet}")
-                result["preview_png"] = str(out)
-            except Exception as exc:  # rendering must never break the data path
-                result["preview_error"] = str(exc)
+        if result.get("ok") and "placements" in result:
+            result["summary"] = _schematic_summary(
+                result.get("score", {}),
+                result.get("net_representation", {}),
+                len(result.get("placements", [])),
+            )
         return result
 
     @mcp.tool()
@@ -1935,6 +2095,7 @@ def register_design_tools(mcp) -> None:
         project_path: str,
         use_canvas: bool = True,
         placement_hints: Optional[dict[str, dict[str, int]]] = None,
+        mode: str = "auto",
     ) -> dict[str, Any]:
         """Instantiate a DesignPlan in Altium.
 
@@ -1976,18 +2137,41 @@ def register_design_tools(mcp) -> None:
                      iterate until score is acceptable.
                   4. Call ``design_execute_plan`` with the same hints
                      to emit the refined layout.
+            mode: How to reach the sheet. ``"auto"`` (default) EDITS a
+                sheet this tool has drawn before, moving only the parts
+                whose position changed, placing the new ones, deleting
+                the ones the plan dropped, and leaving every other
+                component exactly as it is. It draws from scratch when
+                there is no prior sheet. This is what makes re-running a
+                changed plan safe on a schematic somebody has worked on.
+                ``"full"`` re-places every component, discarding any
+                hand edit; use it when you want the sheet redrawn.
+                ``"delta"`` refuses rather than redraw.
+
+                The edit path only knows what is in the plan. To keep a
+                part where a person dragged it, read the sheet back with
+                ``design_hints_from_sheet`` and pass the result as
+                ``placement_hints``.
 
         Returns:
             Result dict with ok / project_path / sheets_touched / placed
             (list of placements) / failures / needs_creation / notes.
             Canvas-path additions: ``canvas`` (the SchematicCanvas dict
             snapshot) and ``preview_svg_path`` (where the SVG was written).
+            On an edit, ``delta`` lists the refdes added, moved, replaced,
+            removed and untouched; ``placed`` then covers only the parts
+            actually placed, which on an edit is the new ones.
         """
         if use_canvas:
             return execute_plan_via_canvas_from_json(
                 plan_json, project_path,
                 placement_hints=placement_hints,
+                mode=mode,
             )
+        if mode != "auto":
+            return {"ok": False, "reason":
+                    "mode is a canvas-path option; the legacy executor "
+                    "(use_canvas=False) always redraws the whole sheet"}
         if isinstance(plan_json, dict):
             plan_json = json.dumps(plan_json)
         result = execute_plan_from_json(plan_json, project_path)
@@ -2027,7 +2211,96 @@ def register_design_tools(mcp) -> None:
             Dict with ok, rows_appended, refdes_moved, refdes_unchanged,
             log_path, notes.
         """
+        if not project_path:
+            return {"ok": False, "reason":
+                    "project_path is required: the same .PrjPcb path "
+                    "passed to design_execute_plan"}
         return learn_from_layout(project_path)
+
+    @mcp.tool()
+    async def design_plan_from_sheet(
+        project_path: str,
+        sheet_document: str = "",
+    ) -> dict[str, Any]:
+        """Read a DesignPlan back off a schematic, including one you did
+        not draw.
+
+        Use this when you are asked to change a schematic that has no
+        ``<project>.canvas.json`` beside it: a sheet drawn by hand, or
+        one from an older project. It gives you the plan the rest of the
+        design tools take, so an edit becomes "change the plan, lay it
+        out again" instead of dragging symbols around one at a time.
+
+        The plan is reconstructed from what is actually drawn: the
+        components give the parts, the compiled netlist gives the nets,
+        and the power-port glyphs say which nets are rails. It is
+        validated before it is returned.
+
+        WHAT A SCHEMATIC DOES NOT RECORD, so you must supply it:
+
+        - ``role`` on each part. This is the tag that lets the placer
+          recognise a decoupling bank, a crystal cluster, an op-amp
+          motif. A plan without roles lays out noticeably worse. Read
+          the returned part list and netlist and assert the roles
+          yourself before laying it out.
+        - ``zone`` on each part, if you want functional blocks.
+        - Single-pin nets, which the plan schema cannot express. They
+          come back in ``dropped_pins``.
+
+        Then: edit the plan, call ``design_layout_schematic`` to see it,
+        and ``design_execute_plan`` to apply it. Pass
+        ``design_hints_from_sheet`` output as ``placement_hints`` if you
+        want the existing positions kept.
+
+        Args:
+            project_path: The .PrjPcb the sheet belongs to. Its compiled
+                netlist is what supplies the nets.
+            sheet_document: Full path to the .SchDoc to read. Defaults to
+                the active document.
+
+        Returns:
+            ``ok`` / ``plan`` (a DesignPlan dict, or None on a refusal) /
+            ``parts_read`` / ``nets_read`` / ``dropped_pins`` / ``notes``.
+        """
+        return plan_from_live_sheet(project_path, sheet_document)
+
+    @mcp.tool()
+    async def design_hints_from_sheet(
+        project_path: str,
+    ) -> dict[str, Any]:
+        """Current sheet positions, as placement_hints for a re-run.
+
+        THIS IS HOW YOU EDIT A SCHEMATIC WITH THE ENGINE. Editing by hand
+        means choosing coordinates, which is what sch_place_components
+        refuses. Do this instead:
+
+        1. ``design_edit_plan`` to change the plan (add the part, change
+           a value, add a net).
+        2. ``design_hints_from_sheet`` to capture where everything
+           currently sits.
+        3. ``design_execute_plan`` with those hints. Every existing part
+           stays exactly where it is, and only the new or changed ones are
+           placed, by the engine rather than by you.
+
+        Positions come back as BODY CENTRES, the frame placement_hints
+        expects, converted from the symbol origins Altium reports. Pass
+        the returned ``hints`` through unchanged; do not round or adjust
+        them, and drop a refdes from the dict only when you deliberately
+        want the placer free to move that part.
+
+        Needs the ``<project>.canvas.json`` snapshot that
+        ``design_execute_plan`` writes, which is what records the library
+        symbol behind each refdes.
+
+        Args:
+            project_path: Absolute path to the .PrjPcb whose sheet to read.
+
+        Returns:
+            ``ok`` / ``hints`` ({refdes: {x, y, rotation}}) / ``unmatched``
+            (refdes present in the snapshot but not readable now) /
+            ``notes``.
+        """
+        return hints_from_sheet(project_path)
 
     @mcp.tool()
     async def design_preview_plan(

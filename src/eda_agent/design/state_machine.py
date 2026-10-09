@@ -76,11 +76,11 @@ STAGE_PLAYBOOKS = {
         "exit_gate": "A complete DesignPlan exists with every part and net.",
     },
     "plan_verification": {
-        "goal": "Vet the plan offline before any Altium round-trip.",
+        "goal": "Vet the plan offline, before anything reaches the editor.",
         "tools": ["design_validate_plan", "design_review_plan",
                   "design_describe_circuits", "design_generate_bom"],
-        "exit_gate": "validate_plan ok:true; ERC-lite clean; circuit values "
-                     "match intent.",
+        "exit_gate": "design_validate_plan ok:true; ERC-lite clean; circuit "
+                     "values match intent.",
     },
     "library_readiness": {
         "goal": "Ensure every part has a verified symbol + footprint (+3D).",
@@ -91,16 +91,27 @@ STAGE_PLAYBOOKS = {
                      "datasheet land pattern.",
     },
     "schematic_emit": {
-        "goal": "Instantiate the plan as a neat, ERC-clean schematic.",
-        "tools": ["design_preview_plan", "design_execute_plan",
+        "goal": "Instantiate the plan as a neat, ERC-clean schematic. One "
+                "engine draws every schematic: design_layout_schematic for "
+                "the geometry as data, design_preview_plan for the same "
+                "layout as SVG, design_execute_plan to emit it. Do not look "
+                "for a second layout engine to compare against; there is "
+                "not one. CHANGING a sheet goes the same way: re-run "
+                "design_execute_plan and it moves only what the plan "
+                "changed. For a sheet this engine did not draw, "
+                "design_plan_from_sheet reads a plan back off it first.",
+        "tools": ["design_layout_schematic", "design_preview_plan",
+                  "design_execute_plan", "design_plan_from_sheet",
+                  "design_hints_from_sheet",
                   "design_audit_schematic", "design_validate"],
         "exit_gate": "ERC clean; visual-review rubric passes; no floating pins.",
     },
     "sch_to_pcb": {
-        "goal": "Transfer the netlist to a PCB without the modal ECO dialog.",
+        "goal": "Transfer the netlist to a PCB without a dialog someone has "
+                "to click.",
         "tools": ["pcb_place_components", "pcb_build_from_project",
                   "proj_compare_sch_pcb", "obj_crossref_net"],
-        "exit_gate": "compare_sch_pcb reports in_sync:true.",
+        "exit_gate": "proj_compare_sch_pcb reports in_sync:true.",
     },
     "rules_stackup": {
         "goal": "Set the layer stack and design rules from a fab profile.",
@@ -109,35 +120,53 @@ STAGE_PLAYBOOKS = {
         "exit_gate": "Rules + stackup applied; every value traces to the profile "
                      "or a calculator.",
     },
+    # The four measured gates below are summaries. The text a client is
+    # served comes from autonomy.gate_text, built from the same criteria
+    # the harness checks (autonomy imports this module, so it cannot be
+    # called from here); test_autonomy_gates keeps the two in step.
     "placement": {
-        "goal": "Place components: minimize HPWL, keep groups together.",
-        "tools": ["pcb_plan_placement", "pcb_move_components",
-                  "design_visual_review"],
-        "exit_gate": "No overlaps; all parts on-board; visual review passes.",
+        "goal": "Floorplan by sub-block (fixed skeleton, corridors, sections, "
+                "block rectangles in signal-flow order), then lay each block "
+                "out to a pattern; read the legaliser's moves.",
+        "tools": ["pcb_autoplace", "pcb_plan_placement", "pcb_move_components",
+                  "pcb_layout_audit", "design_visual_review"],
+        "exit_gate": "Measured by pcb_layout_audit placement_audit: no "
+                     "overlaps, pad gaps, parts on keep-outs or holes, or "
+                     "parts off board; visual review by eye.",
     },
     "routing": {
-        "goal": "Route all nets DRC-clean; critical nets by template first.",
-        "tools": ["route_plan", "pcb_place_tracks", "pcb_place_via",
-                  "pcb_run_drc", "route_plan_repairs"],
-        "exit_gate": "100% routed; DRC clean.",
+        "goal": "Route in stages: differential pairs, plane fan-out, buses as "
+                "a whole, then the rest by class; copper of an earlier stage "
+                "is fixed for the later ones.",
+        "tools": ["pcb_autoroute", "route_plan", "pcb_place_tracks",
+                  "pcb_place_via", "pcb_layout_audit", "pcb_run_drc",
+                  "route_plan_repairs"],
+        "exit_gate": "Measured by pcb_layout_audit: every net routed, DRC "
+                     "clean, no corner sharper than 45 degrees.",
     },
     "pours_tuning": {
         "goal": "Add planes/pours, stitching, teardrops, length tuning.",
         "tools": ["pcb_start_polygon_placement", "pcb_place_stitching_vias",
-                  "pcb_calc_length_match", "pcb_tune_length"],
-        "exit_gate": "Planes poured; skew within budget; DRC still clean.",
+                  "pcb_calc_length_match", "pcb_tune_length",
+                  "pcb_layout_audit"],
+        "exit_gate": "Measured: plane regions in one piece, skew within "
+                     "budget, DRC still clean.",
     },
     "verification": {
         "goal": "Final closed-loop checks: DRC + ERC + audits + visual.",
-        "tools": ["pcb_run_drc", "proj_run_erc", "design_lint_report",
-                  "design_visual_review"],
-        "exit_gate": "DRC + ERC clean; lint sweep clean; audits pass.",
+        "tools": ["pcb_layout_audit", "pcb_run_drc", "proj_run_erc",
+                  "design_lint_report", "design_visual_review"],
+        "exit_gate": "Measured: every placement, routing and pour number "
+                     "above, ERC clean, return-via exceptions listed, lint "
+                     "sweep clean.",
     },
     "outputs": {
-        "goal": "Generate the fab package, BOM, and assembly outputs.",
+        "goal": "Generate the fab package, BOM, assembly outputs and the "
+                "design report.",
         "tools": ["proj_generate_fab_package", "design_generate_bom",
-                  "proj_export_step"],
-        "exit_gate": "Fab package + BOM produced; manifest complete.",
+                  "proj_export_step", "design_session_report"],
+        "exit_gate": "Fab package + BOM produced; manifest complete; design "
+                     "report written.",
     },
 }
 

@@ -112,6 +112,74 @@ def test_the_version_parser_handles_absence():
     assert health._script_version(pathlib.Path("no_such_file.pas")) is None
 
 
+# --------------------------------------------------------------------
+# Same version, different code. The quiet half of a stale deploy, and
+# the half this check missed for two days in real use: Main.pas and
+# Library.pas had been edited without bumping SCRIPT_VERSION, so both
+# copies read 2026.08.10.2 while the deployed one was 51 lines behind,
+# and the check reported "matches this tree".
+# --------------------------------------------------------------------
+
+def test_same_version_but_different_code_is_caught(deploy):
+    """A version-only check cannot detect its own motivating scenario.
+
+    The bump is manual, so the state that produces a stale deploy is
+    exactly the state where the version still agrees.
+    """
+    bundled, installed = deploy
+    _write(bundled, "2026.08.10.2")
+    _write(installed, "2026.08.10.2")
+    (bundled / "Library.pas").write_text(
+        "Procedure Foo;\nBegin\n    Bar('with the fix');\nEnd;\n",
+        encoding="utf-8")
+    (installed / "Library.pas").write_text(
+        "Procedure Foo;\nBegin\n    Bar('without it');\nEnd;\n",
+        encoding="utf-8")
+
+    check = health._check_deployed_scripts_current()
+
+    assert check.status is Status.WARN, (
+        "identical SCRIPT_VERSION with different code is the stale "
+        "deploy that costs a session to diagnose")
+    assert "Library.pas" in check.message, (
+        "naming the file is what turns this into a one-command fix")
+    assert "SCRIPT_VERSION" in check.fix, (
+        "the fix must say the bump was skipped, not just to reinstall")
+
+
+def test_a_file_missing_from_the_deploy_is_caught(deploy):
+    """A partial install leaves a unit behind, which reads as absent."""
+    bundled, installed = deploy
+    _write(bundled, "2026.08.10.2")
+    _write(installed, "2026.08.10.2")
+    (bundled / "PCB.pas").write_text("Procedure Baz;\n", encoding="utf-8")
+
+    check = health._check_deployed_scripts_current()
+
+    assert check.status is Status.WARN
+    assert "PCB.pas" in check.message
+
+
+def test_line_endings_alone_are_not_a_difference(deploy):
+    """The install copies across directories; CRLF is not a code change.
+
+    Without this the check would warn on every Windows deploy, and a
+    warning that is always on is one nobody reads.
+    """
+    bundled, installed = deploy
+    _write(bundled, "2026.08.10.2")
+    _write(installed, "2026.08.10.2")
+    (bundled / "Utils.pas").write_text("Procedure A;\nBegin\nEnd;\n",
+                                       encoding="utf-8")
+    (installed / "Utils.pas").write_bytes(
+        b"Procedure A;\r\nBegin\r\nEnd;\r\n")
+
+    check = health._check_deployed_scripts_current()
+
+    assert check.status is Status.PASS, (
+        f"CRLF alone must not warn, got: {check.message}")
+
+
 def test_the_check_runs_as_part_of_health(deploy):
     """Wired in, not merely defined."""
     bundled, installed = deploy
