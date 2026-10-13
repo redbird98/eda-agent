@@ -8669,13 +8669,22 @@ Begin
             Try
                 Via := Obj;
                 Inc(ViasTotal);
-                { Classify by start/stop layer -- through if Top to Bottom; }
-                { blind if one side is outer (Top or Bottom) but not both;  }
-                { buried if both endpoints are inner layers.                 }
-                If (Via.StartLayer = eTopLayer) And (Via.StopLayer = eBottomLayer) Then
+                { Classify by layer span -- through if Top to Bottom; blind     }
+                { if one side is outer (Top or Bottom) but not both; buried    }
+                { if both endpoints are inner layers.                           }
+                {                                                              }
+                { Read LowLayer / HighLayer, NOT StartLayer / StopLayer.        }
+                { StartLayer returns a layer OBJECT, not a TLayer, so           }
+                { comparing it against eTopLayer is always false and every via  }
+                { fell through to the buried branch -- measured on a board      }
+                { whose 1481 vias are ALL TopLayer->BottomLayer through vias,   }
+                { reported as 1481 buried / 0 through. The sister tool that      }
+                { enumerates vias reads LowLayer / HighLayer and gets them       }
+                { right, which is what these two are.                          }
+                If (Via.LowLayer = eTopLayer) And (Via.HighLayer = eBottomLayer) Then
                     Inc(ViasThrough)
-                Else If (Via.StartLayer = eTopLayer) Or (Via.StartLayer = eBottomLayer)
-                     Or (Via.StopLayer = eTopLayer) Or (Via.StopLayer = eBottomLayer) Then
+                Else If (Via.LowLayer = eTopLayer) Or (Via.LowLayer = eBottomLayer)
+                     Or (Via.HighLayer = eTopLayer) Or (Via.HighLayer = eBottomLayer) Then
                     Inc(ViasBlind)
                 Else
                     Inc(ViasBuried);
