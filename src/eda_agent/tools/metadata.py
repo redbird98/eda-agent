@@ -202,6 +202,29 @@ INTERACTION_OVERRIDES = {
     # lib_extract_cse_zip, proj_export_pdf, pcb_render_svg) is SILENT,
     # so match them. part_search never writes and stays readonly.
     "part_fetch": SILENT,
+    # --- Print-subsystem exports: NOT suppressible, and measured so ------
+    # These route through RunProcess('WorkspaceManager:Print'), which is
+    # the Windows print path, not a silent file writer. Measured
+    # 2026-10-13 against Altium 25 (zh-CN): proj_export_image raised a
+    # modal ("waiting for printer to connect", Cancel the only button),
+    # blocked the polling loop for 397.8 s, and then reported
+    # EXPORT_FAILED because the operator saved the image somewhere other
+    # than the requested output_path. Every other request queued behind
+    # it timed out for the whole 397.8 s.
+    #
+    # The tool descriptions claimed "silent (no dialog)" and the catalogue
+    # agreed, so nothing could have planned around them. That was the
+    # actual defect: an agent filtering for session-safe operations was
+    # handed a tool that stops the session until a human clicks.
+    #
+    # proj_print_all_variants and proj_run_outjob_all are composites --
+    # they loop proj_export_pdf / proj_run_outjob respectively -- so they
+    # inherit the dialog and are marked the same way.
+    "proj_export_image": MODAL,
+    "proj_export_pdf": MODAL,
+    "proj_print_all_variants": MODAL,
+    "proj_run_outjob": MODAL,
+    "proj_run_outjob_all": MODAL,
 }
 
 # --- explicit maturity overrides -------------------------------------------

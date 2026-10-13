@@ -1774,35 +1774,6 @@ End;
 { Compiles the project then runs ERC via the DM API.                         }
 {..............................................................................}
 
-Function Gen_RunERC(Params : String; RequestId : String) : String;
-Var
-    Workspace : IWorkspace;
-    Project : IProject;
-Begin
-    Workspace := GetWorkspace;
-    If Workspace = Nil Then
-    Begin
-        Result := BuildErrorResponse(RequestId, 'NO_WORKSPACE', 'No workspace available');
-        Exit;
-    End;
-
-    Project := Workspace.DM_FocusedProject;
-    If Project = Nil Then
-    Begin
-        Result := BuildErrorResponse(RequestId, 'NO_PROJECT', 'No focused project');
-        Exit;
-    End;
-
-    // Compile the project first (required before ERC)
-    SmartCompile(Project);
-
-    // Run ERC via RunProcess
-    ResetParameters;
-    RunProcess('Sch:ERC');
-
-    Result := BuildSuccessResponse(RequestId,
-        '{"success":true,"message":"ERC completed on project"}');
-End;
 
 {..............................................................................}
 { Highlight a net by name in the active document (schematic or PCB)          }
@@ -2432,6 +2403,35 @@ Begin
     Result := BuildSuccessResponse(RequestId,
         '{"violation_count":' + IntToStr(VCount) +
         ',"violations":[' + JsonItems + ']}');
+End;
+Function Gen_RunERC(Params : String; RequestId : String) : String;
+Var
+    Workspace : IWorkspace;
+    Project : IProject;
+Begin
+    Workspace := GetWorkspace;
+    If Workspace = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_WORKSPACE', 'No workspace available');
+        Exit;
+    End;
+
+    Project := Workspace.DM_FocusedProject;
+    If Project = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PROJECT', 'No focused project');
+        Exit;
+    End;
+
+    SmartCompile(Project);
+    ResetParameters;
+    RunProcess('Sch:ERC');
+
+    { ERC used to answer with a bare 'completed' and drop everything it    }
+    { found. The violations ARE the result of running it, so hand back the }
+    { same report proj_get_erc_violations builds instead of a message the  }
+    { caller can do nothing with.                                          }
+    Result := Gen_GetErcViolations(Params, RequestId);
 End;
 
 {..............................................................................}

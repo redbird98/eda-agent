@@ -864,7 +864,10 @@ def register_project_tools(mcp):
         width: int = 1920,
         height: int = 1080,
     ) -> dict[str, Any]:
-        """Export the active schematic / PCB document, silent (no dialog).
+        """Export the active schematic / PCB document via the Windows print path.
+        NOT silent: raises a modal print dialog and blocks the polling loop
+        until a human clicks. Prefer proj_export_dxf / proj_export_step /
+        pcb_export_coordinates, which write without the print subsystem.
 
         Only ``format="pdf"`` is currently supported as a silent path.
         Raster formats (png/jpg/bmp) require a hand-configured OutJob with
@@ -1332,7 +1335,8 @@ def register_project_tools(mcp):
         """Export a PDF for every project variant.
 
         Loops the project's variants; for each it sets that variant active and
-        runs the (silent) PDF export, writing one ``<variant>.pdf`` per
+        runs the PDF export (which uses the print path and raises a modal
+        dialog), writing one ``<variant>.pdf`` per
         variant. The originally-active variant is restored at the end. Composes
         the existing ``proj_set_active_variant`` + ``proj_export_pdf`` paths --
         no new export machinery.

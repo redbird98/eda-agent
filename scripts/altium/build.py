@@ -22,6 +22,11 @@ FILES = [
     'Audit.pas',
     'StatusForm.pas',
     'Dispatcher.pas',
+    # The .PrjScr lists SelfTest.pas; this list did not, so the monolith
+    # silently shipped without the self-test entry point. Nothing calls
+    # RunSelfTest, so ordering is free -- keep it last to match the
+    # project file.
+    'SelfTest.pas',
 ]
 
 OUTPUT = os.path.join(SCRIPT_DIR, 'Altium_MCP.pas')
