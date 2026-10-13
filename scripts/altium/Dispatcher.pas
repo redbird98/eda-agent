@@ -16,7 +16,9 @@ Function ProcessCommand(Command : String; Params : String; RequestId : String) :
 Var
     Category, Action : String;
     DotPos : Integer;
+    Coverage : String;
 Begin
+    ResetSheetCoverage;
     DotPos := Pos('.', Command);
     If DotPos > 0 Then
     Begin
@@ -42,6 +44,9 @@ Begin
             '. Use generic.* for object operations, pcb.* for PCB-specific ' +
             'commands, or audit.* for design-lint checks.');
     End;
+
+    Coverage := SheetCoverageGate(RequestId);
+    If Coverage <> '' Then Result := Coverage;
 End;
 
 {..............................................................................}

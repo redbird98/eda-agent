@@ -13,7 +13,7 @@ Const
     // returns, mismatch means Altium is running a stale compiled script
     // (DelphiScript caches compiled units until the script project is
     // reopened or Altium is restarted).
-    SCRIPT_VERSION = '2026.08.20.1';
+    SCRIPT_VERSION = '2026.10.10.1';
 
     // How far up the mechanical layers a pair tidy looks. Altium allows 1024,
     // and checking every combination of those is a million probes for a stack
@@ -305,7 +305,7 @@ Var
     Doc : IDocument;
     ServerDoc : IServerDocument;
     PrevView : IServerDocumentView;
-    Path : String;
+    Path : WideString;
     I, P : Integer;
 Begin
     Result := Nil;
@@ -430,7 +430,8 @@ Var
     Workspace : IWorkspace;
     Project : IProject;
     Doc : IDocument;
-    Path, Candidates, OnePath : String;
+    Candidates, OnePath : String;
+    Path : WideString;
     I, P, Found : Integer;
 Begin
     Result := Nil;
@@ -1170,7 +1171,8 @@ Function ScanForRequestFile(Var FilePath : String; Var RequestId : String) : Boo
 Var
     Files : TStringList;
     I, NameLen : Integer;
-    Name, IdPart : String;
+    IdPart : String;
+    Name : WideString;
 Begin
     Result := False;
     FilePath := '';

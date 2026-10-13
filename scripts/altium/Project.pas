@@ -26,7 +26,8 @@ End;
 
 Function Proj_Create(Params : String; RequestId : String) : String;
 Var
-    ProjectPath, ProjectType, ProjectExt : String;
+    ProjectType, ProjectExt : String;
+    ProjectPath : WideString;
     StubContent : String;
     F : TextFile;
     Saved : Boolean;
@@ -89,13 +90,13 @@ Begin
     RunProcess('WorkspaceManager:OpenObject');
 
     Result := BuildSuccessResponse(RequestId,
-        '{"success":true,"project_path":"' + EscapeJsonString(ProjectPath) +
+        '{"success":true,"project_path":"' + EscapeJsonWide(ProjectPath) +
         '","saved":true}');
 End;
 
 Function Proj_Open(Params : String; RequestId : String) : String;
 Var
-    ProjectPath : String;
+    ProjectPath : WideString;
 Begin
     ProjectPath := ExtractJsonValue(Params, 'project_path');
 
@@ -109,7 +110,7 @@ End;
 
 Function Proj_Save(Params : String; RequestId : String) : String;
 Var
-    ProjectPath : String;
+    ProjectPath : WideString;
     Workspace : IWorkspace;
     Project : IProject;
 Begin
@@ -137,7 +138,7 @@ End;
 
 Function Proj_Close(Params : String; RequestId : String) : String;
 Var
-    ProjectPath : String;
+    ProjectPath : WideString;
     SaveFirst : Boolean;
     Workspace : IWorkspace;
     Project : IProject;
@@ -174,7 +175,7 @@ End;
 
 Function Proj_GetDocuments(Params : String; RequestId : String) : String;
 Var
-    ProjectPath : String;
+    ProjectPath : WideString;
     Workspace : IWorkspace;
     Project : IProject;
     Doc : IDocument;
@@ -202,9 +203,9 @@ Begin
                 If Doc = Nil Then Continue;
                 If Not First Then Data := Data + ',';
                 First := False;
-                DocInfo := '{"file_name":"' + EscapeJsonString(ExtractFileName(Doc.DM_FileName)) + '"';
-                DocInfo := DocInfo + ',"file_path":"' + EscapeJsonString(Doc.DM_FileName) + '"';
-                DocInfo := DocInfo + ',"document_kind":"' + EscapeJsonString(Doc.DM_DocumentKind) + '"}';
+                DocInfo := '{"file_name":"' + EscapeJsonWide(ExtractFileName(Doc.DM_FileName)) + '"';
+                DocInfo := DocInfo + ',"file_path":"' + EscapeJsonWide(Doc.DM_FileName) + '"';
+                DocInfo := DocInfo + ',"document_kind":"' + EscapeJsonWide(Doc.DM_DocumentKind) + '"}';
                 Data := Data + DocInfo;
             End;
             Data := Data + ']';
@@ -219,7 +220,8 @@ End;
 
 Function Proj_AddDocument(Params : String; RequestId : String) : String;
 Var
-    ProjectPath, DocumentPath : String;
+    DocumentPath : String;
+    ProjectPath : WideString;
     Workspace : IWorkspace;
     Project : IProject;
 Begin
@@ -248,7 +250,8 @@ End;
 
 Function Proj_RemoveDocument(Params : String; RequestId : String) : String;
 Var
-    ProjectPath, DocumentPath : String;
+    DocumentPath : String;
+    ProjectPath : WideString;
     Workspace : IWorkspace;
     Project : IProject;
 Begin
@@ -280,7 +283,7 @@ End;
 
 Function Proj_GetParameters(Params : String; RequestId : String) : String;
 Var
-    ProjectPath : String;
+    ProjectPath : WideString;
     Workspace : IWorkspace;
     Project : IProject;
     Param : IParameter;
@@ -304,7 +307,7 @@ Begin
             Begin
                 Param := Project.DM_Parameters(I);
                 If I > 0 Then Data := Data + ',';
-                ParamInfo := '{"name":"' + EscapeJsonString(Param.DM_Name) + '","value":"' + EscapeJsonString(Param.DM_Value) + '"}';
+                ParamInfo := '{"name":"' + EscapeJsonWide(Param.DM_Name) + '","value":"' + EscapeJsonWide(Param.DM_Value) + '"}';
                 Data := Data + ParamInfo;
             End;
             Data := Data + ']';
@@ -319,7 +322,8 @@ End;
 
 Function Proj_SetParameter(Params : String; RequestId : String) : String;
 Var
-    ProjectPath, ParamName, ParamValue : String;
+    ParamName, ParamValue : String;
+    ProjectPath : WideString;
     Workspace : IWorkspace;
     Project : IProject;
     Param : IParameter;
@@ -385,12 +389,12 @@ Begin
     AddStringParameter('FileName', ProjectPath);
     RunProcess('WorkspaceManager:SaveObject');
 
-    Result := BuildSuccessResponse(RequestId, '{"success":true,"name":"' + EscapeJsonString(ParamName) + '","value":"' + EscapeJsonString(ParamValue) + '","project_path":"' + EscapeJsonString(ProjectPath) + '"}');
+    Result := BuildSuccessResponse(RequestId, '{"success":true,"name":"' + EscapeJsonString(ParamName) + '","value":"' + EscapeJsonString(ParamValue) + '","project_path":"' + EscapeJsonWide(ProjectPath) + '"}');
 End;
 
 Function Proj_Compile(Params : String; RequestId : String) : String;
 Var
-    ProjectPath : String;
+    ProjectPath : WideString;
     Workspace : IWorkspace;
     Project : IProject;
 Begin
@@ -430,8 +434,8 @@ Begin
         Project := Workspace.DM_FocusedProject;
         If Project <> Nil Then
         Begin
-            Data := '{"project_name":"' + EscapeJsonString(Project.DM_ProjectFileName) + '"';
-            Data := Data + ',"project_path":"' + EscapeJsonString(Project.DM_ProjectFullPath) + '"';
+            Data := '{"project_name":"' + EscapeJsonWide(Project.DM_ProjectFileName) + '"';
+            Data := Data + ',"project_path":"' + EscapeJsonWide(Project.DM_ProjectFullPath) + '"';
             Data := Data + ',"document_count":' + IntToStr(Project.DM_LogicalDocumentCount) + '}';
             Result := BuildSuccessResponse(RequestId, Data);
         End
@@ -476,7 +480,8 @@ End;
 
 Function Proj_GetNets(Params : String; RequestId : String) : String;
 Var
-    ProjectPath, FilterComp, FilterNet : String;
+    FilterComp, FilterNet : String;
+    ProjectPath : WideString;
     Workspace : IWorkspace;
     Project : IProject;
     Doc : IDocument;
@@ -548,8 +553,8 @@ Begin
                 First := False;
 
                 Data := Data + '{"component":"' + EscapeJsonString(CompDesig) + '"';
-                Data := Data + ',"pin":"' + EscapeJsonString(Pin.DM_PinNumber) + '"';
-                Data := Data + ',"pin_name":"' + EscapeJsonString(Pin.DM_PinName) + '"';
+                Data := Data + ',"pin":"' + EscapeJsonWide(Pin.DM_PinNumber) + '"';
+                Data := Data + ',"pin_name":"' + EscapeJsonWide(Pin.DM_PinName) + '"';
                 Data := Data + ',"net":"' + EscapeJsonString(NetName) + '"}';
                 Inc(Count);
             End;
@@ -566,7 +571,7 @@ End;
 
 Function Proj_GetBOM(Params : String; RequestId : String) : String;
 Var
-    ProjectPath : String;
+    ProjectPath : WideString;
     Workspace : IWorkspace;
     Project : IProject;
     Doc : IDocument;
@@ -620,9 +625,9 @@ Begin
                 If Pin = Nil Then Continue;
                 If Not FirstPin Then PinList := PinList + ',';
                 FirstPin := False;
-                PinList := PinList + '{"pin":"' + EscapeJsonString(Pin.DM_PinNumber) +
-                    '","name":"' + EscapeJsonString(Pin.DM_PinName) +
-                    '","net":"' + EscapeJsonString(Pin.DM_FlattenedNetName) + '"}';
+                PinList := PinList + '{"pin":"' + EscapeJsonWide(Pin.DM_PinNumber) +
+                    '","name":"' + EscapeJsonWide(Pin.DM_PinName) +
+                    '","net":"' + EscapeJsonWide(Pin.DM_FlattenedNetName) + '"}';
             End;
 
             If Not First Then Data := Data + ',';
@@ -663,7 +668,8 @@ End;
 { getting the full payload.                                                   }
 Function Proj_GetComponentInfo(Params : String; RequestId : String) : String;
 Var
-    ProjectPath, Designator, FlagStr : String;
+    Designator, FlagStr : String;
+    ProjectPath : WideString;
     Workspace : IWorkspace;
     Project : IProject;
     Doc : IDocument;
@@ -742,10 +748,10 @@ Begin
                 If Pin = Nil Then Continue;
                 If Not FirstPin Then PinList := PinList + ',';
                 FirstPin := False;
-                PinList := PinList + '{"pin":"' + EscapeJsonString(Pin.DM_PinNumber) +
-                    '","name":"' + EscapeJsonString(Pin.DM_PinName) + '"';
+                PinList := PinList + '{"pin":"' + EscapeJsonWide(Pin.DM_PinNumber) +
+                    '","name":"' + EscapeJsonWide(Pin.DM_PinName) + '"';
                 If WithPinNets Then
-                    PinList := PinList + ',"net":"' + EscapeJsonString(Pin.DM_FlattenedNetName) + '"';
+                    PinList := PinList + ',"net":"' + EscapeJsonWide(Pin.DM_FlattenedNetName) + '"';
                 PinList := PinList + '}';
             End;
 
@@ -761,18 +767,18 @@ Begin
                     Begin
                         If Not FirstParam Then ParamList := ParamList + ',';
                         FirstParam := False;
-                        ParamList := ParamList + '"' + EscapeJsonString(Comp.DM_Parameters(K).DM_Name) +
-                            '":"' + EscapeJsonString(Comp.DM_Parameters(K).DM_Value) + '"';
+                        ParamList := ParamList + '"' + EscapeJsonWide(Comp.DM_Parameters(K).DM_Name) +
+                            '":"' + EscapeJsonWide(Comp.DM_Parameters(K).DM_Value) + '"';
                     End;
                 Except
                 End;
             End;
 
             Data := '{"designator":"' + EscapeJsonString(Designator) + '"';
-            Data := Data + ',"comment":"' + EscapeJsonString(Comp.DM_Comment) + '"';
-            Data := Data + ',"footprint":"' + EscapeJsonString(Comp.DM_Footprint) + '"';
-            Data := Data + ',"lib_ref":"' + EscapeJsonString(Comp.DM_LibraryReference) + '"';
-            Data := Data + ',"sheet":"' + EscapeJsonString(Doc.DM_FileName) + '"';
+            Data := Data + ',"comment":"' + EscapeJsonWide(Comp.DM_Comment) + '"';
+            Data := Data + ',"footprint":"' + EscapeJsonWide(Comp.DM_Footprint) + '"';
+            Data := Data + ',"lib_ref":"' + EscapeJsonWide(Comp.DM_LibraryReference) + '"';
+            Data := Data + ',"sheet":"' + EscapeJsonWide(Doc.DM_FileName) + '"';
             If WithParameters Then
                 Data := Data + ',"parameters":{' + ParamList + '}';
             Data := Data + ',"pins":[' + PinList + ']}';
@@ -804,7 +810,8 @@ End;
 
 Function Proj_GetComponentInfoBatch(Params : String; RequestId : String) : String;
 Var
-    ProjectPath, DesigStr, FlagStr : String;
+    DesigStr, FlagStr : String;
+    ProjectPath : WideString;
     Workspace : IWorkspace;
     Project : IProject;
     Doc : IDocument;
@@ -925,10 +932,10 @@ Begin
                     If Pin = Nil Then Continue;
                     If Not FirstPin Then PinList := PinList + ',';
                     FirstPin := False;
-                    PinList := PinList + '{"pin":"' + EscapeJsonString(Pin.DM_PinNumber) +
-                        '","name":"' + EscapeJsonString(Pin.DM_PinName) + '"';
+                    PinList := PinList + '{"pin":"' + EscapeJsonWide(Pin.DM_PinNumber) +
+                        '","name":"' + EscapeJsonWide(Pin.DM_PinName) + '"';
                     If WithPinNets Then
-                        PinList := PinList + ',"net":"' + EscapeJsonString(Pin.DM_FlattenedNetName) + '"';
+                        PinList := PinList + ',"net":"' + EscapeJsonWide(Pin.DM_FlattenedNetName) + '"';
                     PinList := PinList + '}';
                 End;
 
@@ -941,18 +948,18 @@ Begin
                         Begin
                             If Not FirstParam Then ParamList := ParamList + ',';
                             FirstParam := False;
-                            ParamList := ParamList + '"' + EscapeJsonString(Comp.DM_Parameters(K).DM_Name) +
-                                '":"' + EscapeJsonString(Comp.DM_Parameters(K).DM_Value) + '"';
+                            ParamList := ParamList + '"' + EscapeJsonWide(Comp.DM_Parameters(K).DM_Name) +
+                                '":"' + EscapeJsonWide(Comp.DM_Parameters(K).DM_Value) + '"';
                         End;
                     Except
                     End;
                 End;
 
                 CompEntry := '{"designator":"' + EscapeJsonString(ThisDesig) + '"';
-                CompEntry := CompEntry + ',"comment":"' + EscapeJsonString(Comp.DM_Comment) + '"';
-                CompEntry := CompEntry + ',"footprint":"' + EscapeJsonString(Comp.DM_Footprint) + '"';
-                CompEntry := CompEntry + ',"lib_ref":"' + EscapeJsonString(Comp.DM_LibraryReference) + '"';
-                CompEntry := CompEntry + ',"sheet":"' + EscapeJsonString(Doc.DM_FileName) + '"';
+                CompEntry := CompEntry + ',"comment":"' + EscapeJsonWide(Comp.DM_Comment) + '"';
+                CompEntry := CompEntry + ',"footprint":"' + EscapeJsonWide(Comp.DM_Footprint) + '"';
+                CompEntry := CompEntry + ',"lib_ref":"' + EscapeJsonWide(Comp.DM_LibraryReference) + '"';
+                CompEntry := CompEntry + ',"sheet":"' + EscapeJsonWide(Doc.DM_FileName) + '"';
                 If WithParameters Then
                     CompEntry := CompEntry + ',"parameters":{' + ParamList + '}';
                 CompEntry := CompEntry + ',"pins":[' + PinList + ']}';
@@ -1023,7 +1030,8 @@ End;
 
 Function Proj_CrossProbe(Params : String; RequestId : String) : String;
 Var
-    Designator, Target, DocKind, FullPath : String;
+    Designator, Target, DocKind : String;
+    FullPath : WideString;
     Workspace : IWorkspace;
     Project : IProject;
     DmDoc : IDocument;
@@ -1261,7 +1269,8 @@ End;
 { matches BOM semantics (placed components are owned by their schematic).    }
 Function Proj_GetDesignStats(Params : String; RequestId : String) : String;
 Var
-    ProjectPath, DocKind : String;
+    DocKind : String;
+    ProjectPath : WideString;
     Workspace : IWorkspace;
     Project : IProject;
     Doc : IDocument;
@@ -1465,7 +1474,8 @@ End;
 
 Function Proj_Annotate(Params : String; RequestId : String) : String;
 Var
-    Order, ProjectPath : String;
+    Order : String;
+    ProjectPath : WideString;
     Workspace : IWorkspace;
     Project : IProject;
     Doc : IDocument;
@@ -1476,7 +1486,7 @@ Var
     Comp : ISch_Component;
     I, J, DocCount, Total : Integer;
     RenameCount, ResetCount, SkipCount, ProcessedDocs : Integer;
-    FilePath : String;
+    FilePath : WideString;
 
     { Flat parallel arrays, one slot per unlocked, considered component.
       Interfaces go in a TInterfaceList; sort keys go in parallel TStringList
@@ -1548,7 +1558,7 @@ Begin
             { Don't force-open, RunProcess Client:OpenDocument strips
               project association and creates a free document in the UI.
               Skip sheets that aren't currently loaded. }
-            SchDoc := SchServer.GetSchDocumentByPath(FilePath);
+            SchDoc := ResolveProjectSheet(FilePath);
             If SchDoc = Nil Then Continue;
 
             Inc(ProcessedDocs);
@@ -1898,7 +1908,8 @@ End;
 
 Function Proj_ExportImage(Params : String; RequestId : String) : String;
 Var
-    OutputPath, Fmt, ScopeDoc : String;
+    OutputPath, Fmt : String;
+    ScopeDoc : WideString;
     LcFmt : String;
     Width, Height : Integer;
     SchDoc : ISch_Document;
@@ -1989,7 +2000,7 @@ Begin
         '{"success":true,"output_path":"' + EscapeJsonString(OutputPath) +
         '","format":"pdf","width":' + IntToStr(Width) +
         ',"height":' + IntToStr(Height) +
-        ',"scope_doc":"' + EscapeJsonString(ScopeDoc) + '"}');
+        ',"scope_doc":"' + EscapeJsonWide(ScopeDoc) + '"}');
 End;
 
 {..............................................................................}
@@ -2000,7 +2011,8 @@ End;
 
 Function Proj_GetOutJobContainers(Params : String; RequestId : String) : String;
 Var
-    OutJobPath, S : String;
+    S : String;
+    OutJobPath : WideString;
     IniFile : TIniFile;
     ContainerName, ContainerType : String;
     G, J : Integer;
@@ -2083,7 +2095,7 @@ Begin
     End;
     Data := Data + ']';
 
-    Result := BuildSuccessResponse(RequestId, '{"outjob_path":"' + EscapeJsonString(OutJobPath) + '","containers":' + Data + '}');
+    Result := BuildSuccessResponse(RequestId, '{"outjob_path":"' + EscapeJsonWide(OutJobPath) + '","containers":' + Data + '}');
 End;
 
 {..............................................................................}
@@ -2093,9 +2105,11 @@ End;
 
 Function Proj_RunOutJob(Params : String; RequestId : String) : String;
 Var
-    OutJobPath, ContainerName, S : String;
+    ContainerName, S : String;
+    OutJobPath : WideString;
     IniFile : TIniFile;
-    FoundContainerName, ContainerType, RelativePath, OutputDir : String;
+    FoundContainerName, ContainerType, RelativePath : String;
+    OutputDir : WideString;
     G, J : Integer;
     Found : Boolean;
     OutJobDoc : IServerDocument;
@@ -2240,7 +2254,7 @@ Begin
         ',"container_name":"' + EscapeJsonString(ContainerName) + '"' +
         ',"container_type":"' + EscapeJsonString(ContainerType) + '"' +
         ',"relative_path":"' + EscapeJsonString(RelativePath) + '"' +
-        ',"output_dir":"' + EscapeJsonString(OutputDir) + '"}');
+        ',"output_dir":"' + EscapeJsonWide(OutputDir) + '"}');
 End;
 
 {..............................................................................}
@@ -2250,7 +2264,7 @@ End;
 
 Function Proj_GetVariants(Params : String; RequestId : String) : String;
 Var
-    ProjectPath : String;
+    ProjectPath : WideString;
     Workspace : IWorkspace;
     Project : IProject;
     Variant : IProjectVariant;
@@ -2282,8 +2296,8 @@ Begin
         If Not First Then Data := Data + ',';
         First := False;
 
-        VarInfo := '{"name":"' + EscapeJsonString(Variant.DM_Name) + '"';
-        VarInfo := VarInfo + ',"description":"' + EscapeJsonString(Variant.DM_Description) + '"';
+        VarInfo := '{"name":"' + EscapeJsonWide(Variant.DM_Name) + '"';
+        VarInfo := VarInfo + ',"description":"' + EscapeJsonWide(Variant.DM_Description) + '"';
 
         { Component variations }
         VarInfo := VarInfo + ',"variations":[';
@@ -2306,9 +2320,9 @@ Begin
             Else
                 KindStr := 'Unknown(' + IntToStr(CompVar.DM_VariationKind) + ')';
 
-            CompInfo := '{"designator":"' + EscapeJsonString(CompVar.DM_PhysicalDesignator) + '"';
+            CompInfo := '{"designator":"' + EscapeJsonWide(CompVar.DM_PhysicalDesignator) + '"';
             CompInfo := CompInfo + ',"kind":"' + KindStr + '"';
-            CompInfo := CompInfo + ',"alternate_part":"' + EscapeJsonString(CompVar.DM_AlternatePart) + '"';
+            CompInfo := CompInfo + ',"alternate_part":"' + EscapeJsonWide(CompVar.DM_AlternatePart) + '"';
 
             { Parameter variations within this component }
             CompInfo := CompInfo + ',"parameters":[';
@@ -2320,8 +2334,8 @@ Begin
                     If ParamVar = Nil Then Continue;
                     If Not FirstParam Then CompInfo := CompInfo + ',';
                     FirstParam := False;
-                    ParamInfo := '{"name":"' + EscapeJsonString(ParamVar.DM_ParameterName) + '"';
-                    ParamInfo := ParamInfo + ',"value":"' + EscapeJsonString(ParamVar.DM_VariedValue) + '"}';
+                    ParamInfo := '{"name":"' + EscapeJsonWide(ParamVar.DM_ParameterName) + '"';
+                    ParamInfo := ParamInfo + ',"value":"' + EscapeJsonWide(ParamVar.DM_VariedValue) + '"}';
                     CompInfo := CompInfo + ParamInfo;
                 End;
             Except
@@ -2356,7 +2370,7 @@ End;
 
 Function Proj_GetVariantMatrix(Params : String; RequestId : String) : String;
 Var
-    ProjectPath : String;
+    ProjectPath : WideString;
     Workspace : IWorkspace;
     Project : IProject;
     Flat : IDocument;
@@ -2394,7 +2408,7 @@ Begin
         Variant := Project.DM_ProjectVariants(V);
         If V > 0 Then VariantsJson := VariantsJson + ',';
         If Variant <> Nil Then
-            VariantsJson := VariantsJson + '"' + EscapeJsonString(Variant.DM_Name) + '"'
+            VariantsJson := VariantsJson + '"' + EscapeJsonWide(Variant.DM_Name) + '"'
         Else
             VariantsJson := VariantsJson + '""';
     End;
@@ -2460,7 +2474,7 @@ End;
 
 Function Proj_GetActiveVariant(Params : String; RequestId : String) : String;
 Var
-    ProjectPath : String;
+    ProjectPath : WideString;
     Workspace : IWorkspace;
     Project : IProject;
     Variant : IProjectVariant;
@@ -2477,7 +2491,7 @@ Begin
     Try
         Variant := Project.DM_CurrentProjectVariant;
         If Variant <> Nil Then
-            Result := BuildSuccessResponse(RequestId, '{"name":"' + EscapeJsonString(Variant.DM_Name) + '","description":"' + EscapeJsonString(Variant.DM_Description) + '"}')
+            Result := BuildSuccessResponse(RequestId, '{"name":"' + EscapeJsonWide(Variant.DM_Name) + '","description":"' + EscapeJsonWide(Variant.DM_Description) + '"}')
         Else
             Result := BuildSuccessResponse(RequestId, '{"name":"[No Variations]","description":"Base design, no variant active"}');
     Except
@@ -2492,7 +2506,8 @@ End;
 
 Function Proj_SetActiveVariant(Params : String; RequestId : String) : String;
 Var
-    ProjectPath, VariantName : String;
+    VariantName : String;
+    ProjectPath : WideString;
     Workspace : IWorkspace;
     Project : IProject;
     Variant : IProjectVariant;
@@ -2549,7 +2564,8 @@ End;
 
 Function Proj_CreateVariant(Params : String; RequestId : String) : String;
 Var
-    ProjectPath, VarName, VarDesc : String;
+    VarName, VarDesc : String;
+    ProjectPath : WideString;
     Workspace : IWorkspace;
     Project : IProject;
     PreCount, PostCount : Integer;
@@ -2627,8 +2643,8 @@ Begin
 
         If Not First Then Data := Data + ',';
         First := False;
-        Data := Data + '{"project_name":"' + EscapeJsonString(Proj.DM_ProjectFileName) + '"';
-        Data := Data + ',"project_path":"' + EscapeJsonString(Proj.DM_ProjectFullPath) + '"';
+        Data := Data + '{"project_name":"' + EscapeJsonWide(Proj.DM_ProjectFileName) + '"';
+        Data := Data + ',"project_path":"' + EscapeJsonWide(Proj.DM_ProjectFullPath) + '"';
         Data := Data + ',"document_count":' + IntToStr(Proj.DM_LogicalDocumentCount) + '}';
     End;
     Data := Data + ']';
@@ -2653,12 +2669,13 @@ End;
 
 Function Proj_GetMessages(Params : String; RequestId : String) : String;
 Var
-    ProjectPath : String;
+    ProjectPath : WideString;
     Workspace : IWorkspace;
     Project : IProject;
     Violation : IViolation;
     I, Count : Integer;
-    Data, Msg, Src : String;
+    Data, Msg : String;
+    Src : WideString;
     First : Boolean;
 Begin
     ProjectPath := ExtractJsonValue(Params, 'project_path');
@@ -2699,7 +2716,7 @@ Begin
             Try Src := Violation.DM_OwnerDocumentName; Except Src := ''; End;
 
             Data := Data + '{"message":"' + EscapeJsonString(Msg) + '"';
-            Data := Data + ',"source":"' + EscapeJsonString(Src) + '"';
+            Data := Data + ',"source":"' + EscapeJsonWide(Src) + '"';
             Data := Data + '}';
             Inc(Count);
         End;
@@ -2717,7 +2734,8 @@ End;
 
 Function Proj_FindComponent(Params : String; RequestId : String) : String;
 Var
-    ProjectPath, SearchText, SearchBy : String;
+    SearchText, SearchBy : String;
+    ProjectPath : WideString;
     Workspace : IWorkspace;
     Project : IProject;
     Doc : IDocument;
@@ -2770,11 +2788,11 @@ Begin
                 If Not First Then Data := Data + ',';
                 First := False;
 
-                Data := Data + '{"designator":"' + EscapeJsonString(Comp.DM_PhysicalDesignator) + '"';
-                Data := Data + ',"comment":"' + EscapeJsonString(Comp.DM_Comment) + '"';
-                Data := Data + ',"footprint":"' + EscapeJsonString(Comp.DM_Footprint) + '"';
-                Data := Data + ',"lib_ref":"' + EscapeJsonString(Comp.DM_LibraryReference) + '"';
-                Data := Data + ',"sheet":"' + EscapeJsonString(Doc.DM_FileName) + '"';
+                Data := Data + '{"designator":"' + EscapeJsonWide(Comp.DM_PhysicalDesignator) + '"';
+                Data := Data + ',"comment":"' + EscapeJsonWide(Comp.DM_Comment) + '"';
+                Data := Data + ',"footprint":"' + EscapeJsonWide(Comp.DM_Footprint) + '"';
+                Data := Data + ',"lib_ref":"' + EscapeJsonWide(Comp.DM_LibraryReference) + '"';
+                Data := Data + ',"sheet":"' + EscapeJsonWide(Doc.DM_FileName) + '"';
                 Try
                     Data := Data + ',"location_x":' + IntToStr(Comp.DM_LocationX);
                     Data := Data + ',"location_y":' + IntToStr(Comp.DM_LocationY);
@@ -2798,7 +2816,8 @@ End;
 
 Function Proj_GetConnectivity(Params : String; RequestId : String) : String;
 Var
-    ProjectPath, Designator : String;
+    Designator : String;
+    ProjectPath : WideString;
     Workspace : IWorkspace;
     Project : IProject;
     Doc : IDocument;
@@ -2849,9 +2868,9 @@ Begin
                 If Pin = Nil Then Continue;
                 If Not FirstPin Then PinList := PinList + ',';
                 FirstPin := False;
-                PinList := PinList + '{"pin_number":"' + EscapeJsonString(Pin.DM_PinNumber) + '"';
-                PinList := PinList + ',"pin_name":"' + EscapeJsonString(Pin.DM_PinName) + '"';
-                PinList := PinList + ',"net":"' + EscapeJsonString(Pin.DM_FlattenedNetName) + '"';
+                PinList := PinList + '{"pin_number":"' + EscapeJsonWide(Pin.DM_PinNumber) + '"';
+                PinList := PinList + ',"pin_name":"' + EscapeJsonWide(Pin.DM_PinName) + '"';
+                PinList := PinList + ',"net":"' + EscapeJsonWide(Pin.DM_FlattenedNetName) + '"';
                 { DM_ElectricalType does not exist as a DM_ identifier
                   (compile-time undeclared). Omitting electrical type; the
                   Sch-server side (via query_objects eSchPin) exposes
@@ -2860,8 +2879,8 @@ Begin
             End;
 
             Data := '{"designator":"' + EscapeJsonString(Designator) + '"';
-            Data := Data + ',"comment":"' + EscapeJsonString(Comp.DM_Comment) + '"';
-            Data := Data + ',"sheet":"' + EscapeJsonString(Doc.DM_FileName) + '"';
+            Data := Data + ',"comment":"' + EscapeJsonWide(Comp.DM_Comment) + '"';
+            Data := Data + ',"sheet":"' + EscapeJsonWide(Doc.DM_FileName) + '"';
             Data := Data + ',"pin_count":' + IntToStr(Comp.DM_PinCount);
             Data := Data + ',"pins":[' + PinList + ']}';
             Result := BuildSuccessResponse(RequestId, Data);
@@ -2883,7 +2902,8 @@ End;
 
 Function Proj_GetConnectivityBatch(Params : String; RequestId : String) : String;
 Var
-    ProjectPath, DesigStr, Remaining, ThisDesig : String;
+    DesigStr, Remaining, ThisDesig : String;
+    ProjectPath : WideString;
     Workspace : IWorkspace;
     Project : IProject;
     Doc : IDocument;
@@ -2981,15 +3001,15 @@ Begin
                     If Pin = Nil Then Continue;
                     If Not FirstPin Then PinList := PinList + ',';
                     FirstPin := False;
-                    PinList := PinList + '{"pin_number":"' + EscapeJsonString(Pin.DM_PinNumber) + '"';
-                    PinList := PinList + ',"pin_name":"' + EscapeJsonString(Pin.DM_PinName) + '"';
-                    PinList := PinList + ',"net":"' + EscapeJsonString(Pin.DM_FlattenedNetName) + '"';
+                    PinList := PinList + '{"pin_number":"' + EscapeJsonWide(Pin.DM_PinNumber) + '"';
+                    PinList := PinList + ',"pin_name":"' + EscapeJsonWide(Pin.DM_PinName) + '"';
+                    PinList := PinList + ',"net":"' + EscapeJsonWide(Pin.DM_FlattenedNetName) + '"';
                     PinList := PinList + '}';
                 End;
 
                 CompEntry := '{"designator":"' + EscapeJsonString(ThisDesig) + '"';
-                CompEntry := CompEntry + ',"comment":"' + EscapeJsonString(Comp.DM_Comment) + '"';
-                CompEntry := CompEntry + ',"sheet":"' + EscapeJsonString(Doc.DM_FileName) + '"';
+                CompEntry := CompEntry + ',"comment":"' + EscapeJsonWide(Comp.DM_Comment) + '"';
+                CompEntry := CompEntry + ',"sheet":"' + EscapeJsonWide(Doc.DM_FileName) + '"';
                 CompEntry := CompEntry + ',"pin_count":' + IntToStr(Comp.DM_PinCount);
                 CompEntry := CompEntry + ',"pins":[' + PinList + ']}';
 
@@ -3032,7 +3052,10 @@ End;
 
 Function Proj_ImportDocument(Params : String; RequestId : String) : String;
 Var
-    SourcePath, ProjectDir, DestPath, FileName : String;
+    SourcePath : String;
+    ProjectDir : WideString;
+    DestPath : WideString;
+    FileName : WideString;
     Workspace : IWorkspace;
     Project : IProject;
 Begin
@@ -3071,7 +3094,7 @@ Begin
     AddStringParameter('FileName', Project.DM_ProjectFullPath);
     RunProcess('WorkspaceManager:SaveObject');
 
-    Result := BuildSuccessResponse(RequestId, '{"success":true,"source_path":"' + EscapeJsonString(SourcePath) + '","dest_path":"' + EscapeJsonString(DestPath) + '"}');
+    Result := BuildSuccessResponse(RequestId, '{"success":true,"source_path":"' + EscapeJsonString(SourcePath) + '","dest_path":"' + EscapeJsonWide(DestPath) + '"}');
 End;
 
 {..............................................................................}
@@ -3089,7 +3112,7 @@ Begin
     Project := Workspace.DM_FocusedProject;
     If Project = Nil Then Begin Result := BuildErrorResponse(RequestId, 'NO_PROJECT', 'No focused project'); Exit; End;
 
-    Result := BuildSuccessResponse(RequestId, '{"project_path":"' + EscapeJsonString(Project.DM_ProjectFullPath) + '","project_dir":"' + EscapeJsonString(ExtractFilePath(Project.DM_ProjectFullPath)) + '","project_name":"' + EscapeJsonString(Project.DM_ProjectFileName) + '"}');
+    Result := BuildSuccessResponse(RequestId, '{"project_path":"' + EscapeJsonWide(Project.DM_ProjectFullPath) + '","project_dir":"' + EscapeJsonWide(ExtractFilePath(Project.DM_ProjectFullPath)) + '","project_name":"' + EscapeJsonWide(Project.DM_ProjectFileName) + '"}');
 End;
 
 {..............................................................................}
@@ -3100,7 +3123,8 @@ End;
 
 Function Proj_SetDocumentParameter(Params : String; RequestId : String) : String;
 Var
-    FilePath, ParamName, ParamValue, Action : String;
+    ParamName, ParamValue, Action : String;
+    FilePath : WideString;
     SchDoc : ISch_Document;
     ServerDoc : IServerDocument;
     Iterator : ISch_Iterator;
@@ -3199,7 +3223,7 @@ Begin
     Result := BuildSuccessResponse(RequestId,
         '{"success":true,"action":"' + Action + '"' +
         ',"saved":true' +
-        ',"file_path":"' + EscapeJsonString(FilePath) +
+        ',"file_path":"' + EscapeJsonWide(FilePath) +
         '","name":"' + EscapeJsonString(ParamName) +
         '","value":"' + EscapeJsonString(ParamValue) + '"}');
 End;
@@ -3210,7 +3234,7 @@ End;
 
 Function Proj_CompareSchPcb(Params : String; RequestId : String) : String;
 Var
-    ProjectPath : String;
+    ProjectPath : WideString;
     Workspace : IWorkspace;
     Project : IProject;
     Doc, PcbDoc : IDocument;
@@ -3279,7 +3303,7 @@ Begin
     Data := Data + ',"components_match":' +
         BoolToJsonStr(MappedOk And (ExtraSch = 0) And (ExtraPcb = 0));
     If PcbDoc <> Nil Then
-        Data := Data + ',"pcb_path":"' + EscapeJsonString(PcbDoc.DM_FullPath) + '"'
+        Data := Data + ',"pcb_path":"' + EscapeJsonWide(PcbDoc.DM_FullPath) + '"'
     Else
         Data := Data + ',"pcb_path":""';
     Data := Data + '}';
@@ -3351,7 +3375,7 @@ End;
 
 Function Proj_UpdatePCB(Params : String; RequestId : String) : String;
 Var
-    ProjectPath : String;
+    ProjectPath : WideString;
     Workspace : IWorkspace;
     Project : IProject;
     MatchedBefore, ExtraSchBefore, ExtraPcbBefore : Integer;
@@ -3475,7 +3499,7 @@ End;
 
 Function Proj_UpdateSchematic(Params : String; RequestId : String) : String;
 Var
-    ProjectPath : String;
+    ProjectPath : WideString;
     Workspace : IWorkspace;
     Project : IProject;
     MatchedBefore, ExtraSchBefore, ExtraPcbBefore : Integer;
@@ -3537,7 +3561,7 @@ End;
 
 Function Proj_GetDesignDifferences(Params : String; RequestId : String) : String;
 Var
-    ProjectPath : String;
+    ProjectPath : WideString;
     Workspace : IWorkspace;
     Project : IProject;
     PcbDoc : IDocument;
@@ -3595,7 +3619,7 @@ Begin
             If Not First Then SrcList := SrcList + ',';
             First := False;
             Try
-                SrcList := SrcList + '"' + EscapeJsonString(Mappings.DM_UnmatchedSourceComponent(I).DM_PhysicalDesignator) + '"';
+                SrcList := SrcList + '"' + EscapeJsonWide(Mappings.DM_UnmatchedSourceComponent(I).DM_PhysicalDesignator) + '"';
             Except
                 SrcList := SrcList + '"?"';
             End;
@@ -3613,7 +3637,7 @@ Begin
             If Not First Then TgtList := TgtList + ',';
             First := False;
             Try
-                TgtList := TgtList + '"' + EscapeJsonString(Mappings.DM_UnmatchedTargetComponent(I).DM_PhysicalDesignator) + '"';
+                TgtList := TgtList + '"' + EscapeJsonWide(Mappings.DM_UnmatchedTargetComponent(I).DM_PhysicalDesignator) + '"';
             Except
                 TgtList := TgtList + '"?"';
             End;
@@ -3703,7 +3727,7 @@ End;
 
 Function Proj_GetProjectOptions(Params : String; RequestId : String) : String;
 Var
-    ProjectPath : String;
+    ProjectPath : WideString;
     Workspace : IWorkspace;
     Project : IProject;
     Data : String;
@@ -3718,12 +3742,12 @@ Begin
     Else Project := Workspace.DM_FocusedProject;
     If Project = Nil Then Begin Result := BuildErrorResponse(RequestId, 'NO_PROJECT', 'No project found'); Exit; End;
 
-    Data := '{"project_name":"' + EscapeJsonString(Project.DM_ProjectFileName) + '"';
-    Data := Data + ',"project_path":"' + EscapeJsonString(Project.DM_ProjectFullPath) + '"';
+    Data := '{"project_name":"' + EscapeJsonWide(Project.DM_ProjectFileName) + '"';
+    Data := Data + ',"project_path":"' + EscapeJsonWide(Project.DM_ProjectFullPath) + '"';
 
     { Output path }
     Try
-        Data := Data + ',"output_path":"' + EscapeJsonString(Project.DM_GetOutputPath) + '"';
+        Data := Data + ',"output_path":"' + EscapeJsonWide(Project.DM_GetOutputPath) + '"';
     Except
         Data := Data + ',"output_path":""';
     End;
@@ -3754,11 +3778,11 @@ Begin
 
     { Channel settings }
     Try
-        Data := Data + ',"channel_designator_format":"' + EscapeJsonString(Project.DM_ChannelDesignatorFormat) + '"';
+        Data := Data + ',"channel_designator_format":"' + EscapeJsonWide(Project.DM_ChannelDesignatorFormat) + '"';
     Except
     End;
     Try
-        Data := Data + ',"channel_room_separator":"' + EscapeJsonString(Project.DM_ChannelRoomLevelSeperator) + '"';
+        Data := Data + ',"channel_room_separator":"' + EscapeJsonWide(Project.DM_ChannelRoomLevelSeperator) + '"';
     Except
     End;
 
@@ -3798,7 +3822,9 @@ Var
     Project : IProject;
     Doc : IDocument;
     ServerDoc : IServerDocument;
-    ProjectPath, FilePath, Data : String;
+    Data : String;
+    ProjectPath : WideString;
+    FilePath : WideString;
     I, TotalSheets, Loaded, AlreadyLoaded, Failed : Integer;
     WasLoaded : Boolean;
 Begin
@@ -3899,7 +3925,7 @@ Begin
         '{"recompiled":true,'
         + '"prev_compile_tick":' + IntToStr(PrevTick) + ','
         + '"new_compile_tick":' + IntToStr(NewTick) + ','
-        + '"project":"' + EscapeJsonString(Project.DM_ProjectFullPath) + '"}');
+        + '"project":"' + EscapeJsonWide(Project.DM_ProjectFullPath) + '"}');
 End;
 
 {..............................................................................}
@@ -3915,7 +3941,8 @@ Var
     Doc : IDocument;
     ServerDoc : IServerDocument;
     I, DirtyCount, OpenCount : Integer;
-    DirtyList, FullPath : String;
+    DirtyList : String;
+    FullPath : WideString;
     First : Boolean;
     AgeMs, CurrentTick : Cardinal;
 Begin
@@ -3970,7 +3997,7 @@ Begin
                     Inc(DirtyCount);
                     If Not First Then DirtyList := DirtyList + ',';
                     First := False;
-                    DirtyList := DirtyList + '"' + EscapeJsonString(FullPath) + '"';
+                    DirtyList := DirtyList + '"' + EscapeJsonWide(FullPath) + '"';
                 End;
             Except End;
         End;
@@ -3983,7 +4010,7 @@ Begin
         + '"open_doc_count":' + IntToStr(OpenCount) + ','
         + '"dirty_doc_count":' + IntToStr(DirtyCount) + ','
         + '"dirty_docs":[' + DirtyList + '],'
-        + '"project":"' + EscapeJsonString(Project.DM_ProjectFullPath) + '"}');
+        + '"project":"' + EscapeJsonWide(Project.DM_ProjectFullPath) + '"}');
 End;
 
 {..............................................................................}
@@ -4047,7 +4074,8 @@ Var
     Parameter : ISch_Parameter;
     I, P, PCount : Integer;
     SheetsUpdated, SheetsSkipped, ParamsPushed : Integer;
-    FullPath, ParamName, ParamValue : String;
+    ParamName, ParamValue : String;
+    FullPath : WideString;
     Found, IsSch : Boolean;
 Begin
     Workspace := GetWorkspace;

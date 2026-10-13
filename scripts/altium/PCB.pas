@@ -983,7 +983,7 @@ Begin
         Begin
             Try P1Desc := Prim.Detail; Except End;
             Try If Prim.Net <> Nil Then P1Net := Prim.Net.Name; Except End;
-            Try P1Type := ObjectIDToObjectName(Prim.ObjectId); Except End;
+            Try P1Type := PCBObjectTypeName(Prim); Except End;
             Try
                 BBox := Prim.BoundingRectangle;
                 P1X := CoordToMils((BBox.Left + BBox.Right) Div 2);
@@ -1008,7 +1008,7 @@ Begin
         Begin
             Try P2Desc := Prim.Detail; Except End;
             Try If Prim.Net <> Nil Then P2Net := Prim.Net.Name; Except End;
-            Try P2Type := ObjectIDToObjectName(Prim.ObjectId); Except End;
+            Try P2Type := PCBObjectTypeName(Prim); Except End;
             Try
                 BBox := Prim.BoundingRectangle;
                 P2X := CoordToMils((BBox.Left + BBox.Right) Div 2);
@@ -3440,7 +3440,7 @@ Begin
 
     Result := BuildSuccessResponse(RequestId,
         '{"layers":[' + JsonItems + '],"layer_count":' + IntToStr(Count) + ','
-        + '"board_name":"' + EscapeJsonString(ExtractFileName(Board.FileName)) + '"}');
+        + '"board_name":"' + EscapeJsonWide(ExtractFileName(Board.FileName)) + '"}');
 End;
 
 {..............................................................................}
@@ -6443,7 +6443,7 @@ Begin
         + '"board_height_mils":' + FloatToJsonStr(BoardHeight) + ','
         + '"board_area_sq_mils":' + FloatToJsonStr(BoardArea) + ','
         + '"layer_count":' + IntToStr(LayerCount) + ','
-        + '"board_name":"' + EscapeJsonString(ExtractFileName(Board.FileName)) + '"}');
+        + '"board_name":"' + EscapeJsonWide(ExtractFileName(Board.FileName)) + '"}');
 End;
 
 {..............................................................................}
@@ -6504,7 +6504,7 @@ Begin
 
     Result := BuildSuccessResponse(RequestId,
         '{"placements":[' + JsonItems + '],"count":' + IntToStr(Count) + ','
-        + '"board_name":"' + EscapeJsonString(ExtractFileName(Board.FileName)) + '"}');
+        + '"board_name":"' + EscapeJsonWide(ExtractFileName(Board.FileName)) + '"}');
 End;
 
 {..............................................................................}
@@ -7221,7 +7221,8 @@ Var
     X, Y, NetsAssigned : Integer;
     Linked : Boolean;
     Rotation : Double;
-    Footprint, LibPath, LibRef, Designator, Comment, LayerStr, LoadStr : String;
+    Footprint, LibRef, Designator, Comment, LayerStr, LoadStr : String;
+    LibPath : WideString;
     UniqueIdStr, PadNetsStr, PadName, NetName, BoardPathStr : String;
 Begin
     { Target a specific board by path when several PcbDocs are open, so a    }
@@ -7388,7 +7389,8 @@ Var
     Pad : IPCB_Pad;
     Net : IPCB_Net;
     PlacementsStr, BoardPathStr, OnePlace, Remaining, LoadStr : String;
-    Footprint, LibPath, LibRef, Designator, Comment, LayerStr : String;
+    Footprint, LibRef, Designator, Comment, LayerStr : String;
+    LibPath : WideString;
     UniqueIdStr, PadNetsStr, PadName, NetName : String;
     X, Y, PlacedCount, FailedCount, SepPos : Integer;
     Rotation : Double;
@@ -7525,7 +7527,7 @@ Begin
         Exit;
     End;
     Result := BuildSuccessResponse(RequestId,
-        '{"focused":true,"board":"' + EscapeJsonString(Board.FileName) + '"}');
+        '{"focused":true,"board":"' + EscapeJsonWide(Board.FileName) + '"}');
 End;
 
 {..............................................................................}
@@ -9703,7 +9705,7 @@ End;
 Function PCB_SetMechLayers(Params : String; RequestId : String) : String;
 Var
     Board : IPCB_Board;
-    Where : String;
+    Where : WideString;
 Begin
     Board := GetPCBBoardAnywhere;
     If Board = Nil Then

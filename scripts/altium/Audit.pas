@@ -208,7 +208,7 @@ Begin
         If UpperCase(Doc.DM_DocumentKind) <> 'SCH' Then Continue;
 
         SchDoc := Nil;
-        Try SchDoc := SchServer.GetSchDocumentByPath(Doc.DM_FullPath); Except End;
+        SchDoc := ResolveProjectSheet(Doc.DM_FullPath);
         If SchDoc = Nil Then Continue;
 
         SchIter := SchDoc.SchIterator_Create;
@@ -349,7 +349,8 @@ Var
     Style : Integer;
     Orient : Integer;
     Expected : Integer;
-    StyleStr, ExpectedStr, ActualStr, SheetPath : String;
+    StyleStr, ExpectedStr, ActualStr : String;
+    SheetPath : WideString;
     ItemsJson, EntryJson : String;
     First, IsGround, IsBar : Boolean;
 Begin
@@ -382,7 +383,7 @@ Begin
         SheetPath := '';
         Try SheetPath := Doc.DM_FullPath; Except End;
         SchDoc := Nil;
-        Try SchDoc := SchServer.GetSchDocumentByPath(SheetPath); Except End;
+        SchDoc := ResolveProjectSheet(SheetPath);
         If SchDoc = Nil Then Continue;
 
         SchIter := SchDoc.SchIterator_Create;
@@ -568,7 +569,8 @@ Var
     Port : IPort;
     I, J, K, M, DocCount, Checked, Violations : Integer;
     UsePhysical : Boolean;
-    NetsSet, PortNet, SheetPath, LocStr : String;
+    NetsSet, PortNet, LocStr : String;
+    SheetPath : WideString;
     ItemsJson, EntryJson : String;
     First : Boolean;
 Begin
@@ -1579,7 +1581,8 @@ Var
     SchIter : ISch_Iterator;
     SchComp : ISch_Component;
     I, J, Checked, Violations : Integer;
-    Designator, SheetPath, DocKind : String;
+    Designator, DocKind : String;
+    SheetPath : WideString;
     { Pipe-delimited "|des|@sheet" pairs so each occurrence carries its    }
     { sheet for later violation grouping.                                   }
     OccPairs, EntryJson, ItemsJson : String;
@@ -1623,7 +1626,7 @@ Begin
         Try SheetPath := Doc.DM_FileName; Except End;
 
         SchDoc := Nil;
-        Try SchDoc := SchServer.GetSchDocumentByPath(Doc.DM_FullPath); Except End;
+        SchDoc := ResolveProjectSheet(Doc.DM_FullPath);
         If SchDoc = Nil Then Continue;
         SchIter := SchDoc.SchIterator_Create;
         If SchIter = Nil Then Continue;
@@ -1877,7 +1880,8 @@ Var
     Comp : ISch_Component;
     Loc : TLocation;
     I, Checked, Violations, GridMils, XMils, YMils, Dx, Dy : Integer;
-    GridStr, Designator, SheetName, DocKind, ItemsJson, EntryJson : String;
+    GridStr, Designator, DocKind, ItemsJson, EntryJson : String;
+    SheetName : WideString;
     First : Boolean;
 Begin
     Workspace := GetWorkspace;
@@ -1913,8 +1917,7 @@ Begin
         SheetName := '';
         Try SheetName := Doc.DM_FileName; Except End;
 
-        SchDoc := Nil;
-        Try SchDoc := SchServer.GetSchDocumentByPath(Doc.DM_FullPath); Except End;
+        SchDoc := ResolveProjectSheet(Doc.DM_FullPath);
         If SchDoc = Nil Then Continue;
 
         SchIter := SchDoc.SchIterator_Create;
@@ -1966,6 +1969,8 @@ Begin
             JsonInt('checked', Checked) + ',' +
             JsonInt('violations', Violations) + ',' +
             JsonInt('grid_mils', GridMils) + ',' +
+            JsonInt('sheets_seen', SheetSeenTotal) + ',' +
+            JsonInt('sheets_skipped', SheetSkippedTotal) + ',' +
             JsonRaw('items', '[' + ItemsJson + ']')
         ));
 End;
@@ -2231,7 +2236,7 @@ Begin
         If UpperCase(Doc.DM_DocumentKind) <> 'SCH' Then Continue;
 
         SchDoc := Nil;
-        Try SchDoc := SchServer.GetSchDocumentByPath(Doc.DM_FullPath); Except End;
+        SchDoc := ResolveProjectSheet(Doc.DM_FullPath);
         If SchDoc = Nil Then Continue;
 
         SchIter := SchDoc.SchIterator_Create;
@@ -2373,7 +2378,7 @@ Begin
         If Doc = Nil Then Continue;
         If UpperCase(Doc.DM_DocumentKind) <> 'SCH' Then Continue;
         SchDoc := Nil;
-        Try SchDoc := SchServer.GetSchDocumentByPath(Doc.DM_FullPath); Except End;
+        SchDoc := ResolveProjectSheet(Doc.DM_FullPath);
         If SchDoc = Nil Then Continue;
 
         SchIter := SchDoc.SchIterator_Create;
@@ -2832,7 +2837,8 @@ Var
     Img : ISch_Image;
     DocKind : String;
     Total, Bad : Integer;
-    ItemsJson, EntryJson, SheetName : String;
+    ItemsJson, EntryJson : String;
+    SheetName : WideString;
     First : Boolean;
     LocX, LocY : Integer;
     Embedded : Boolean;
@@ -2864,7 +2870,7 @@ Begin
         Try DocKind := Document.DM_DocumentKind; Except End;
         If DocKind <> 'SCH' Then Continue;
         Sheet := Nil;
-        Try Sheet := SchServer.GetSchDocumentByPath(Document.DM_FullPath); Except End;
+        Sheet := ResolveProjectSheet(Document.DM_FullPath);
         If Sheet = Nil Then Continue;
         SheetName := '';
         Try SheetName := Document.DM_FileName; Except End;
@@ -3125,7 +3131,7 @@ Begin
         Try DocKind := Document.DM_DocumentKind; Except End;
         If DocKind <> 'SCH' Then Continue;
         Sheet := Nil;
-        Try Sheet := SchServer.GetSchDocumentByPath(Document.DM_FullPath); Except End;
+        Sheet := ResolveProjectSheet(Document.DM_FullPath);
         If Sheet = Nil Then Continue;
 
         Iter := Sheet.SchIterator_Create;
@@ -3217,7 +3223,8 @@ Var
     Iter, SpatialIter : ISch_Iterator;
     Obj, Hit : ISch_GraphicalObject;
     NetLbl : ISch_NetLabel;
-    DocKind, SheetName, LabelText : String;
+    DocKind, LabelText : String;
+    SheetName : WideString;
     Loc : TLocation;
     LX, LY : Integer;
     Tol : Integer;
@@ -3256,7 +3263,7 @@ Begin
         Try DocKind := Document.DM_DocumentKind; Except End;
         If DocKind <> 'SCH' Then Continue;
         Sheet := Nil;
-        Try Sheet := SchServer.GetSchDocumentByPath(Document.DM_FullPath); Except End;
+        Sheet := ResolveProjectSheet(Document.DM_FullPath);
         If Sheet = Nil Then Continue;
         SheetName := '';
         Try SheetName := Document.DM_FileName; Except End;
@@ -3342,7 +3349,8 @@ Var
     Iter, SpatialIter : ISch_Iterator;
     Obj, Hit : ISch_GraphicalObject;
     Power : ISch_PowerObject;
-    DocKind, SheetName, NetName : String;
+    DocKind, NetName : String;
+    SheetName : WideString;
     Loc : TLocation;
     LX, LY, Tol : Integer;
     Total, Bad : Integer;
@@ -3377,7 +3385,7 @@ Begin
         Try DocKind := Document.DM_DocumentKind; Except End;
         If DocKind <> 'SCH' Then Continue;
         Sheet := Nil;
-        Try Sheet := SchServer.GetSchDocumentByPath(Document.DM_FullPath); Except End;
+        Sheet := ResolveProjectSheet(Document.DM_FullPath);
         If Sheet = Nil Then Continue;
         SheetName := '';
         Try SheetName := Document.DM_FileName; Except End;
@@ -3499,7 +3507,7 @@ Begin
         Try DocKind := Document.DM_DocumentKind; Except End;
         If DocKind <> 'SCH' Then Continue;
         Sheet := Nil;
-        Try Sheet := SchServer.GetSchDocumentByPath(Document.DM_FullPath); Except End;
+        Sheet := ResolveProjectSheet(Document.DM_FullPath);
         If Sheet = Nil Then Continue;
 
         Iter := Sheet.SchIterator_Create;

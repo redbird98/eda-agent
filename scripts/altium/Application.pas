@@ -39,7 +39,9 @@ Var
     Project : IProject;
     Doc : IDocument;
     I, J : Integer;
-    Data, DocInfo, FileName, FullPath, Kind, LoadedStr : String;
+    Data, DocInfo, Kind, LoadedStr : String;
+    FileName : WideString;
+    FullPath : WideString;
     FirstItem, IsLoaded : Boolean;
 Begin
     Workspace := GetWorkspace;
@@ -81,8 +83,8 @@ Begin
                         Except IsLoaded := False; End;
                         If IsLoaded Then LoadedStr := 'true' Else LoadedStr := 'false';
 
-                        DocInfo := '{"file_name":"' + EscapeJsonString(ExtractFileName(FileName)) + '"';
-                        DocInfo := DocInfo + ',"file_path":"' + EscapeJsonString(FullPath) + '"';
+                        DocInfo := '{"file_name":"' + EscapeJsonWide(ExtractFileName(FileName)) + '"';
+                        DocInfo := DocInfo + ',"file_path":"' + EscapeJsonWide(FullPath) + '"';
                         DocInfo := DocInfo + ',"document_kind":"' + EscapeJsonString(Kind) + '"';
                         DocInfo := DocInfo + ',"loaded":' + LoadedStr + '}';
                         Data := Data + DocInfo;
@@ -101,7 +103,8 @@ Var
     Doc : IDocument;
     SchDoc : ISch_Document;
     Board : IPCB_Board;
-    Data, FileName : String;
+    Data : String;
+    FileName : WideString;
 Begin
     Data := '';
     Workspace := GetWorkspace;
@@ -111,9 +114,9 @@ Begin
         If Doc <> Nil Then
         Begin
             FileName := Doc.DM_FileName;
-            Data := '{"file_name":"' + EscapeJsonString(ExtractFileName(FileName)) + '"';
-            Data := Data + ',"file_path":"' + EscapeJsonString(FileName) + '"';
-            Data := Data + ',"document_kind":"' + EscapeJsonString(Doc.DM_DocumentKind) + '"}';
+            Data := '{"file_name":"' + EscapeJsonWide(ExtractFileName(FileName)) + '"';
+            Data := Data + ',"file_path":"' + EscapeJsonWide(FileName) + '"';
+            Data := Data + ',"document_kind":"' + EscapeJsonWide(Doc.DM_DocumentKind) + '"}';
         End;
     End;
 
@@ -129,8 +132,8 @@ Begin
         If SchDoc <> Nil Then
         Begin
             FileName := SchDoc.DocumentName;
-            Data := '{"file_name":"' + EscapeJsonString(ExtractFileName(FileName)) + '"';
-            Data := Data + ',"file_path":"' + EscapeJsonString(FileName) + '"';
+            Data := '{"file_name":"' + EscapeJsonWide(ExtractFileName(FileName)) + '"';
+            Data := Data + ',"file_path":"' + EscapeJsonWide(FileName) + '"';
             Data := Data + ',"document_kind":"SCH"}';
         End;
     End;
@@ -141,8 +144,8 @@ Begin
         If Board <> Nil Then
         Begin
             FileName := Board.FileName;
-            Data := '{"file_name":"' + EscapeJsonString(ExtractFileName(FileName)) + '"';
-            Data := Data + ',"file_path":"' + EscapeJsonString(FileName) + '"';
+            Data := '{"file_name":"' + EscapeJsonWide(ExtractFileName(FileName)) + '"';
+            Data := Data + ',"file_path":"' + EscapeJsonWide(FileName) + '"';
             Data := Data + ',"document_kind":"PCB"}';
         End;
     End;
@@ -153,7 +156,9 @@ End;
 
 Function App_SetActiveDocument(Params : String; RequestId : String) : String;
 Var
-    FilePath, LowerInput, LowerDocPath, FullPath : String;
+    LowerInput, LowerDocPath : String;
+    FilePath : WideString;
+    FullPath : WideString;
     ServerDoc : IServerDocument;
     Workspace : IWorkspace;
     Project : IProject;
@@ -477,7 +482,9 @@ End;
 
 Function App_CreateDocument(Params : String; RequestId : String) : String;
 Var
-    FilePath, DocKind, DocName, AddStr : String;
+    DocKind, AddStr : String;
+    FilePath : WideString;
+    DocName : WideString;
     ServerDoc : IServerDocument;
     Workspace : IWorkspace;
     Project : IProject;
@@ -562,7 +569,7 @@ Begin
 
     Result := BuildSuccessResponse(RequestId,
         '{"success":true,"kind":"' + EscapeJsonString(DocKind) + '"' +
-        ',"file_path":"' + EscapeJsonString(FilePath) + '"' +
+        ',"file_path":"' + EscapeJsonWide(FilePath) + '"' +
         ',"saved":' + BoolToJsonStr(Saved) +
         ',"added_to_project":' + BoolToJsonStr(Added) + '}');
 End;

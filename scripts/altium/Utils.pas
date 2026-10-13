@@ -129,6 +129,47 @@ Begin
 End;
 
 {..............................................................................}
+{ Wide-string sibling of EscapeJsonString.                                    }
+{                                                                              }
+{ Why a SECOND function instead of widening EscapeJsonString's parameter:     }
+{ most callers hand over a value they already narrowed into a single-byte     }
+{ String, and those bytes have lost the high half of every UTF-16 code unit.  }
+{ Widening the parameter would push that truncated byte string through the    }
+{ ANSI code page on the way in, producing a DIFFERENT wrong answer rather     }
+{ than a better one. Only a call site that passes an Altium WideString        }
+{ straight through belongs here -- for those, Ord() yields the real code      }
+{ unit and the \uXXXX escape makes the text survive JSON intact.            }
+{                                                                              }
+{ Measured 2026-10-13: a WideString local is legal in DelphiScript, and       }
+{ Ord(W[i]) returns the full 16 bits (U+6D4B for the Chinese char for         }
+{ "test"), not its low byte.                                                  }
+{..............................................................................}
+
+Function WordToHex4(N : Integer) : String;
+Begin
+    Result := HexNibble((N Shr 12) And $F) + HexNibble((N Shr 8) And $F)
+            + HexNibble((N Shr 4) And $F) + HexNibble(N And $F);
+End;
+
+Function EscapeJsonWide(S : WideString) : String;
+Var
+    I, O : Integer;
+Begin
+    Result := '';
+    For I := 1 To Length(S) Do
+    Begin
+        O := Ord(S[I]);
+        If O = Ord('\') Then Result := Result + '\\'
+        Else If O = Ord('"') Then Result := Result + '\"'
+        Else If O = 13 Then Result := Result + '\r'
+        Else If O = 10 Then Result := Result + '\n'
+        Else If O = 9 Then Result := Result + '\t'
+        Else If O < 32 Then Result := Result + '\u' + WordToHex4(O)
+        Else If O < 127 Then Result := Result + Chr(O)
+        Else Result := Result + '\u' + WordToHex4(O);
+    End;
+End;
+
 { JSON prop builders. Each returns a `"name":value` fragment ready to be     }
 { joined with comma separators into an object body. Replaces hand-rolled    }
 { `'"' + EscapeJsonString(...) + '":"' + EscapeJsonString(...) + '"'`        }
@@ -671,6 +712,32 @@ Begin
     Else Result := 'Unknown';
 End;
 
+{ Map a PCB primitive to a readable type name. Altium's DelphiScript has    }
+{ no ObjectIDToObjectName builtin, so map the ObjectId here. Used by the     }
+{ DRC violation reporter (BuildViolationJson in PCB.pas).                    }
+Function PCBObjectTypeName(Prim : IPCB_Primitive) : String;
+Var
+    Oid : Integer;
+Begin
+    Result := '';
+    If Prim = Nil Then Exit;
+    { An If/Else chain, NOT Case: Altium's script engine does not accept    }
+    { enum constants as Case labels (repo linter: case-on-enum-constant).    }
+    Oid := Prim.ObjectId;
+    If      Oid = eArcObject           Then Result := 'Arc'
+    Else If Oid = eComponentBodyObject Then Result := 'ComponentBody'
+    Else If Oid = eComponentObject     Then Result := 'Component'
+    Else If Oid = eConnectionObject    Then Result := 'Connection'
+    Else If Oid = eFillObject          Then Result := 'Fill'
+    Else If Oid = ePadObject           Then Result := 'Pad'
+    Else If Oid = ePolyObject          Then Result := 'Polygon'
+    Else If Oid = eRegionObject        Then Result := 'Region'
+    Else If Oid = eTextObject          Then Result := 'Text'
+    Else If Oid = eTrackObject         Then Result := 'Track'
+    Else If Oid = eViaObject           Then Result := 'Via'
+    Else                                    Result := 'Object';
+End;
+
 Function ExtractJsonArray(Json : String; Key : String) : String;
 Var
     StartPos, EndPos : Integer;
@@ -1025,4 +1092,67 @@ Begin
             Result := I;
             Exit;
         End;
+End;
+
+{..............................................................................}
+{ Project-sheet coverage guard.                                              }
+{                                                                              }
+{ Project-scope iteration resolves each sheet with                            }
+{ SchServer.GetSchDocumentByPath and silently skips the ones the editor has   }
+{ not got resident. That skip was completely silent: an audit over a project  }
+{ whose sheets were never loaded returned success:true with checked:0 and     }
+{ violations:0 -- indistinguishable from "I looked and the design is clean".  }
+{                                                                              }
+{ Every project-scope loop counts through ResolveProjectSheet, and            }
+{ ProcessCommand (Dispatcher.pas) BLANKS THE COUNTERS BEFORE each request,    }
+{ then runs SheetCoverageGate over the result. Putting the gate there rather  }
+{ than in each handler is deliberate: a handler cannot forget it, and a new   }
+{ handler added later is covered without anyone remembering. The bridge       }
+{ serves one request at a time, so module-level counters are safe.            }
+{                                                                              }
+{ Why the gate cannot false-positive: checked:0 on its own is NOT an error -- }
+{ a project may legitimately hold no object of the audited type. Only         }
+{ "every sheet was skipped" is provably meaningless. A PARTIAL skip is        }
+{ surfaced through SheetSkippedTotal instead, because the sheets that WERE    }
+{ read are still valid evidence -- callers assert on the count rather than    }
+{ losing the result.                                                          }
+{..............................................................................}
+
+Var
+    G_SheetSeen, G_SheetSkipped : Integer;
+
+Procedure ResetSheetCoverage;
+Begin
+    G_SheetSeen := 0;
+    G_SheetSkipped := 0;
+End;
+
+Function ResolveProjectSheet(SheetPath : String) : ISch_Document;
+Begin
+    Result := Nil;
+    If SheetPath = '' Then Exit;
+    Inc(G_SheetSeen);
+    Try Result := SchServer.GetSchDocumentByPath(SheetPath); Except Result := Nil; End;
+    If Result = Nil Then Inc(G_SheetSkipped);
+End;
+
+Function SheetSeenTotal : Integer;
+Begin
+    Result := G_SheetSeen;
+End;
+
+Function SheetSkippedTotal : Integer;
+Begin
+    Result := G_SheetSkipped;
+End;
+
+Function SheetCoverageGate(RequestId : String) : String;
+Begin
+    Result := '';
+    If (G_SheetSeen > 0) And (G_SheetSkipped >= G_SheetSeen) Then
+        Result := BuildErrorResponse(RequestId, 'SHEETS_NOT_LOADED',
+            'None of the project''s ' + IntToStr(G_SheetSeen) + ' schematic sheet(s) are '
+            + 'resident in the editor, so nothing was examined and a violation '
+            + 'count would be meaningless. Call project.load_project_sheets to '
+            + 'load them, then re-run.');
 End;
