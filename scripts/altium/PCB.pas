@@ -1034,6 +1034,7 @@ Var
     ViolationCount : Integer;
     Iterator : IPCB_BoardIterator;
     Violation : IPCB_Violation;
+    ServerDoc : IServerDocument;
     JsonItems : String;
     First : Boolean;
 Begin
@@ -1049,6 +1050,17 @@ Begin
     // (not "PCB:RunDRC" which doesn't exist). Called with no params,
     // it runs the rule check; with InspectViolation=True it would open
     // the violation viewer instead.
+    { RunProcess('PCB:DesignRuleCheck') acts on the CURRENT PCB. The      }
+    { first DRC of a session opens its report document, which takes the   }
+    { focus, so a SECOND call in the same session ran with no PCB in the  }
+    { editor's focus and did nothing: measured 8637 ms with a refreshed   }
+    { .drc report on the first call, then 282-330 ms with the report      }
+    { file's timestamp unchanged on calls two and three. A caller who     }
+    { re-ran DRC to confirm a fix was reading a stale answer. Make the    }
+    { board current before asking for the check.                          }
+    ServerDoc := Client.GetDocumentByPath(Board.FileName);
+    If ServerDoc <> Nil Then Client.ShowDocument(ServerDoc);
+
     ResetParameters;
     RunProcess('PCB:DesignRuleCheck');
 
@@ -5837,6 +5849,15 @@ Begin
         Exit;
     End;
 
+    { Rebuild connectivity first so the count is as fresh as Altium      }
+    { will make it. This does NOT make the number agree with the DRC:    }
+    { measured 7 here while Altium's own DRC reported Un-Routed Net      }
+    { violations = 0, unchanged by the rebuild. The ratsnest is          }
+    { geometric; the DRC resolves through copper pours. The DRC is       }
+    { authoritative for "is anything actually unconnected".             }
+    ResetParameters;
+    RunProcess('PCB:UpdateConnectivity');
+
     NetNames := TStringList.Create;
     NetCounts := TStringList.Create;
     Try
@@ -6366,6 +6387,17 @@ Begin
     PolyCount := 0;
     ConnCount := 0;
     TotalTraceLen := 0;
+
+    { unrouted_connections counts eConnectionObject, i.e. ratsnest       }
+    { lines. Rebuild connectivity first so the count is as fresh as      }
+    { Altium will make it -- but be aware that it still counts GEOMETRY, }
+    { which is not the same question as the DRC's "Un-Routed Net".      }
+    { Measured: this reports 7 on a board where Altium's own DRC         }
+    { reports Un-Routed Net violations = 0, and a rebuild does not       }
+    { change it -- the +1.8V pour connects what the ratsnest still       }
+    { draws. The DRC is authoritative. See pcb_get_unrouted_nets.        }
+    ResetParameters;
+    RunProcess('PCB:UpdateConnectivity');
 
     // Count all object types in a single pass
     Iterator := Board.BoardIterator_Create;

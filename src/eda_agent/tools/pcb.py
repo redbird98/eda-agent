@@ -4808,8 +4808,22 @@ def register_pcb_tools(mcp):
     async def pcb_get_unrouted_nets() -> dict[str, Any]:
         """Get list of nets with unrouted connections (ratsnest lines).
 
-        Identifies nets that still have ratsnest lines, meaning they are
-        not fully routed. Useful for checking routing completion status.
+        Identifies nets that still have ratsnest lines. Useful as a
+        routing-progress hint -- but NOT as a connectivity verdict, because
+        it counts ratsnest OBJECTS, which is a different question from "is
+        this net connected".
+
+        Measured 2026-10-13 on a board whose +1.8V is poured across several
+        layers: this tool reported total_unrouted=7 while Altium's own DRC
+        reported "Un-Routed Net Constraint ... Rule Violations : 0" for the
+        same board. Rebuilding connectivity before counting did NOT change
+        the 7, so the two are answering different questions rather than one
+        of them being stale: the ratsnest is geometric, while the DRC's
+        connectivity engine resolves through copper pours.
+
+        Altium's own DRC is authoritative for "is anything actually
+        unconnected". Trusting this count over it will send you chasing
+        connections that already exist.
 
         Returns:
             Dictionary with "unrouted_nets" array (each with net name and
@@ -4957,6 +4971,10 @@ def register_pcb_tools(mcp):
             unrouted_connections, total_trace_length_mils,
             board_width_mils, board_height_mils, board_area_sq_mils,
             layer_count, and board_name
+
+        Note: ``unrouted_connections`` counts ratsnest objects, which can
+        disagree with Altium's DRC "Un-Routed Net" check on the same board.
+        See ``pcb_get_unrouted_nets``.
         """
         bridge = get_bridge()
         result = await bridge.send_command_async("pcb.get_board_statistics", {})
