@@ -392,18 +392,29 @@ Begin
         Result := GetPCBBoardAnywhere;
         Exit;
     End;
+
+    { Resolve against documents that are ALREADY loaded. Never            }
+    { Client.OpenDocument here. It loads the file but drops the project   }
+    { association, leaving a "free document" -- and when the path does    }
+    { not resolve at all it can register the document under a corrupted   }
+    { name instead of failing. Application.pas's App_SetActiveDocument    }
+    { avoids OpenDocument for exactly this reason; this function did not.  }
+    {                                                                    }
+    { Measured 2026-10-13: focus_board called with a path the JSON layer  }
+    { had mangled left the board DETACHED from its project and renamed    }
+    { M2S090T-1FG484?????????V1.0.PcbDoc, with the focused project        }
+    { becoming "Free Documents" -- so every project-scope tool afterwards }
+    { ran against the wrong project. The file on disk was untouched and   }
+    { nothing was dirty, but the session had to be reopened to recover.   }
+    {                                                                    }
+    { A path that is not loaded now returns Nil so the caller can say so, }
+    { rather than silently operating on whichever board was lying around. }
     ServerDoc := Nil;
-    Try ServerDoc := Client.OpenDocument('PCB', Path); Except End;
-    If ServerDoc = Nil Then
-    Begin
-        { Path didn't resolve to a loadable PcbDoc; fall back rather than    }
-        { silently returning Nil and erroring the whole call.                }
-        Result := GetPCBBoardAnywhere;
-        Exit;
-    End;
+    Try ServerDoc := Client.GetDocumentByPath(Path); Except ServerDoc := Nil; End;
+    If ServerDoc = Nil Then Exit;
+
     Try Client.ShowDocument(ServerDoc); Except End;
-    Try Result := PCBServer.GetCurrentPCBBoard; Except End;
-    If Result = Nil Then Result := GetPCBBoardAnywhere;
+    Try Result := PCBServer.GetCurrentPCBBoard; Except Result := Nil; End;
 End;
 
 {..............................................................................}
@@ -491,8 +502,9 @@ Begin
         Exit;
     End;
 
-    { Exactly one board open. Opening it is safe because there is no other }
-    { one it could have meant.                                             }
+    { Exactly one board open, so there is no other one it could have      }
+    { meant. ResolvePCBBoard only resolves documents already loaded, so   }
+    { this reaches that board without OpenDocument's free-document trap.  }
     Result := ResolvePCBBoard(OnePath);
     If Result = Nil Then
         Why := 'The only open board, ' + OnePath + ', could not be opened.';
