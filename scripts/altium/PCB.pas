@@ -7542,13 +7542,24 @@ End;
 { PCB_FocusBoard - make a specific board the focused/current one, so the      }
 { GetPCBBoardAnywhere-based tools (get_components, delete, plan_placement,    }
 { render, ...) all operate on it. Essential when several PcbDocs are open.    }
-{ Params: board_path (the .PcbDoc to focus).                                  }
+{ Params: board_path (the .PcbDoc to focus; empty = whichever board is        }
+{ reachable).                                                                 }
+{                                                                              }
+{ ResolvePCBBoard only calls ShowDocument on its PATH branch. With an empty   }
+{ board_path, or a path that fails to load, it falls through to               }
+{ GetPCBBoardAnywhere -- a focus-INDEPENDENT lookup that restores the         }
+{ previous view. This tool used to report focused=true on those paths         }
+{ anyway, so a caller that focused a board by name and a caller that          }
+{ focused nothing got the same answer.                                        }
+{ Focus the resolved board here, on every path, and say whether it worked.    }
 {..............................................................................}
 
 Function PCB_FocusBoard(Params : String; RequestId : String) : String;
 Var
     Board : IPCB_Board;
+    ServerDoc : IServerDocument;
     BoardPathStr : String;
+    Focused : Boolean;
 Begin
     BoardPathStr := ExtractJsonValue(Params, 'board_path');
     Board := ResolvePCBBoard(BoardPathStr);
@@ -7558,6 +7569,29 @@ Begin
             'Could not resolve a PCB board for the given path');
         Exit;
     End;
+
+    { Do the focusing HERE rather than trusting ResolvePCBBoard to have   }
+    { done it: its no-path and load-failed branches go through            }
+    { GetPCBBoardAnywhere, which resolves without focusing and puts the   }
+    { previous view back. A caller that asked for a board by name and     }
+    { got focused:true was reading a claim the engine never honoured.     }
+    Focused := False;
+    ServerDoc := Nil;
+    Try ServerDoc := Client.GetDocumentByPath(Board.FileName); Except ServerDoc := Nil; End;
+    If ServerDoc <> Nil Then
+    Begin
+        Try Client.ShowDocument(ServerDoc); Focused := True; Except Focused := False; End;
+    End;
+
+    If Not Focused Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'FOCUS_FAILED',
+            'Found the board but could not make it the current document. ' +
+            'It is resolved and readable, but tools that act on the focused ' +
+            'document will still act on whatever is focused now.');
+        Exit;
+    End;
+
     Result := BuildSuccessResponse(RequestId,
         '{"focused":true,"board":"' + EscapeJsonWide(Board.FileName) + '"}');
 End;
