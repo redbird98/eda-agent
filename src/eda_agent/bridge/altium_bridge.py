@@ -512,10 +512,12 @@ class AltiumBridge:
         data = dict(data)
         data["_hint_detach"] = (
             "This MCP server has been holding Altium's scripting engine for "
-            "over 10 minutes. When your Altium work is done, call "
-            "detach_from_altium so Altium's own UI commands become responsive "
-            "again. The user will have to re-launch StartMCPServer in Altium "
-            "to run more MCP tools afterwards."
+            "over 10 minutes. While attached, Altium's own script-backed UI "
+            "commands are unresponsive -- most notably Undo/Redo, so manual "
+            "edits cannot be undone. If the user needs to edit by hand (or to "
+            "undo anything), call app_detach first: the DelphiScript loop exits "
+            "within ~500 ms and Altium becomes fully responsive again. The user "
+            "must then re-launch StartMCPServer in Altium to run more MCP tools."
         )
         return data
 

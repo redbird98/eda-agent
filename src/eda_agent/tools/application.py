@@ -685,11 +685,26 @@ def register_application_tools(mcp):
     async def app_detach() -> dict[str, Any]:
         """Stop the Altium MCP polling loop. CALL THIS WHEN YOU'RE FINISHED.
 
-        While the loop runs it holds Altium's scripting engine, so some of
-        Altium's own script-backed commands may not respond. This saves
-        edited and modified documents, leaves clean ones alone, and stops
-        the loop. Afterwards the user must run StartMCPServer again (File
-        > Run Script) before any more tools work, so detach only when done.
+        While the eda-agent MCP server is connected, a keep-alive thread pings
+        Altium every 30 s, which keeps Altium's scripting engine held by the
+        polling loop. Altium's own script-backed UI commands are then
+        unresponsive until the loop is released:
+
+        - **Undo / Redo** -- manual edits made while attached cannot be undone.
+          The while-true poll occupies the single-threaded DelphiScript engine,
+          so Altium never establishes the undo transaction. This is the most
+          commonly hit symptom and the main reason to detach MID-session.
+        - **Parameter Manager** -- batch edits greyed out or unresponsive.
+        - Some ribbon buttons and ECO dialogs.
+
+        Detaching is therefore not only an end-of-session action: whenever
+        control should go back to the user for manual editing that may need
+        Undo, detach first, let them work, then re-launch StartMCPServer.
+
+        This saves edited and modified documents, leaves clean ones alone,
+        and stops the loop. Afterwards the user must run StartMCPServer
+        again (File > Run Script) before any more tools work, so detach
+        only when done.
 
         Returns:
             attached False always; stopped True only when Altium answered
