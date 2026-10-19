@@ -1215,23 +1215,29 @@ def register_project_tools(mcp):
         out["written"] = fresh[:50]
         out["success"] = bool(fresh)
         if not fresh:
+            hint = (
+                " Also check that the OutJob is the ACTIVE document: "
+                "Altium's output batch follows the active document, and an "
+                "OutJob that is open but not active can run cleanly and "
+                "write nothing. Set it with "
+                "app_set_active_document(<outjob path>) and retry.")
             if not out_dir:
                 out["reason"] = (
                     "the container ran, but the OutJob gives it no output "
                     "path, so there was no folder to check and no file is "
-                    "known to have been written")
+                    "known to have been written." + hint)
             elif not exists:
                 out["reason"] = (
                     f"the container ran, but {out_dir} does not exist, so "
                     f"nothing was written there. A container bound to a "
                     f"managed release, or with its outputs switched off, "
-                    f"runs cleanly and writes no local file")
+                    f"runs cleanly and writes no local file." + hint)
             else:
                 out["reason"] = (
                     f"the container ran, but no file under {out_dir} was "
                     f"written or changed after it started. Outputs switched "
                     f"off in the OutJob, or bound to a managed release, "
-                    f"produce this")
+                    f"produce this." + hint)
         return out
 
     @mcp.tool()
