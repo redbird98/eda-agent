@@ -465,47 +465,6 @@ Begin
     End;
 End;
 
-{..............................................................................}
-{ Wide-string sibling of EscapeJsonString.                                    }
-{                                                                              }
-{ Why a SECOND function instead of widening EscapeJsonString's parameter:     }
-{ most callers hand over a value they already narrowed into a single-byte     }
-{ String, and those bytes have lost the high half of every UTF-16 code unit.  }
-{ Widening the parameter would push that truncated byte string through the    }
-{ ANSI code page on the way in, producing a DIFFERENT wrong answer rather     }
-{ than a better one. Only a call site that passes an Altium WideString        }
-{ straight through belongs here -- for those, Ord() yields the real code      }
-{ unit and the \uXXXX escape makes the text survive JSON intact.            }
-{                                                                              }
-{ Measured 2026-10-13: a WideString local is legal in DelphiScript, and       }
-{ Ord(W[i]) returns the full 16 bits (U+6D4B for the Chinese char for         }
-{ "test"), not its low byte.                                                  }
-{..............................................................................}
-
-Function WordToHex4(N : Integer) : String;
-Begin
-    Result := HexNibble((N Shr 12) And $F) + HexNibble((N Shr 8) And $F)
-            + HexNibble((N Shr 4) And $F) + HexNibble(N And $F);
-End;
-
-Function EscapeJsonWide(S : WideString) : String;
-Var
-    I, O : Integer;
-Begin
-    Result := '';
-    For I := 1 To Length(S) Do
-    Begin
-        O := Ord(S[I]);
-        If O = Ord('\') Then Result := Result + '\\'
-        Else If O = Ord('"') Then Result := Result + '\"'
-        Else If O = 13 Then Result := Result + '\r'
-        Else If O = 10 Then Result := Result + '\n'
-        Else If O = 9 Then Result := Result + '\t'
-        Else If O < 32 Then Result := Result + '\u' + WordToHex4(O)
-        Else If O < 127 Then Result := Result + Chr(O)
-        Else Result := Result + '\u' + WordToHex4(O);
-    End;
-End;
 
 { JSON prop builders. Each returns a `"name":value` fragment ready to be     }
 { joined with comma separators into an object body. Replaces hand-rolled    }

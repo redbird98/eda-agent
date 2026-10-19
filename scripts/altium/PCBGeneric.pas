@@ -872,7 +872,7 @@ End;
 Function MatchesFilterPCB(Obj : IPCB_Primitive; FilterStr : String) : Boolean;
 Var
     Remaining, Condition, PropName, Expected : String;
-    Actual : WideString;
+    Actual : String;
     PipePos, EqPos : Integer;
 Begin
     Result := True;

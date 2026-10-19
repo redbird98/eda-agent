@@ -4087,7 +4087,7 @@ Begin
 
     Result := BuildSuccessResponse(RequestId,
         '{"layers":[' + JsonItems + '],"layer_count":' + IntToStr(Count) + ','
-        + '"board_name":"' + EscapeJsonWide(ExtractFileName(Board.FileName)) + '"}');
+        + '"board_name":"' + EscapeJsonString(ExtractFileName(Board.FileName)) + '"}');
 End;
 
 {..............................................................................}
@@ -8617,7 +8617,7 @@ Begin
         + '"board_height_mils":' + FloatToJsonStr(BoardHeight) + ','
         + '"board_area_sq_mils":' + FloatToJsonStr(BoardArea) + ','
         + '"layer_count":' + IntToStr(LayerCount) + ','
-        + '"board_name":"' + EscapeJsonWide(ExtractFileName(Board.FileName)) + '"}');
+        + '"board_name":"' + EscapeJsonString(ExtractFileName(Board.FileName)) + '"}');
 End;
 
 {..............................................................................}
@@ -8678,7 +8678,7 @@ Begin
 
     Result := BuildSuccessResponse(RequestId,
         '{"placements":[' + JsonItems + '],"count":' + IntToStr(Count) + ','
-        + '"board_name":"' + EscapeJsonWide(ExtractFileName(Board.FileName)) + '"}');
+        + '"board_name":"' + EscapeJsonString(ExtractFileName(Board.FileName)) + '"}');
 End;
 
 {..............................................................................}
@@ -9480,7 +9480,7 @@ Var
     Linked : Boolean;
     Rotation : Double;
     Footprint, LibRef, Designator, Comment, LayerStr, LoadStr : String;
-    LibPath : WideString;
+    LibPath : String;
     UniqueIdStr, PadNetsStr, PadName, NetName, BoardPathStr : String;
     CompLayer : TLayer;
 Begin
@@ -9661,7 +9661,7 @@ Var
     Net : IPCB_Net;
     PlacementsStr, BoardPathStr, OnePlace, Remaining, LoadStr : String;
     Footprint, LibRef, Designator, Comment, LayerStr : String;
-    LibPath : WideString;
+    LibPath : String;
     UniqueIdStr, PadNetsStr, PadName, NetName, BadLayers : String;
     X, Y, PlacedCount, FailedCount, SepPos : Integer;
     Rotation : Double;
@@ -9843,7 +9843,7 @@ Begin
     End;
 
     Result := BuildSuccessResponse(RequestId,
-        '{"focused":true,"board":"' + EscapeJsonWide(Board.FileName) + '"}');
+        '{"focused":true,"board":"' + EscapeJsonString(Board.FileName) + '"}');
 End;
 
 {..............................................................................}
@@ -12096,7 +12096,7 @@ End;
 Function PCB_SetMechLayers(Params : String; RequestId : String) : String;
 Var
     Board : IPCB_Board;
-    Where : WideString;
+    Where : String;
 Begin
     Board := GetPCBBoardAnywhere(0);
     If Board = Nil Then

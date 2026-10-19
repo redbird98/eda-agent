@@ -1432,7 +1432,7 @@ End;
 Function MatchesFilter(Obj : ISch_GraphicalObject; FilterStr : String) : Boolean;
 Var
     Remaining, Condition, PropName, Expected : String;
-    Actual : WideString;
+    Actual : String;
     PipePos, EqPos : Integer;
 Begin
     Result := True;
@@ -1986,9 +1986,9 @@ Begin
             Begin
                 ObjJson := BuildObjectJson(Obj, PropsStr);
                 If Length(ObjJson) <= 2 Then
-                    ObjJson := '{"_doc":"' + EscapeJsonWide(DocPath) + '"}'
+                    ObjJson := '{"_doc":"' + EscapeJsonString(DocPath) + '"}'
                 Else
-                    ObjJson := Copy(ObjJson, 1, 1) + '"_doc":"' + EscapeJsonWide(DocPath) + '",' + Copy(ObjJson, 2, Length(ObjJson));
+                    ObjJson := Copy(ObjJson, 1, 1) + '"_doc":"' + EscapeJsonString(DocPath) + '",' + Copy(ObjJson, 2, Length(ObjJson));
                 If Not First Then Result := Result + ',';
                 First := False;
                 Result := Result + ObjJson;
@@ -2040,7 +2040,7 @@ Var
     ServerDoc : IServerDocument;
     I, TotalMatched, SheetsProcessed, SheetsMarked : Integer;
     JsonItems, BadCond : String;
-    FilePath : WideString;
+    FilePath : String;
     IsMutating : Boolean;
 Begin
     BadCond := FilterProblem(FilterStr);
@@ -2140,7 +2140,7 @@ Var
     ServerDoc : IServerDocument;
     TotalMatched : Integer;
     JsonItems, SavedStr, BadCond : String;
-    DocPath : WideString;
+    DocPath : String;
     IsMutating, Saved : Boolean;
 Begin
     BadCond := FilterProblem(FilterStr);
@@ -3450,10 +3450,10 @@ End;
 
 Function Gen_AddSheet(Params : String; RequestId : String) : String;
 Var
-    SheetName : WideString;
+    SheetName : String;
     Workspace : IWorkspace;
     Project : IProject;
-    NewDocPath : WideString;
+    NewDocPath : String;
     ServerDoc : IServerDocument;
     Saved, Added : Boolean;
 Begin
@@ -3527,7 +3527,7 @@ Begin
     Except Added := False; End;
 
     Result := BuildSuccessResponse(RequestId,
-        '{"success":true,"path":"' + EscapeJsonWide(NewDocPath) + '"' +
+        '{"success":true,"path":"' + EscapeJsonString(NewDocPath) + '"' +
         ',"saved":' + BoolToJsonStr(Saved) +
         ',"added_to_project":' + BoolToJsonStr(Added) + '}');
 End;
@@ -3539,7 +3539,7 @@ End;
 
 Function Gen_DeleteSheet(Params : String; RequestId : String) : String;
 Var
-    FilePath : WideString;
+    FilePath : String;
     Workspace : IWorkspace;
     Project : IProject;
     Doc : IDocument;
@@ -3610,7 +3610,7 @@ Begin
     RunProcess('WorkspaceManager:RemoveObjectFromProject');
 
     Result := BuildSuccessResponse(RequestId,
-        '{"success":true,"removed":"' + EscapeJsonWide(FilePath) + '"}');
+        '{"success":true,"removed":"' + EscapeJsonString(FilePath) + '"}');
 End;
 
 {..............................................................................}
@@ -3753,7 +3753,7 @@ Var
     JsonItems, RelItems : String;
     First, FirstRel : Boolean;
     Desc, Detail, Kind, Probe : String;
-    DocName : WideString;
+    DocName : String;
 Begin
     MaxItems := StrToIntDef(ExtractJsonValue(Params, 'limit'), 100);
 
@@ -3840,7 +3840,7 @@ Begin
             If Not FirstRel Then RelItems := RelItems + ',';
             FirstRel := False;
             RelItems := RelItems + '{"kind":"' + EscapeJsonString(Kind) +
-                '","document":"' + EscapeJsonWide(DocName) +
+                '","document":"' + EscapeJsonString(DocName) +
                 '","cross_probe":"' + EscapeJsonString(Probe) + '"}';
         End;
 
@@ -4334,7 +4334,7 @@ Begin
                     JsonItems := JsonItems + '{"designator":"' + EscapeJsonString(Designator) +
                         '","pin_number":"' + EscapeJsonString(PinNumber) +
                         '","pin_name":"' + EscapeJsonString(PinName) +
-                        '","sheet":"' + EscapeJsonWide(Doc.DM_FullPath) + '"}';
+                        '","sheet":"' + EscapeJsonString(Doc.DM_FullPath) + '"}';
                     Inc(Total);
                 End;
             End;
@@ -5123,8 +5123,8 @@ End;
 Function Gen_PlaceSchComponentFromLibrary(Params : String; RequestId : String) : String;
 Var
     LibRef, DesigStr, FootprintStr, AvailHint : String;
-    LibPath : WideString;
-    SheetPath : WideString;
+    LibPath : String;
+    SheetPath : String;
     ResolvedLib, LibReason : String;
     X, Y, Rotation, OrientationVal : Integer;
     SchDoc : ISch_Document;
@@ -5311,7 +5311,7 @@ Begin
 
     Result := BuildSuccessResponse(RequestId,
         '{"placed":true,'
-        + '"library_path":"' + EscapeJsonWide(LibPath) + '",'
+        + '"library_path":"' + EscapeJsonString(LibPath) + '",'
         + '"lib_reference":"' + EscapeJsonString(LibRef) + '",'
         + '"x":' + IntToStr(X) + ',"y":' + IntToStr(Y) + ','
         + '"rotation":' + IntToStr(Rotation) + ','
@@ -5616,7 +5616,7 @@ End;
 Function Gen_PlaceNetLabel(Params : String; RequestId : String) : String;
 Var
     Text : String;
-    SheetPath : WideString;
+    SheetPath : String;
     X, Y, Orientation : Integer;
     SchDoc : ISch_Document;
     NetLabel : ISch_NetLabel;
@@ -5868,7 +5868,7 @@ End;
 Function Gen_GetSchComponentPins(Params : String; RequestId : String) : String;
 Var
     Designator : String;
-    SheetPath : WideString;
+    SheetPath : String;
     SchDoc : ISch_Document;
     Iter, PinIter : ISch_Iterator;
     Comp : ISch_Component;
@@ -6036,7 +6036,7 @@ End;
 Function Gen_PlacePort(Params : String; RequestId : String) : String;
 Var
     StyleStr, IOTypeStr : String;
-    Name : WideString;
+    Name : String;
     X, Y : Integer;
     SchDoc : ISch_Document;
     SchPort : ISch_Port;
@@ -6097,7 +6097,7 @@ Begin
       reopened. }
     If SchDoc <> Nil Then MarkDocDirtyByPath(SchDoc.DocumentName);
     Result := BuildSuccessResponse(RequestId,
-        '{"success":true,"name":"' + EscapeJsonWide(Name) +
+        '{"success":true,"name":"' + EscapeJsonString(Name) +
         '","x":' + IntToStr(X) + ',"y":' + IntToStr(Y) + '}');
 End;
 
@@ -6109,7 +6109,7 @@ End;
 Function Gen_PlacePowerPort(Params : String; RequestId : String) : String;
 Var
     Text, StyleStr : String;
-    SheetPath : WideString;
+    SheetPath : String;
     X, Y, OrientationVal : Integer;
     SchDoc : ISch_Document;
     PowerObj : ISch_PowerObject;
@@ -6210,7 +6210,7 @@ End;
 
 Function Gen_GetSheetParameters(Params : String; RequestId : String) : String;
 Var
-    FilePath : WideString;
+    FilePath : String;
     SchDoc : ISch_Document;
     Iterator : ISch_Iterator;
     Param : ISch_Parameter;
@@ -6248,8 +6248,8 @@ Begin
         Begin
             If Not First Then JsonItems := JsonItems + ',';
             First := False;
-            JsonItems := JsonItems + '{"name":"' + EscapeJsonWide(Param.Name) +
-                '","value":"' + EscapeJsonWide(Param.Text) + '"}';
+            JsonItems := JsonItems + '{"name":"' + EscapeJsonString(Param.Name) +
+                '","value":"' + EscapeJsonString(Param.Text) + '"}';
             Inc(ParamCount);
             Param := Iterator.NextSchObject;
         End;
@@ -6345,7 +6345,7 @@ Var
     Doc : IDocument;
     ServerDoc : IServerDocument;
     I, MatchCount, SheetsProcessed : Integer;
-    FilePath : WideString;
+    FilePath : String;
 Begin
     ObjTypeStr := ExtractJsonValue(Params, 'object_type');
     FilterStr := ExtractJsonValue(Params, 'filter');
@@ -6853,7 +6853,7 @@ Begin
     If SchDoc <> Nil Then
     Begin
         // Schematic document info
-        Data := '{"file_path":"' + EscapeJsonWide(SchDoc.DocumentName) + '"';
+        Data := '{"file_path":"' + EscapeJsonString(SchDoc.DocumentName) + '"';
         Data := Data + ',"kind":"SCH"';
 
         // Sheet size
@@ -6938,7 +6938,7 @@ Begin
     Else If Board <> Nil Then
     Begin
         // PCB document info
-        Data := '{"file_path":"' + EscapeJsonWide(Board.FileName) + '"';
+        Data := '{"file_path":"' + EscapeJsonString(Board.FileName) + '"';
         Data := Data + ',"kind":"PCB"';
         Data := Data + ',"origin_x":' + IntToStr(CoordToMils(Board.XOrigin));
         Data := Data + ',"origin_y":' + IntToStr(CoordToMils(Board.YOrigin));
@@ -7283,16 +7283,16 @@ Begin
             If Not FirstC Then ConsJson := ConsJson + ',';
             FirstC := False;
             ConsJson := ConsJson + '{"kind":"';
-            Try ConsJson := ConsJson + EscapeJsonWide(Cons.DM_Kind); Except End;
+            Try ConsJson := ConsJson + EscapeJsonString(Cons.DM_Kind); Except End;
             ConsJson := ConsJson + '","data":"';
-            Try ConsJson := ConsJson + EscapeJsonWide(Cons.DM_Data); Except End;
+            Try ConsJson := ConsJson + EscapeJsonString(Cons.DM_Data); Except End;
             ConsJson := ConsJson + '"}';
         End;
 
         GroupJson := '{"target_kind":"';
-        Try GroupJson := GroupJson + EscapeJsonWide(Group.DM_TargetKindString); Except End;
+        Try GroupJson := GroupJson + EscapeJsonString(Group.DM_TargetKindString); Except End;
         GroupJson := GroupJson + '","target_id":"';
-        Try GroupJson := GroupJson + EscapeJsonWide(Group.DM_TargetId); Except End;
+        Try GroupJson := GroupJson + EscapeJsonString(Group.DM_TargetId); Except End;
         GroupJson := GroupJson + '","constraint_count":' + IntToStr(ConsCount);
         GroupJson := GroupJson + ',"constraints":[' + ConsJson + ']}';
 
@@ -7863,7 +7863,7 @@ Function Gen_AddDatafileLink(Params : String; RequestId : String) : String;
 Var
     AmbigTotal : Integer;
     Designator, KindStr, EntityName : String;
-    FilePath : WideString;
+    FilePath : String;
     SchDoc : ISch_Document;
     Comp : ISch_Component;
     Impl : ISch_Implementation;
@@ -7937,7 +7937,7 @@ Begin
 
     Result := BuildSuccessResponse(RequestId,
         '{"success":true,"designator":"' + EscapeJsonString(Designator)
-        + '","file_path":"' + EscapeJsonWide(FilePath) + '"}');
+        + '","file_path":"' + EscapeJsonString(FilePath) + '"}');
 End;
 
 {..............................................................................}
@@ -8261,7 +8261,7 @@ End;
 Function Gen_SetSchComponentParameters(Params : String; RequestId : String) : String;
 Var
     DesigStr, SubObj, Key, Val : String;
-    SheetPath : WideString;
+    SheetPath : String;
     SchDoc : ISch_Document;
     Iter : ISch_Iterator;
     Obj : ISch_GraphicalObject;
@@ -8635,7 +8635,7 @@ Var
     Comp : ISch_Component;
     Impl : ISch_Implementation;
     Designator, ModelName, Primitive : String;
-    FilePath : WideString;
+    FilePath : String;
     Found : Boolean;
 Begin
     Designator := ExtractJsonValue(Params, 'designator');
@@ -8718,7 +8718,7 @@ Begin
     If SchDoc <> Nil Then MarkDocDirtyByPath(SchDoc.DocumentName);
     Result := BuildSuccessResponse(RequestId,
         '{"success":true,"designator":"' + EscapeJsonString(Designator) + '",'
-        + '"file_path":"' + EscapeJsonWide(FilePath) + '",'
+        + '"file_path":"' + EscapeJsonString(FilePath) + '",'
         + '"model_name":"' + EscapeJsonString(ModelName) + '"}');
 End;
 
@@ -9275,7 +9275,7 @@ Var
     PlaceStr, Op, Remaining, FailedRefdes, ResponseBody : String;
     OpCount, Placed, Failed, Rotation : Integer;
     LibRef, Desig, Footprint, AvailHint : String;
-    LibPath : WideString;
+    LibPath : String;
     ResolvedLib, LibReason : String;
     X, Y : Integer;
     SchDoc : ISch_Document;
@@ -9803,7 +9803,7 @@ End;
 Function Gen_GetSchDocPins(Params : String; RequestId : String) : String;
 Var
     PinList, RefDes, PinNum, PinName : String;
-    SheetPath : WideString;
+    SheetPath : String;
     SchDoc : ISch_Document;
     Iter, PinIter : ISch_Iterator;
     Comp : ISch_Component;
@@ -9898,7 +9898,7 @@ End;
 Function Gen_SetSchComponentsParameters(Params : String; RequestId : String) : String;
 Var
     StampsStr, Op, Remaining : String;
-    SheetPath : WideString;
+    SheetPath : String;
     OpCount, Updated, Failed, OpIdx : Integer;
     SchDoc : ISch_Document;
     Iter : ISch_Iterator;
@@ -10063,7 +10063,7 @@ End;
 Function Gen_SetSchTextPositions(Params : String; RequestId : String) : String;
 Var
     PosStr, Op, Remaining, FieldStr : String;
-    SheetPath : WideString;
+    SheetPath : String;
     OpCount, Updated, Failed, OpIdx : Integer;
     DX, DY, VX, VY : Integer;
     HasV : Boolean;
@@ -10602,9 +10602,9 @@ Var
     VtxN, V : Integer;
     Vert : TLocation;
     DesigText, LibRef, ElecStr, ParamName, LogicalDes : String;
-    SheetName : WideString;
-    SheetFile : WideString;
-    SchDocName : WideString;
+    SheetName : String;
+    SheetFile : String;
+    SchDocName : String;
     RespJson : String;
     PhysMap : TStringList;
     Workspace : IWorkspace;
@@ -10965,8 +10965,8 @@ Begin
                         If NumPins > 0 Then PinsJson := PinsJson + ',';
                         PinsJson := PinsJson +
                             '{"comp":"' + EscapeJsonString(DesigText) + '"' +
-                            ',"des":"' + EscapeJsonWide(Pin.Designator) + '"' +
-                            ',"name":"' + EscapeJsonWide(Pin.Name) + '"' +
+                            ',"des":"' + EscapeJsonString(Pin.Designator) + '"' +
+                            ',"name":"' + EscapeJsonString(Pin.Name) + '"' +
                             ',"x":' + IntToStr(CoordToMils(Loc.X)) +
                             ',"y":' + IntToStr(CoordToMils(Loc.Y)) +
                             ',"rot":' + IntToStr(Pin.Orientation * 90) +
@@ -11088,8 +11088,8 @@ Begin
 
                 If NumSheetSyms > 0 Then SheetSymsJson := SheetSymsJson + ',';
                 SheetSymsJson := SheetSymsJson +
-                    '{"name":"' + EscapeJsonWide(SheetName) + '"' +
-                    ',"filename":"' + EscapeJsonWide(SheetFile) + '"' +
+                    '{"name":"' + EscapeJsonString(SheetName) + '"' +
+                    ',"filename":"' + EscapeJsonString(SheetFile) + '"' +
                     ',"x":' + IntToStr(CoordToMils(Loc.X)) +
                     ',"y":' + IntToStr(CoordToMils(Loc.Y)) +
                     ',"w":' + IntToStr(CoordToMils(SheetSym.XSize)) +
@@ -11140,7 +11140,7 @@ Begin
     BusesJson    := BusesJson    + ']';
 
     RespJson :=
-        '{"doc":"' + EscapeJsonWide(SchDoc.DocumentName) + '"' +
+        '{"doc":"' + EscapeJsonString(SchDoc.DocumentName) + '"' +
         ',"counts":{"components":' + IntToStr(NumComps) +
         ',"pins":' + IntToStr(NumPins) +
         ',"wires":' + IntToStr(NumWires) +
@@ -11880,7 +11880,7 @@ End;
 Function Gen_ClearSchSourceLibrary(Params : String; RequestId : String) : String;
 Var
     DesigCsv, FlagStr, Desig, LibRef : String;
-    SheetPath : WideString;
+    SheetPath : String;
     SchDoc : ISch_Document;
     Iterator : ISch_Iterator;
     Obj : ISch_GraphicalObject;

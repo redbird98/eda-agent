@@ -34,7 +34,7 @@ def test_project_documents_report_paths():
     # the leading comma the source has, and its "not in" half passed on a
     # line it had never found.
     assert len(lines) == 1, f"expected one file_path line, found {lines}"
-    assert "EscapeJsonWide(DocFullPath(Doc))" in lines[0]
+    assert "EscapeJsonString(DocFullPath(Doc))" in lines[0]
     assert "DM_FileName" not in lines[0]
 
 

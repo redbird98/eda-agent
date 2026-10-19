@@ -215,7 +215,7 @@ End;
 { no save_all changes are needed.                                            }
 Procedure MarkLibDirty(SchLib : ISch_Lib);
 Var
-    FullPath : WideString;
+    FullPath : String;
     ServerDoc : IServerDocument;
 Begin
     If SchLib = Nil Then Exit;
@@ -290,7 +290,7 @@ End;
 { differences do not cause false negatives.                                     }
 Function SchLibIsAtPath(SchLib : ISch_Lib; WantPath : String) : Boolean;
 Var
-    Actual : WideString;
+    Actual : String;
 Begin
     Result := False;
     If (SchLib = Nil) Or (WantPath = '') Then Exit;
@@ -312,7 +312,7 @@ Function FocusSchLib(Var LibPath : String) : ISch_Lib;
 Var
     Workspace : IWorkspace;
     Doc : IDocument;
-    FocusedPath : WideString;
+    FocusedPath : String;
 Begin
     Result := Nil;
     Workspace := GetWorkspace;
@@ -521,7 +521,7 @@ End;
 Function Lib_CreateSymbol(Params : String; RequestId : String) : String;
 Var
     DesignatorPrefix, Description : String;
-    Name : WideString;
+    Name : String;
     SchLib : ISch_Lib;
     Component, Verify : ISch_Component;
     PartCount, ActualParts : Integer;
@@ -1088,7 +1088,7 @@ End;
 
 Function Lib_SetCurrentComponent(Params : String; RequestId : String) : String;
 Var
-    Name : WideString;
+    Name : String;
     Component : ISch_Component;
 Begin
     Name := ExtractJsonValue(Params, 'name');
@@ -1107,13 +1107,13 @@ Begin
     End;
 
     Result := BuildSuccessResponse(RequestId,
-        '{"success":true,"name":"' + EscapeJsonWide(Name) + '"}');
+        '{"success":true,"name":"' + EscapeJsonString(Name) + '"}');
 End;
 
 Function Lib_AddPin(Params : String; RequestId : String) : String;
 Var
     Designator, ElecType : String;
-    Name : WideString;
+    Name : String;
     X, Y, Length, Rotation : Integer;
     Hidden, ViaLib : Boolean;
     SchLib : ISch_Lib;
@@ -1323,7 +1323,7 @@ End;
 Function Lib_CreateFootprint(Params : String; RequestId : String) : String;
 Var
     Description : String;
-    Name : WideString;
+    Name : String;
     PcbLib : IPCB_Library;
     Footprint : IPCB_LibComponent;
 Begin
@@ -1347,7 +1347,7 @@ Begin
         PcbLib.CurrentComponent := Footprint;
         MarkDocDirtyByPath(PcbLib.Board.FileName);
 
-        Result := BuildSuccessResponse(RequestId, '{"success":true,"name":"' + EscapeJsonWide(Name) + '"}');
+        Result := BuildSuccessResponse(RequestId, '{"success":true,"name":"' + EscapeJsonString(Name) + '"}');
     End
     Else
         Result := BuildErrorResponse(RequestId, 'CREATE_FAILED', 'Failed to create footprint');
@@ -3156,8 +3156,8 @@ End;
 Function Lib_AddFootprintText(Params : String; RequestId : String) : String;
 Var
     TextStr, LayerStr, CompName, FlagStr, RespJson : String;
-    LibPath : WideString;
-    FocusedPath : WideString;
+    LibPath : String;
+    FocusedPath : String;
     MirrorStr : String;
     Mirror : Boolean;
     Workspace : IWorkspace;
@@ -3326,8 +3326,8 @@ End;
 Function Lib_GetFootprints(Params : String; RequestId : String) : String;
 Var
     FpName, FpDescr, FpsJson, RespJson : String;
-    LibPath : WideString;
-    FocusedPath : WideString;
+    LibPath : String;
+    FocusedPath : String;
     Workspace : IWorkspace;
     Doc : IDocument;
     PcbLib : IPCB_Library;
@@ -3392,7 +3392,7 @@ Begin
     FpsJson := FpsJson + ']';
 
     RespJson :=
-        '{"library_path":"' + EscapeJsonWide(LibPath) + '"' +
+        '{"library_path":"' + EscapeJsonString(LibPath) + '"' +
         ',"count":' + IntToStr(Count) +
         ',"footprints":' + FpsJson + '}';
     Result := BuildSuccessResponse(RequestId, RespJson);
@@ -3415,8 +3415,8 @@ Var
     SeenPads : TStringList;
     PadAddr : String;
     FpWanted, FpName : String;
-    LibPath : WideString;
-    FocusedPath : WideString;
+    LibPath : String;
+    FocusedPath : String;
     ShapeStr, LayerStr, PadsJson, RespJson : String;
     PrimsJson, KindStr : String;
     Workspace : IWorkspace;
@@ -3675,8 +3675,8 @@ End;
 Function Lib_GetLibraryGeometry(Params : String; RequestId : String) : String;
 Var
     FpName : String;
-    LibPath : WideString;
-    FocusedPath : WideString;
+    LibPath : String;
+    FocusedPath : String;
     ShapeStr, LayerStr, KindStr, PrimKey, SeenKeys : String;
     PadsJson, PrimsJson, TextsJson, FpsJson, RespJson : String;
     TxtStr, CenterJson : String;
@@ -3978,7 +3978,7 @@ Begin
     FpsJson := FpsJson + ']';
 
     RespJson :=
-        '{"library_path":"' + EscapeJsonWide(LibPath) + '"' +
+        '{"library_path":"' + EscapeJsonString(LibPath) + '"' +
         ',"total":' + IntToStr(Total) +
         ',"offset":' + IntToStr(Offset) +
         ',"count":' + IntToStr(Emitted) +
@@ -4008,8 +4008,8 @@ End;
 Function Lib_SetDesignator(Params : String; RequestId : String) : String;
 Var
     FpWanted, FpName, TxtStr, RespJson, ChangedJson : String;
-    LibPath : WideString;
-    FocusedPath : WideString;
+    LibPath : String;
+    FocusedPath : String;
     XStr, YStr, HeightStr, LayerStr, CreateStr : String;
     Workspace : IWorkspace;
     Doc : IDocument;
@@ -4295,8 +4295,8 @@ End;
 Function Lib_ConvertDesignatorsToStroke(Params : String; RequestId : String) : String;
 Var
     FpName, TxtStr, RespJson, NamesJson : String;
-    LibPath : WideString;
-    FocusedPath : WideString;
+    LibPath : String;
+    FocusedPath : String;
     Workspace : IWorkspace;
     Doc : IDocument;
     PcbLib : IPCB_Library;
@@ -4440,7 +4440,7 @@ Begin
 
     RespJson :=
         '{"success":true' +
-        ',"library_path":"' + EscapeJsonWide(LibPath) + '"' +
+        ',"library_path":"' + EscapeJsonString(LibPath) + '"' +
         ',"designators":' + IntToStr(Total) +
         ',"converted":' + IntToStr(Converted) +
         ',"names":[' + NamesJson + ']}';
@@ -4474,8 +4474,8 @@ End;
 Function Lib_SetDesignators(Params : String; RequestId : String) : String;
 Var
     EditsPath, FpName, TxtStr, RespJson, MissingJson : String;
-    LibPath : WideString;
-    FocusedPath : WideString;
+    LibPath : String;
+    FocusedPath : String;
     Line, WantName, LayerStr, XStr, YStr, HeightStr, CreateStr : String;
     Workspace : IWorkspace;
     Doc : IDocument;
@@ -4804,7 +4804,7 @@ End;
 { Params: library_path (required).                                             }
 Function Lib_ReloadLibrary(Params : String; RequestId : String) : String;
 Var
-    LibPath : WideString;
+    LibPath : String;
     PcbLib : IPCB_Library;
 Begin
     LibPath := ExtractJsonValue(Params, 'library_path');
@@ -4841,7 +4841,7 @@ Begin
         Exit;
     End;
     Result := BuildSuccessResponse(RequestId,
-        '{"reloaded":true,"library_path":"' + EscapeJsonWide(LibPath) + '"}');
+        '{"reloaded":true,"library_path":"' + EscapeJsonString(LibPath) + '"}');
 End;
 
 { Lib_ProbeDesignator - Diagnostic. Dump the RAW geometry of one footprint's   }
@@ -4852,8 +4852,8 @@ End;
 Function Lib_ProbeDesignator(Params : String; RequestId : String) : String;
 Var
     FpWanted, FpName, TxtStr, RespJson, TextsJson : String;
-    LibPath : WideString;
-    FocusedPath : WideString;
+    LibPath : String;
+    FocusedPath : String;
     TextN : Integer;
     Workspace : IWorkspace;
     Doc : IDocument;
@@ -5378,7 +5378,7 @@ Var
     Workspace : IWorkspace;
     Doc : IDocument;
     Data, CompName, ParamList, WithParamsStr : String;
-    LibPath : WideString;
+    LibPath : String;
     ParamLower, ParamText, WithDesigStr, DefDesig : String;
     Mpn, Manufacturer, Datasheet, FootprintName : String;
     FileNames, LiveNames, Unsaved, Stale, Nm, Rest, DiffJson : String;
@@ -5521,7 +5521,7 @@ Begin
                     Begin
                         If ParamList <> '' Then ParamList := ParamList + ',';
                         ParamText := Param.Text;
-                        ParamList := ParamList + '"' + EscapeJsonWide(Param.Name) + '":"' + EscapeJsonString(ParamText) + '"';
+                        ParamList := ParamList + '"' + EscapeJsonString(Param.Name) + '":"' + EscapeJsonString(ParamText) + '"';
                         // Capture atomic-parts fields by canonical Altium
                         // parameter names. LowerCase makes us tolerant of
                         // libs that capitalize "MPN" vs "Mpn", etc.
@@ -5733,7 +5733,7 @@ Begin
                     '{"name":"' + EscapeJsonString(CompName) +
                     '","alias_name":"' + EscapeJsonString(AliasName) +
                     '","description":"' + EscapeJsonString(Description) +
-                    '","library_path":"' + EscapeJsonWide(LibPath) +
+                    '","library_path":"' + EscapeJsonString(LibPath) +
                     '","part_count":' + IntToStr(CompInfo.PartCount) + '}';
                 Inc(Count);
             End;
@@ -5753,7 +5753,7 @@ Var
     Doc : IDocument;
     FocusedSchLib : ISch_Lib;
     ResultsJson : String;
-    DocPath : WideString;
+    DocPath : String;
     I, J, Count, Limit : Integer;
     First, IsLib, SearchParams : Boolean;
 Begin
@@ -6047,8 +6047,8 @@ End;
 Function Lib_GetComponentDetails(Params : String; RequestId : String) : String;
 Var
     ComponentName : String;
-    LibPath : WideString;
-    FocusedPath : WideString;
+    LibPath : String;
+    FocusedPath : String;
     ResErrCode, ResErrMsg : String;
     LibReader : ILibCompInfoReader;
     CompInfo : IComponentInfo;
@@ -6217,8 +6217,8 @@ Begin
             PinLabelHidden := False;
             Try PinLabelHidden := (Not Pin.ShowName) And (Not Pin.ShowDesignator); Except End;
 
-            PinList := PinList + '{"designator":"' + EscapeJsonWide(Pin.Designator) +
-                '","name":"' + EscapeJsonWide(Pin.Name) +
+            PinList := PinList + '{"designator":"' + EscapeJsonString(Pin.Designator) +
+                '","name":"' + EscapeJsonString(Pin.Name) +
                 '","electrical_type":"' + ElecStr +
                 '","x":' + IntToStr(CoordToMils(Pin.Location.X)) +
                 ',"y":' + IntToStr(CoordToMils(Pin.Location.Y)) +
@@ -6249,13 +6249,13 @@ Begin
         Begin
             If Not First Then ParamList := ParamList + ',';
             First := False;
-            ParamList := ParamList + '"' + EscapeJsonWide(Param.Name) +
-                '":"' + EscapeJsonWide(Param.Text) + '"';
+            ParamList := ParamList + '"' + EscapeJsonString(Param.Name) +
+                '":"' + EscapeJsonString(Param.Text) + '"';
 
             If Not FirstStyle Then StyleList := StyleList + ',';
             FirstStyle := False;
-            StyleList := StyleList + '{"name":"' + EscapeJsonWide(Param.Name) +
-                '","value":"' + EscapeJsonWide(Param.Text) + '","style":' +
+            StyleList := StyleList + '{"name":"' + EscapeJsonString(Param.Name) +
+                '","value":"' + EscapeJsonString(Param.Text) + '","style":' +
                 BuildLabelStyleJson(Param, False) + '}';
 
             Param := ParamIterator.NextSchObject;
@@ -6265,7 +6265,7 @@ Begin
     End;
 
     Data := '{"name":"' + EscapeJsonString(ComponentName) + '"';
-    Data := Data + ',"library_path":"' + EscapeJsonWide(LibPath) + '"';
+    Data := Data + ',"library_path":"' + EscapeJsonString(LibPath) + '"';
     Data := Data + ',"designator":' + DesignatorJson;
     Data := Data + ',"comment":' + CommentJson;
     Data := Data + ',"description":"' + EscapeJsonString(Description) + '"';
@@ -6283,7 +6283,7 @@ End;
 Function Lib_BatchSetParams(Params : String; RequestId : String) : String;
 Var
     BatchPath : String;
-    LibPath : WideString;
+    LibPath : String;
     SchLib : ISch_Lib;
     Component : ISch_Component;
     ParamIterator : ISch_Iterator;
@@ -6499,7 +6499,7 @@ End;
 Function Lib_BatchRename(Params : String; RequestId : String) : String;
 Var
     BatchPath : String;
-    LibPath : WideString;
+    LibPath : String;
     SchLib : ISch_Lib;
     Component : ISch_Component;
     Workspace : IWorkspace;
@@ -7038,8 +7038,8 @@ Begin
             Else If Pin.Electrical = eElectricHiZ Then ElecStr := 'hiz'
             Else ElecStr := 'passive';
 
-            JsonItems := JsonItems + '{"designator":"' + EscapeJsonWide(Pin.Designator) +
-                '","name":"' + EscapeJsonWide(Pin.Name) +
+            JsonItems := JsonItems + '{"designator":"' + EscapeJsonString(Pin.Designator) +
+                '","name":"' + EscapeJsonString(Pin.Name) +
                 '","electrical_type":"' + ElecStr +
                 '","x":' + IntToStr(CoordToMils(Pin.Location.X)) +
                 ',"y":' + IntToStr(CoordToMils(Pin.Location.Y)) +
@@ -7111,8 +7111,8 @@ End;
 Function Lib_CopyComponent(Params : String; RequestId : String) : String;
 Var
     DestLibPath, SourceName, NewName : String;
-    SourceLibPath : WideString;
-    FocusedPath : WideString;
+    SourceLibPath : String;
+    FocusedPath : String;
     OverwriteStr, RespJson : String;
     Workspace : IWorkspace;
     Doc : IDocument;
@@ -7328,7 +7328,7 @@ Begin
     { JSON build calls a String helper, but the pattern is cheap insurance.   }
     RespJson :=
         '{"success":true' +
-        ',"source_library":"' + EscapeJsonWide(SourceLibPath) + '"' +
+        ',"source_library":"' + EscapeJsonString(SourceLibPath) + '"' +
         ',"dest_library":"' + EscapeJsonString(DestLibPath) + '"' +
         ',"source":"' + EscapeJsonString(SourceName) + '"' +
         ',"new_name":"' + EscapeJsonString(NewName) + '"' +
@@ -7358,7 +7358,7 @@ Var
     PinsStr, Op, Remaining : String;
     OpCount, Added, Failed : Integer;
     Designator, ElecType, HiddenStr, OwnerStr : String;
-    Name : WideString;
+    Name : String;
     OuterStr, InnerStr, ShowNameStr, ShowDesigStr : String;
     X, Y, Length, Rotation, OwnerPartId : Integer;
     Hidden, OwnerExplicit, ViaLib : Boolean;
@@ -7747,8 +7747,8 @@ End;
 Function Lib_AuditStyles(Params : String; RequestId : String) : String;
 Var
     FlagStr : String;
-    LibPath : WideString;
-    FocusedPath : WideString;
+    LibPath : String;
+    FocusedPath : String;
     ExpFontIdStr, ExpColorStr : String;
     HasExpFontId, HasExpColor, FilterApplied : Boolean;
     WithComment, WithParameters, WithPins : Boolean;
@@ -7951,8 +7951,8 @@ Begin
                             PinLabelHidden := False;
                             Try PinLabelHidden := (Not Pin.ShowName) And (Not Pin.ShowDesignator); Except End;
 
-                            PinList := PinList + '{"designator":"' + EscapeJsonWide(Pin.Designator) +
-                                '","name":"' + EscapeJsonWide(Pin.Name) +
+                            PinList := PinList + '{"designator":"' + EscapeJsonString(Pin.Designator) +
+                                '","name":"' + EscapeJsonString(Pin.Name) +
                                 '","electrical_type":"' + ElecStr +
                                 '","x":' + IntToStr(CoordToMils(Pin.Location.X)) +
                                 ',"y":' + IntToStr(CoordToMils(Pin.Location.Y)) +
@@ -8003,8 +8003,8 @@ Begin
                         Begin
                             If Not FirstStyle Then StyleList := StyleList + ',';
                             FirstStyle := False;
-                            StyleList := StyleList + '{"name":"' + EscapeJsonWide(Param.Name) +
-                                '","value":"' + EscapeJsonWide(Param.Text) +
+                            StyleList := StyleList + '{"name":"' + EscapeJsonString(Param.Name) +
+                                '","value":"' + EscapeJsonString(Param.Text) +
                                 '","style":' + BuildLabelStyleJson(Param, False) + '}';
                             Param := ParamIter.NextSchObject;
                         End;
@@ -8029,7 +8029,7 @@ Begin
     End;
 
     Result := BuildSuccessResponse(RequestId,
-        '{"library_path":"' + EscapeJsonWide(LibPath) + '"' +
+        '{"library_path":"' + EscapeJsonString(LibPath) + '"' +
         ',"count":' + IntToStr(Count) +
         ',"mismatch_count":' + IntToStr(MismatchCount) +
         ',"limit":' + IntToStr(Limit) +
@@ -8157,8 +8157,8 @@ End;
 Function Lib_SetLabelFormat(Params : String; RequestId : String) : String;
 Var
     Target, CompName, FlagStr : String;
-    LibPath : WideString;
-    FocusedPath : WideString;
+    LibPath : String;
+    FocusedPath : String;
     HasFontId, HasColor, HasIsHidden, HasOrientation, HasJustification : Boolean;
     NewFontId, NewColor, NewOrientation, NewJustification : Integer;
     NewIsHidden, OnlyMismatched, Found : Boolean;
@@ -8335,7 +8335,7 @@ Begin
     Try SchLib.GraphicallyInvalidate; Except End;
 
     Result := BuildSuccessResponse(RequestId,
-        '{"library_path":"' + EscapeJsonWide(LibPath) + '"' +
+        '{"library_path":"' + EscapeJsonString(LibPath) + '"' +
         ',"target":"' + EscapeJsonString(Target) + '"' +
         ',"scope":"' + EscapeJsonString(Scope) + '"' +
         ',"total":' + IntToStr(Total) +
@@ -8452,8 +8452,8 @@ End;
 Function Lib_SetLabelFormats(Params : String; RequestId : String) : String;
 Var
     CompName, FlagStr : String;
-    LibPath : WideString;
-    FocusedPath : WideString;
+    LibPath : String;
+    FocusedPath : String;
     OpsStr, OpStr, Remaining, CurCompName, Target : String;
     OnlyMismatched : Boolean;
     Workspace : IWorkspace;
@@ -8673,7 +8673,7 @@ Begin
         { DelphiScript last-arg clobber bug only bites on String returns      }
         { with a String arg, but the pattern is cheap insurance.              }
         RespJson :=
-            '{"library_path":"' + EscapeJsonWide(LibPath) + '"' +
+            '{"library_path":"' + EscapeJsonString(LibPath) + '"' +
             ',"scope":"' + EscapeJsonString(Scope) + '"' +
             ',"total":' + IntToStr(Total) +
             ',"limit":' + IntToStr(Limit) +
@@ -8714,7 +8714,7 @@ End;
 Function Lib_ExtractIntLib(Params : String; RequestId : String) : String;
 Var
     IntLibPath, BaseName, ExtractDir : String;
-    ParentDir : WideString;
+    ParentDir : String;
     SchLibPath, PcbLibPath : String;
     FoundSch, FoundPcb : Boolean;
     Workspace : IWorkspace;
@@ -9265,7 +9265,7 @@ End;
 {..............................................................................}
 Function Lib_InstallLibrary(Params : String; RequestId : String) : String;
 Var
-    Path : WideString;
+    Path : String;
     Ok : Boolean;
 Begin
     Path := ExtractJsonValue(Params, 'library_path');
@@ -9286,12 +9286,12 @@ Begin
     Except End;
     Result := BuildSuccessResponse(RequestId,
         '{"installed":' + BoolToJsonStr(Ok) + ',"library_path":"'
-        + EscapeJsonWide(Path) + '"}');
+        + EscapeJsonString(Path) + '"}');
 End;
 
 Function Lib_UninstallLibrary(Params : String; RequestId : String) : String;
 Var
-    Path : WideString;
+    Path : String;
     Ok : Boolean;
 Begin
     Path := ExtractJsonValue(Params, 'library_path');
@@ -9312,7 +9312,7 @@ Begin
     Except End;
     Result := BuildSuccessResponse(RequestId,
         '{"uninstalled":' + BoolToJsonStr(Ok) + ',"library_path":"'
-        + EscapeJsonWide(Path) + '"}');
+        + EscapeJsonString(Path) + '"}');
 End;
 
 {..............................................................................}
@@ -9897,8 +9897,8 @@ End;
 Function Lib_DeleteComponent(Params : String; RequestId : String) : String;
 Var
     CompName, RespJson : String;
-    LibPath : WideString;
-    FocusedPath : WideString;
+    LibPath : String;
+    FocusedPath : String;
     ResErrCode, ResErrMsg : String;
     Workspace : IWorkspace;
     Doc : IDocument;
@@ -9958,7 +9958,7 @@ Begin
     MarkLibDirty(SchLib);
 
     RespJson :=
-        '{"success":true,"library_path":"' + EscapeJsonWide(LibPath) + '"' +
+        '{"success":true,"library_path":"' + EscapeJsonString(LibPath) + '"' +
         ',"deleted":"' + EscapeJsonString(CompName) + '"}';
     Result := BuildSuccessResponse(RequestId, RespJson);
 End;
@@ -9976,8 +9976,8 @@ End;
 Function Lib_RenameComponent(Params : String; RequestId : String) : String;
 Var
     OldName, NewName, RespJson : String;
-    LibPath : WideString;
-    FocusedPath : WideString;
+    LibPath : String;
+    FocusedPath : String;
     ResErrCode, ResErrMsg : String;
     Workspace : IWorkspace;
     Doc : IDocument;
@@ -10092,7 +10092,7 @@ Begin
     End;
 
     RespJson :=
-        '{"success":true,"library_path":"' + EscapeJsonWide(LibPath) + '"' +
+        '{"success":true,"library_path":"' + EscapeJsonString(LibPath) + '"' +
         ',"old_name":"' + EscapeJsonString(OldName) + '"' +
         ',"new_name":"' + EscapeJsonString(NewName) + '"' +
         ',"verified":true}';
@@ -10108,8 +10108,8 @@ End;
 Function Lib_DeleteFootprint(Params : String; RequestId : String) : String;
 Var
     FpWanted, FpName, RespJson : String;
-    LibPath : WideString;
-    FocusedPath : WideString;
+    LibPath : String;
+    FocusedPath : String;
     Workspace : IWorkspace;
     Doc : IDocument;
     PcbLib : IPCB_Library;
@@ -10193,8 +10193,8 @@ Begin
       footprint still there with an unchanged timestamp. The docstring is
       not enough: the reply is what a caller reads. }
     RespJson :=
-        '{"success":true,"library_path":"' + EscapeJsonWide(LibPath) + '"' +
-        ',"deleted":"' + EscapeJsonWide(FpWanted) + '"' +
+        '{"success":true,"library_path":"' + EscapeJsonString(LibPath) + '"' +
+        ',"deleted":"' + EscapeJsonString(FpWanted) + '"' +
         ',"written_to_disk":false,"pending_save":true' +
         ',"note":"removed in memory and the library marked dirty. The file '
         + 'still contains it until app_save_all or proj_save flushes."}';
@@ -10210,7 +10210,7 @@ End;
 Function Lib_RemoveModel(Params : String; RequestId : String) : String;
 Var
     CompName, ModelName, KeepStr, RespJson, CurName : String;
-    LibPath : WideString;
+    LibPath : String;
     KeepOne : Boolean;
     SchLib : ISch_Lib;
     Component : ISch_Component;
@@ -10278,7 +10278,7 @@ Begin
     SchServer.ProcessControl.PostProcess(SchLib, 'Remove model');
     MarkLibDirty(SchLib);
 
-    RespJson := '{"success":true,"library_path":"' + EscapeJsonWide(LibPath) + '"'
+    RespJson := '{"success":true,"library_path":"' + EscapeJsonString(LibPath) + '"'
         + ',"component":"' + EscapeJsonString(CompName) + '"'
         + ',"model_name":"' + EscapeJsonString(ModelName) + '"'
         + ',"removed":' + IntToStr(Removed)
@@ -10292,8 +10292,8 @@ End;
 Function Lib_RenameFootprint(Params : String; RequestId : String) : String;
 Var
     FpName, NewName, CurName, RespJson : String;
-    LibPath : WideString;
-    FocusedPath : WideString;
+    LibPath : String;
+    FocusedPath : String;
     Workspace : IWorkspace;
     Doc : IDocument;
     PcbLib : IPCB_Library;
@@ -10374,7 +10374,7 @@ Begin
     Try PcbLib.RefreshView; Except End;
     MarkDocDirtyByPath(PcbLib.Board.FileName);
 
-    RespJson := '{"success":true,"library_path":"' + EscapeJsonWide(LibPath) + '"'
+    RespJson := '{"success":true,"library_path":"' + EscapeJsonString(LibPath) + '"'
         + ',"footprint":"' + EscapeJsonString(FpName) + '"'
         + ',"new_name":"' + EscapeJsonString(NewName) + '"}';
     Result := BuildSuccessResponse(RequestId, RespJson);
@@ -10424,7 +10424,7 @@ End;
 Function Lib_SetModelName(Params : String; RequestId : String) : String;
 Var
     CompName, NewName, OldName, CurName, RespJson : String;
-    LibPath : WideString;
+    LibPath : String;
     SchLib : ISch_Lib;
     Component : ISch_Component;
     ImplIter : ISch_Iterator;
@@ -10490,7 +10490,7 @@ Begin
     SchServer.ProcessControl.PostProcess(SchLib, 'Set model name');
     MarkLibDirty(SchLib);
 
-    RespJson := '{"success":true,"library_path":"' + EscapeJsonWide(LibPath) + '"'
+    RespJson := '{"success":true,"library_path":"' + EscapeJsonString(LibPath) + '"'
         + ',"component":"' + EscapeJsonString(CompName) + '"'
         + ',"new_model_name":"' + EscapeJsonString(NewName) + '"}';
     Result := BuildSuccessResponse(RequestId, RespJson);
@@ -10509,7 +10509,7 @@ End;
 Function Lib_NormalizeImplementations(Params : String; RequestId : String) : String;
 Var
     RenameMap, DedupeStr, RespJson : String;
-    LibPath : WideString;
+    LibPath : String;
     DedupeOnly, IsCur, Cur, RemovedOne : Boolean;
     SchLib : ISch_Lib;
     CompIter, ImplIter, ScanIter : ISch_Iterator;
@@ -10728,7 +10728,7 @@ Begin
         CompNames.Free;
     End;
 
-    RespJson := '{"success":true,"library_path":"' + EscapeJsonWide(LibPath) + '"'
+    RespJson := '{"success":true,"library_path":"' + EscapeJsonString(LibPath) + '"'
         + ',"components_touched":' + IntToStr(CompsTouched)
         + ',"duplicates_removed":' + IntToStr(DupsRemoved)
         + ',"sources_cleared":' + IntToStr(SourcesCleared)
@@ -10750,7 +10750,7 @@ End;
 Function Lib_SetModelSource(Params : String; RequestId : String) : String;
 Var
     CompName, SourceLib, ModelName, UseLibStr, RespJson, CurName, MT : String;
-    LibPath : WideString;
+    LibPath : String;
     SchLib : ISch_Lib;
     Component : ISch_Component;
     ImplIter : ISch_Iterator;
@@ -10836,8 +10836,8 @@ Var
     SeenPrims : TStringList;
     PrimAddr : String;
     FpWanted, FpName, FpDescr, PrimsJson, RespJson, TxtVal : String;
-    LibPath : WideString;
-    FocusedPath : WideString;
+    LibPath : String;
+    FocusedPath : String;
     Workspace : IWorkspace;
     Doc : IDocument;
     PcbLib : IPCB_Library;
@@ -10959,7 +10959,7 @@ Begin
     End;
     PrimsJson := PrimsJson + ']';
 
-    RespJson := '{"success":true,"library_path":"' + EscapeJsonWide(LibPath) + '"'
+    RespJson := '{"success":true,"library_path":"' + EscapeJsonString(LibPath) + '"'
         + ',"footprint":"' + EscapeJsonString(FpName) + '"'
         + ',"description":"' + EscapeJsonString(FpDescr) + '"'
         + ',"height_mils":' + IntToStr(HeightMils)
@@ -10981,8 +10981,8 @@ End;
 Function Lib_MoveComponents(Params : String; RequestId : String) : String;
 Var
     SourcePath, NamesStr, Remaining, OverwriteStr, DeleteStr, RespJson : String;
-    DestPath : WideString;
-    Name : WideString;
+    DestPath : String;
+    Name : String;
     Overwrite, DeleteFromSource : Boolean;
     SourceLib, DestLib : ISch_Lib;
     SourceComp, NewComp, Existing : ISch_Component;
@@ -11089,7 +11089,7 @@ Begin
 
     RespJson := '{"success":true'
         + ',"source_library":"' + EscapeJsonString(SourcePath) + '"'
-        + ',"dest_library":"' + EscapeJsonWide(DestPath) + '"'
+        + ',"dest_library":"' + EscapeJsonString(DestPath) + '"'
         + ',"moved":' + IntToStr(Moved)
         + ',"skipped":' + IntToStr(Skipped)
         + ',"failed":' + IntToStr(Failed) + '}';
@@ -11163,8 +11163,8 @@ End;
 Function Lib_MoveFootprints(Params : String; RequestId : String) : String;
 Var
     SourcePath, NamesStr, Remaining, OverwriteStr, DeleteStr, RespJson, FpName : String;
-    DestPath : WideString;
-    Name : WideString;
+    DestPath : String;
+    Name : String;
     Overwrite, DeleteFromSource : Boolean;
     SourceLib, DestLib : IPCB_Library;
     Footprint, NewFP, Existing, Fp : IPCB_LibComponent;
@@ -11264,7 +11264,7 @@ Begin
 
     RespJson := '{"success":true'
         + ',"source_library":"' + EscapeJsonString(SourcePath) + '"'
-        + ',"dest_library":"' + EscapeJsonWide(DestPath) + '"'
+        + ',"dest_library":"' + EscapeJsonString(DestPath) + '"'
         + ',"moved":' + IntToStr(Moved)
         + ',"skipped":' + IntToStr(Skipped)
         + ',"failed":' + IntToStr(Failed) + '}';
@@ -11281,7 +11281,7 @@ End;
 Function Lib_CopyFootprint(Params : String; RequestId : String) : String;
 Var
     DestLibPath, SourceName, NewName, OverwriteStr, RespJson, FpName : String;
-    SourceLibPath : WideString;
+    SourceLibPath : String;
     Overwrite, SameLib : Boolean;
     SourceLib, DestLib : IPCB_Library;
     Footprint, NewFP, Existing, Fp : IPCB_LibComponent;
@@ -11385,7 +11385,7 @@ Begin
     MarkDocDirtyByPath(DestLib.Board.FileName);
 
     RespJson := '{"success":true'
-        + ',"source_library":"' + EscapeJsonWide(SourceLibPath) + '"'
+        + ',"source_library":"' + EscapeJsonString(SourceLibPath) + '"'
         + ',"dest_library":"' + EscapeJsonString(DestLibPath) + '"'
         + ',"source":"' + EscapeJsonString(SourceName) + '"'
         + ',"new_name":"' + EscapeJsonString(NewName) + '"'
@@ -11464,8 +11464,8 @@ Var
     SeenPads : TStringList;
     PadAddr : String;
     FpWanted, FpName, FpDescr : String;
-    LibPath : WideString;
-    FocusedPath : WideString;
+    LibPath : String;
+    FocusedPath : String;
     ShapeStr, HoleStr, LayerStr, PadsJson, RespJson, ExpSrc : String;
     Workspace : IWorkspace;
     Doc : IDocument;
@@ -11723,7 +11723,7 @@ Begin
     RespJson :=
         '{"name":"' + EscapeJsonString(FpName) + '"' +
         ',"description":"' + EscapeJsonString(FpDescr) + '"' +
-        ',"library_path":"' + EscapeJsonWide(LibPath) + '"' +
+        ',"library_path":"' + EscapeJsonString(LibPath) + '"' +
         ',"pad_count":' + IntToStr(Count) +
         ',"pads":' + PadsJson + '}';
     Result := BuildSuccessResponse(RequestId, RespJson);
@@ -12502,7 +12502,7 @@ End;
 Function Lib_ClearSourceLibrary(Params : String; RequestId : String) : String;
 Var
     NamesCsv, FlagStr, Nm, LibRef : String;
-    LibPath : WideString;
+    LibPath : String;
     SchLib : ISch_Lib;
     CompIter : ISch_Iterator;
     Component : ISch_Component;
@@ -12609,7 +12609,7 @@ Begin
     End;
 
     Result := BuildSuccessResponse(RequestId,
-        '{"library_path":"' + EscapeJsonWide(LibPath) + '"' +
+        '{"library_path":"' + EscapeJsonString(LibPath) + '"' +
         ',"total":' + IntToStr(Total) +
         ',"cleared_source_library":' + IntToStr(ClearedSrc) +
         ',"cleared_target_file_name":' + IntToStr(ClearedTgt) +
@@ -13465,8 +13465,8 @@ End;
 Function Lib_DeleteFootprintPrimitives(Params : String; RequestId : String) : String;
 Var
     FpWanted, FpName, ObjTypeStr, LayerStr : String;
-    LibPath : WideString;
-    FocusedPath : WideString;
+    LibPath : String;
+    FocusedPath : String;
     ConfirmStr, RemovedJson : String;
     Workspace : IWorkspace;
     Doc : IDocument;
@@ -13752,7 +13752,7 @@ Begin
     End;
 
     Result := BuildSuccessResponse(RequestId,
-        '{"library":"' + EscapeJsonWide(LibPath) + '",'
+        '{"library":"' + EscapeJsonString(LibPath) + '",'
         + '"footprint":"' + EscapeJsonString(FpWanted) + '",'
         + '"removed":' + IntToStr(Removed) + ','
         + '"examined":' + IntToStr(Examined) + ','
@@ -14553,8 +14553,8 @@ End;
 Function Lib_SetMechLayers(Params : String; RequestId : String) : String;
 Var
     OpsStr : String;
-    LibPath : WideString;
-    FocusedPath : WideString;
+    LibPath : String;
+    FocusedPath : String;
     Workspace : IWorkspace;
     Doc : IDocument;
     PcbLib : IPCB_Library;

@@ -88,8 +88,8 @@ Var
     Doc : IDocument;
     I, J : Integer;
     Data, DocInfo, Kind, LoadedStr, ModifiedStr : String;
-    FileName : WideString;
-    FullPath : WideString;
+    FileName : String;
+    FullPath : String;
     FirstItem, IsLoaded : Boolean;
 Begin
     Workspace := GetWorkspace;
@@ -138,8 +138,8 @@ Begin
                         If DocIsModified(FullPath) Then ModifiedStr := 'true'
                         Else ModifiedStr := 'false';
 
-                        DocInfo := '{"file_name":"' + EscapeJsonWide(ExtractFileName(FileName)) + '"';
-                        DocInfo := DocInfo + ',"file_path":"' + EscapeJsonWide(FullPath) + '"';
+                        DocInfo := '{"file_name":"' + EscapeJsonString(ExtractFileName(FileName)) + '"';
+                        DocInfo := DocInfo + ',"file_path":"' + EscapeJsonString(FullPath) + '"';
                         DocInfo := DocInfo + ',"document_kind":"' + EscapeJsonString(Kind) + '"';
                         DocInfo := DocInfo + ',"loaded":' + LoadedStr;
                         DocInfo := DocInfo + ',"modified":' + ModifiedStr + '}';
@@ -160,7 +160,7 @@ Var
     SchDoc : ISch_Document;
     Board : IPCB_Board;
     Data : String;
-    FileName : WideString;
+    FileName : String;
 Begin
     Data := '';
     Workspace := GetWorkspace;
@@ -170,9 +170,9 @@ Begin
         If Doc <> Nil Then
         Begin
             FileName := DocFullPath(Doc);
-            Data := '{"file_name":"' + EscapeJsonWide(ExtractFileName(FileName)) + '"';
-            Data := Data + ',"file_path":"' + EscapeJsonWide(FileName) + '"';
-            Data := Data + ',"document_kind":"' + EscapeJsonWide(Doc.DM_DocumentKind) + '"';
+            Data := '{"file_name":"' + EscapeJsonString(ExtractFileName(FileName)) + '"';
+            Data := Data + ',"file_path":"' + EscapeJsonString(FileName) + '"';
+            Data := Data + ',"document_kind":"' + EscapeJsonString(Doc.DM_DocumentKind) + '"';
             Data := Data + ',"modified":' + BoolToJsonStr(DocIsModified(FileName)) + '}';
         End;
     End;
@@ -189,8 +189,8 @@ Begin
         If SchDoc <> Nil Then
         Begin
             FileName := SchDoc.DocumentName;
-            Data := '{"file_name":"' + EscapeJsonWide(ExtractFileName(FileName)) + '"';
-            Data := Data + ',"file_path":"' + EscapeJsonWide(FileName) + '"';
+            Data := '{"file_name":"' + EscapeJsonString(ExtractFileName(FileName)) + '"';
+            Data := Data + ',"file_path":"' + EscapeJsonString(FileName) + '"';
             Data := Data + ',"document_kind":"SCH"';
             Data := Data + ',"modified":' + BoolToJsonStr(DocIsModified(FileName)) + '}';
         End;
@@ -202,8 +202,8 @@ Begin
         If Board <> Nil Then
         Begin
             FileName := Board.FileName;
-            Data := '{"file_name":"' + EscapeJsonWide(ExtractFileName(FileName)) + '"';
-            Data := Data + ',"file_path":"' + EscapeJsonWide(FileName) + '"';
+            Data := '{"file_name":"' + EscapeJsonString(ExtractFileName(FileName)) + '"';
+            Data := Data + ',"file_path":"' + EscapeJsonString(FileName) + '"';
             Data := Data + ',"document_kind":"PCB"';
             Data := Data + ',"modified":' + BoolToJsonStr(DocIsModified(FileName)) + '}';
         End;
@@ -216,8 +216,8 @@ End;
 Function App_SetActiveDocument(Params : String; RequestId : String) : String;
 Var
     LowerInput, LowerDocPath : String;
-    FilePath : WideString;
-    FullPath : WideString;
+    FilePath : String;
+    FullPath : String;
     ServerDoc : IServerDocument;
     Workspace : IWorkspace;
     Project : IProject;
@@ -589,8 +589,8 @@ End;
 Function App_CreateDocument(Params : String; RequestId : String) : String;
 Var
     DocKind, AddStr : String;
-    FilePath : WideString;
-    DocName : WideString;
+    FilePath : String;
+    DocName : String;
     ServerDoc : IServerDocument;
     Workspace : IWorkspace;
     Project : IProject;
@@ -697,7 +697,7 @@ Begin
 
     Result := BuildSuccessResponse(RequestId,
         '{"success":true,"kind":"' + EscapeJsonString(DocKind) + '"' +
-        ',"file_path":"' + EscapeJsonWide(FilePath) + '"' +
+        ',"file_path":"' + EscapeJsonString(FilePath) + '"' +
         ',"saved":' + BoolToJsonStr(Saved) +
         ',"focused":' + BoolToJsonStr(Focused) +
         ',"added_to_project":' + BoolToJsonStr(Added) + '}');

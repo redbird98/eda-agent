@@ -350,7 +350,7 @@ Var
     Orient : Integer;
     Expected : Integer;
     StyleStr, ExpectedStr, ActualStr : String;
-    SheetPath : WideString;
+    SheetPath : String;
     ItemsJson, EntryJson : String;
     First, IsGround, IsBar : Boolean;
 Begin
@@ -570,7 +570,7 @@ Var
     I, J, K, M, DocCount, Checked, Violations : Integer;
     UsePhysical : Boolean;
     NetsSet, PortNet, LocStr : String;
-    SheetPath : WideString;
+    SheetPath : String;
     ItemsJson, EntryJson : String;
     First : Boolean;
 Begin
@@ -1582,7 +1582,7 @@ Var
     SchComp : ISch_Component;
     I, J, Checked, Violations : Integer;
     Designator, DocKind : String;
-    SheetPath : WideString;
+    SheetPath : String;
     { Pipe-delimited "|des|@sheet" pairs so each occurrence carries its    }
     { sheet for later violation grouping.                                   }
     OccPairs, EntryJson, ItemsJson : String;
@@ -1881,7 +1881,7 @@ Var
     Loc : TLocation;
     I, Checked, Violations, GridMils, XMils, YMils, Dx, Dy : Integer;
     GridStr, Designator, DocKind, ItemsJson, EntryJson : String;
-    SheetName : WideString;
+    SheetName : String;
     First : Boolean;
 Begin
     Workspace := GetWorkspace;
@@ -2947,7 +2947,7 @@ Var
     DocKind : String;
     Total, Bad : Integer;
     ItemsJson, EntryJson : String;
-    SheetName : WideString;
+    SheetName : String;
     First : Boolean;
     LocX, LocY : Integer;
     Embedded : Boolean;
@@ -3333,7 +3333,7 @@ Var
     Obj, Hit : ISch_GraphicalObject;
     NetLbl : ISch_NetLabel;
     DocKind, LabelText : String;
-    SheetName : WideString;
+    SheetName : String;
     Loc : TLocation;
     LX, LY : Integer;
     Tol : Integer;
@@ -3459,7 +3459,7 @@ Var
     Obj, Hit : ISch_GraphicalObject;
     Power : ISch_PowerObject;
     DocKind, NetName : String;
-    SheetName : WideString;
+    SheetName : String;
     Loc : TLocation;
     LX, LY, Tol : Integer;
     Total, Bad : Integer;

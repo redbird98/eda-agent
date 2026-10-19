@@ -531,7 +531,7 @@ Var
     Doc : IDocument;
     ServerDoc : IServerDocument;
     PrevView : IServerDocumentView;
-    Path : WideString;
+    Path : String;
     I, P : Integer;
 Begin
     Result := Nil;
@@ -694,7 +694,7 @@ Var
     Project : IProject;
     Doc : IDocument;
     Candidates, OnePath : String;
-    Path : WideString;
+    Path : String;
     I, P, Found : Integer;
 Begin
     Result := Nil;
