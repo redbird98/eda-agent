@@ -133,3 +133,20 @@ def test_polygon_rows_carry_the_poured_copper_beside_the_outline():
     assert '"copper_area_mm2":' in body and '"copper_pieces":' in body
     assert '"copper_area_exact":' in body, "an area whose holes could not be read says so"
     assert '"area_mm2":' in body, "the outline's area stays, under its own name"
+
+def test_drc_confirmation_finds_the_ad25_project_outputs_report():
+    """AD25 writes the DRC report into Project Outputs, not beside the board.
+
+    PCB_RunDRC used ChangeFileExt(Board.FileName, '.DRC') for both the
+    before and after age reads, so on AD25 the run was never confirmed
+    even when it rewrote its report. The confirmation now checks every
+    spelling this build has been seen to use and returns the path that
+    won.
+    """
+    body = _routine("PCB.pas", "DrcNewestReport")
+    assert "Design Rule Check - " in body
+    proj = _routine("PCB.pas", "DrcProjectOutputDir")
+    assert "'Project Outputs for '" in proj
+    assert "Project.DM_ProjectFullPath" in proj
+    run = _routine("PCB.pas", "PCB_RunDRC")
+    assert run.count("DrcNewestReport(Board, ReportPath)") == 2

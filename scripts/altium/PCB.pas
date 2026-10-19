@@ -1280,6 +1280,84 @@ Begin
 End;
 
 {..............................................................................}
+{ DrcProjectOutputDir - the folder AD25 writes the DRC report into.           }
+{..............................................................................}
+
+Function DrcProjectOutputDir(Board : IPCB_Board) : String;
+Var
+    Workspace : IWorkspace;
+    Project : IProject;
+    Doc : IDocument;
+    I, J : Integer;
+    ProjPath : String;
+Begin
+    Result := '';
+    If Board = Nil Then Exit;
+    Workspace := Nil;
+    Try Workspace := GetWorkspace; Except Workspace := Nil; End;
+    If Workspace = Nil Then Exit;
+    For I := 0 To Workspace.DM_ProjectCount - 1 Do
+    Begin
+        Project := Workspace.DM_Projects(I);
+        If Project = Nil Then Continue;
+        For J := 0 To Project.DM_LogicalDocumentCount - 1 Do
+        Begin
+            Doc := Project.DM_LogicalDocuments(J);
+            If Doc = Nil Then Continue;
+            If UpperCase(Doc.DM_FullPath) = UpperCase(Board.FileName) Then
+            Begin
+                ProjPath := '';
+                Try ProjPath := Project.DM_ProjectFullPath; Except End;
+                If ProjPath <> '' Then
+                    Result := ExtractFilePath(Board.FileName) + 'Project Outputs for '
+                        + ChangeFileExt(ExtractFileName(ProjPath), '');
+                Exit;
+            End;
+        End;
+    End;
+End;
+
+{..............................................................................}
+{ DrcNewestReport - age of the freshest DRC report this Altium may write.     }
+{                                                                              }
+{ AD25 writes "Project Outputs for <project>\Design Rule Check - <board>.drc" }
+{ by default, not "<board>.DRC" beside the board. Check every spelling this   }
+{ build has been seen to use and return the newest; the path that won is      }
+{ returned too, so the reply names the file that was actually examined.       }
+{..............................................................................}
+
+Function DrcNewestReport(Board : IPCB_Board; Var FoundPath : String) : Integer;
+Var
+    BoardBase, OutDir, P : String;
+    Age : Integer;
+Begin
+    Result := -1;
+    FoundPath := '';
+    If Board = Nil Then Exit;
+    BoardBase := ChangeFileExt(ExtractFileName(Board.FileName), '');
+
+    P := ChangeFileExt(Board.FileName, '.DRC');
+    Age := DrcReportAge(P);
+    If Age > Result Then Begin Result := Age; FoundPath := P; End;
+
+    P := ChangeFileExt(Board.FileName, '.drc');
+    Age := DrcReportAge(P);
+    If Age > Result Then Begin Result := Age; FoundPath := P; End;
+
+    OutDir := DrcProjectOutputDir(Board);
+    If OutDir <> '' Then
+    Begin
+        P := OutDir + '\Design Rule Check - ' + BoardBase + '.drc';
+        Age := DrcReportAge(P);
+        If Age > Result Then Begin Result := Age; FoundPath := P; End;
+
+        P := OutDir + '\Design Rule Check - ' + BoardBase + '.DRC';
+        Age := DrcReportAge(P);
+        If Age > Result Then Begin Result := Age; FoundPath := P; End;
+    End;
+End;
+
+{..............................................................................}
 { PCB_RunDRC - Run design rule check, return violation count                  }
 {..............................................................................}
 
@@ -1408,16 +1486,16 @@ Begin
         Exit;
     End;
 
-    { Altium writes a .DRC report beside the board each time the check runs. }
-    { Its file age is read before and after the run: if it changed, the     }
-    { check ran. If the dialog was cancelled the age is unchanged, even when }
-    { a report from an earlier run is sitting there. FileAge gives -1 for a }
-    { missing file, so a report that appears during the call counts too.   }
-    { File ages tick every two seconds, so a run that lands in the same     }
-    { tick as the last one reads as not confirmed. That errs the safe way.  }
-    ReportPath := '';
-    Try ReportPath := ChangeFileExt(Board.FileName, '.DRC'); Except End;
-    ReportBefore := DrcReportAge(ReportPath);
+    { Altium writes a .DRC report on each run. AD25 puts it in              }
+    { "Project Outputs for <project>\Design Rule Check - <board>.drc";     }
+    { older builds put "<board>.DRC" beside the board. Its file age is read  }
+    { before and after the run: if it changed, the check ran. If the dialog  }
+    { was cancelled the age is unchanged, even when a report from an earlier }
+    { run is sitting there. FileAge gives -1 for a missing file, so a report }
+    { that appears during the call counts too. File ages tick every two      }
+    { seconds, so a run that lands in the same tick as the last one reads as }
+    { not confirmed. That errs the safe way.                                }
+    ReportBefore := DrcNewestReport(Board, ReportPath);
 
     { RunProcess('PCB:DesignRuleCheck') acts on the CURRENT PCB. The     }
     { first DRC of a session opens its report document, which takes the  }
@@ -1429,7 +1507,7 @@ Begin
     ResetParameters;
     RunProcess('PCB:DesignRuleCheck');
 
-    ReportAfter := DrcReportAge(ReportPath);
+    ReportAfter := DrcNewestReport(Board, ReportPath);
     ReportFresh := (ReportAfter >= 0) And (ReportAfter > ReportBefore);
 
     // Count violations by iterating
