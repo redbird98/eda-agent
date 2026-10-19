@@ -1,18 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
-"""Client design data must never reach this repository.
+"""No absolute path into a user's own storage may reach this repository.
 
-The work is done against real, NDA-covered client projects, so every
-live session handles project names, sheet names, designators and part
-numbers that belong to someone else. Writing one into a comment is a
-single keystroke and nothing downstream notices.
+A path copied in from a working session names somebody's folders and
+resolves on one machine only. Writing one into a comment is a single
+keystroke and nothing downstream notices.
 
-MEASURED: it happened. A handler comment recorded a precondition as
-"with <a client sheet> focused", and six scratchpad probe files carried
-the full absolute path to a client project. None of it was caught by
-anything.
-
-THIS GUARD NAMES NO CLIENT. A test that lists forbidden strings puts
+THIS GUARD NAMES NO PROJECT. A test that lists forbidden strings puts
 those strings in the repository permanently and matches itself, which
 is the trap the em-dash guard already documents. It matches the SHAPE
 of a leak instead: an absolute path into somebody's working directory.
@@ -43,7 +37,7 @@ _SUFFIXES = {".py", ".pas", ".md", ".json", ".js", ".ts", ".toml"}
 _SKIP_PARTS = {"__pycache__", "node_modules", ".git", "dist"}
 
 #: An absolute Windows path reaching into a user's own storage. A
-#: client project path always looks like this, and nothing this repo
+#: pasted project path always looks like this, and nothing this repo
 #: legitimately ships does.
 _USER_PATH = re.compile(
     r"[A-Za-z]:\\{1,2}(?:Dropbox|Users|OneDrive)\\{1,2}[A-Za-z0-9_. -]+",
@@ -93,7 +87,7 @@ def offenders():
 
 
 def test_no_absolute_path_into_a_users_own_storage(offenders):
-    """The shape a copied-in client path takes.
+    """The shape a copied-in path takes.
 
     Generic examples belong in the docs; a path that resolves on one
     machine and names a real project does not.
@@ -107,8 +101,8 @@ def test_no_absolute_path_into_a_users_own_storage(offenders):
 def test_the_guard_covers_the_files_that_get_committed():
     """A guard over an empty file set passes for the wrong reason.
 
-    Untracked files are in scope on purpose: the leak that prompted
-    this would have arrived in a brand new file.
+    Untracked files are in scope on purpose: a pasted path often
+    arrives in a brand new file.
     """
     files = list(_owned_files())
     assert len(files) > 200, (
@@ -123,8 +117,8 @@ def test_the_pattern_actually_matches_a_leak():
     """Prove the detector fires, using a fabricated path.
 
     Without this the guard passes identically whether the pattern works
-    or matches nothing at all, which is the failure mode that let the
-    real leak through in the first place.
+    or matches nothing at all, and a broken pattern lets every path
+    through unnoticed.
     """
     # ASSEMBLED, never written out. Caught by this file's own last
     # test on the first run: a literal probe path is itself a match, so
@@ -149,7 +143,7 @@ def test_synthetic_placeholders_are_still_allowed():
         sep.join(["C:", "Users", "USERNAME", "Documents"])))
 
 
-def test_this_guard_names_no_client():
+def test_this_guard_names_no_project():
     """The self-match trap, asserted rather than assumed.
 
     A deny-list guard has to contain the very strings it forbids, so it

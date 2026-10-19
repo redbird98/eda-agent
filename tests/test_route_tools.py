@@ -87,6 +87,10 @@ def test_register_exposes_route_tools(tools):
     assert set(tools) == {
         "route_plan",
         "route_plan_repairs",
+        "pcb_autoroute",
+        "pcb_autoroute_apply",
+        "pcb_autoplace",
+        "pcb_autoplace_apply",
     }
 
 

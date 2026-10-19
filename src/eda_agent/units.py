@@ -15,6 +15,9 @@ do not belong here.
 
 from __future__ import annotations
 
+import math
+from typing import Any
+
 #: Millimetres per mil. The definition of the mil: one thousandth of an
 #: inch, and the inch is defined as exactly 25.4 mm.
 MM_PER_MIL: float = 0.0254
@@ -38,3 +41,43 @@ MILS_PER_MM: float = 1.0 / MM_PER_MIL
 #: agreed, by luck, which is the same position the mils-to-mm factor
 #: was in before task #43.
 OZ_TO_MILS: float = 1.378
+
+
+#: The two units the authoring tools take a length in. "mil" is the
+#: default everywhere; "mils" is accepted for it.
+LENGTH_UNITS = ("mil", "mm")
+
+
+def normalise_units(units: str) -> str | None:
+    """``"mil"`` or ``"mm"``, or None for anything else."""
+    u = str(units or "mil").strip().lower()
+    if u == "mils":
+        u = "mil"
+    return u if u in LENGTH_UNITS else None
+
+
+def length_in(units: str, mils: float) -> float:
+    """A length given in mils, expressed in ``units``.
+
+    For defaults: a pad defaulting to 60 mils must not become a 60 mm pad
+    when the caller works in millimetres.
+    """
+    return mils * MM_PER_MIL if normalise_units(units) == "mm" else mils
+
+
+def format_length(value: Any) -> str:
+    """A length for the bridge wire: fixed point, never an exponent.
+
+    The script's float parser checks its input before converting it and
+    rejects an exponent, so ``1e-07`` would quietly fall back to the
+    handler's default. Whole numbers go as integers, so a payload of
+    whole mils reads exactly as it did when the tools took integers; the
+    rest go to six decimal places, finer than Altium's internal unit in
+    mils or millimetres.
+    """
+    v = float(value)
+    if not math.isfinite(v):
+        raise ValueError(f"not a finite length: {value!r}")
+    if v.is_integer():
+        return str(int(v))
+    return f"{v:.6f}".rstrip("0").rstrip(".")

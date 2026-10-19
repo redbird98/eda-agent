@@ -1016,27 +1016,12 @@ def _place_net_labels(
                     f"bulk stub-wires for sheet {sheet_name} failed: {exc}"
                 )
 
-            # Emit junction dots wherever 3+ wires meet or a wire ends
-            # mid-segment of another wire. Altium's auto-junction-on-
-            # compile sometimes misses these, particularly when wires
-            # are scripted-placed rather than user-drawn. Explicit
-            # eJunction objects give the schematic the conventional
-            # dot at every T-junction.
-            junctions = _detect_junctions(pending_wires)
-            if junctions:
-                junctions_payload = "~~".join(
-                    f"x={jx};y={jy}" for (jx, jy) in junctions
-                )
-                try:
-                    bridge.send_command(
-                        "generic.place_junctions",
-                        {"junctions": junctions_payload},
-                        timeout=_LABEL_TIMEOUT_S * max(1, len(junctions) // 8),
-                    )
-                except Exception as exc:
-                    result.notes.append(
-                        f"bulk junctions for sheet {sheet_name} failed: {exc}"
-                    )
+            # No junction objects. Altium draws an AUTO junction (blue)
+            # wherever 3+ wires meet or a wire ends on another, and it
+            # does so for wires placed by script, in either order,
+            # measured live on AD 26.10.1.6. An explicit one is a MANUAL
+            # junction, dark red, on top of the blue one. See the AUTO
+            # JUNCTIONS note in emitter.py.
 
         if pending_labels:
             labels_payload = "~~".join(

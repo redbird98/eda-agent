@@ -38,6 +38,8 @@ from .eda import register_eda_tools
 from .calc import register_calc_tools
 from .plan import register_plan_tools
 from .parts import register_parts_tools
+from .live import register_live_tools
+from .footprint import register_footprint_tools
 
 # Recognised backends. "altium" is the default and stays the full historical
 # suite; "kicad" exposes only the KiCad-native tools; "easyeda" drives
@@ -108,6 +110,7 @@ OFFLINE_DESIGN_TOOLS = (
     "design_plan_hierarchy",
     "design_review_file",
     "design_session_log",
+    "design_session_report",
     "design_session_resume",
     "design_session_start",
     "design_session_status",
@@ -290,6 +293,12 @@ def _register_full(mcp, backend: str = DEFAULT_BACKEND) -> str:
     # Part sourcing is EDA-agnostic: the providers answer about parts, not
     # about Altium or KiCad, so both backends get them.
     register_parts_tools(mcp)
+    # The live layout view draws the engine's board model and the decision
+    # log, neither of which belongs to one EDA tool, so every backend gets it.
+    register_live_tools(mcp)
+    # Datasheet fetch and the package checks work on the package, not on an
+    # editor, so every backend gets them.
+    register_footprint_tools(mcp)
     return backend
 
 
@@ -314,6 +323,8 @@ __all__ = [
     "register_uiauto_tools",
     "register_meta_tools",
     "register_parts_tools",
+    "register_live_tools",
+    "register_footprint_tools",
     "register_project_tools",
     "register_library_tools",
     "register_generic_tools",

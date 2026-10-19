@@ -25,7 +25,9 @@ pipeline, because the integrity lives server-side.
 ## The loop
 
 1. `design_session_start(requirement)` opens the durable journal. Keep the
-   returned `session_id`; every later call takes it.
+   returned `session_id`; every later call takes it. Then `design_live_view`
+   so the user can watch the board change, and record each decision with
+   its reason before acting on it (`design_live_note`).
 2. If a project is open or will be modified, checkpoint first so the whole
    run is revertible in one step: `app_checkpoint("before autonomous run")`
    on Altium, `easyeda_checkpoint` on EasyEDA.
@@ -33,11 +35,15 @@ pipeline, because the integrity lives server-side.
    - **proceed / retry**: do the stage using its `suggested_tools` until the
      `exit_gate` is met, then
      `design_session_log(event="stage_result", stage=<stage>, status="ok")`.
+     Where the gate names numbers (placement, routing, pours, verification),
+     measure them with `pcb_layout_audit` and pass the result as `data=`:
+     the harness checks them and sends the stage back if one fails.
      If you cannot finish without the user, log `status="blocked"` with a
      question and stop.
    - **blocked**: put `open_question` to the user; when answered,
      `design_session_log(event="resolved", text=<answer>)` and continue.
-   - **complete**: the 13 stages are done; review outputs with the user.
+   - **complete**: the 13 stages are done; write the design report with
+     `design_session_report` and review outputs with the user.
 4. Checkpoint again before each high-risk mutating stage: `sch_to_pcb`,
    `routing`, `pours_tuning`.
 5. Long engine runs (routing a dense board) can exceed the tool timeout;
@@ -46,6 +52,16 @@ pipeline, because the integrity lives server-side.
 
 Bounded retries: a stage that fails 3 times escalates to a human question
 automatically. Don't loop past it; surface it.
+
+## How the board is laid out
+
+The discipline's "Board layout method" is the standard: floorplan before
+placement (fixed skeleton, critical corridors, sections, one rectangle per
+sub-block in signal-flow order), each block laid out to a pattern, the
+legaliser's moves read rather than accepted, routing in stages (pairs,
+plane fan-out with dog-bones, buses as a whole, then the rest), and one
+small checked step at a time. A scattered placement means the method is
+wrong; no parameter fixes it.
 
 ## Resuming
 

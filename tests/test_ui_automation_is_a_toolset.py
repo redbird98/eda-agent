@@ -143,12 +143,17 @@ def test_a_failed_menu_click_does_not_report_success():
 def test_listing_a_menu_activates_altium_first():
     """The bug that made discovery useless.
 
-    Altium lays its DevExpress bars out on ACTIVATION, so reading the
-    bar without activating fails whenever Altium is not already in the
-    foreground. list_only skipped the activation that click_path did,
-    so it could only succeed in the one case where you do not need to
-    ask what the menus are. MEASURED: it returned "the menu bar is not
-    laid out" even with may_steal_focus set.
+    Listing a menu's contents means OPENING it, which is a real click,
+    and Windows sends a synthesised click to the foreground window
+    rather than to the one it was aimed at. So discovery needs the same
+    activation as invoking. list_only skipped it and could therefore
+    only succeed in the one case where you do not need to ask what the
+    menus are. MEASURED: it returned "the menu bar is not laid out"
+    even with may_steal_focus set.
+
+    Reading the top-level BAR is the weaker case and needs only a
+    restore, measured in ui/menu.bring_to_front. This test is about the
+    popup, which needs the focus.
     """
     assert hasattr(menu, "bring_to_front"), (
         "activation must be a shared step, or the next caller that "
@@ -252,6 +257,9 @@ class _FakeWindows:
     def wait_for_close(self, hwnd, timeout=5.0):
         return True
 
+    def capture(self, hwnd):
+        return next((d for d in self._dialogs if d.hwnd == hwnd), None)
+
 
 @pytest.fixture
 def press(monkeypatch):
@@ -342,7 +350,7 @@ async def test_a_failed_menu_click_never_reaches_the_driver(monkeypatch):
         MenuBarUnavailable = menu.MenuBarUnavailable
 
         @staticmethod
-        def click_path(pid, path):
+        def click_path(pid, path, **kwargs):
             calls.append(("click", path))
             return {"ok": False, "reason": "'Nope' is not on the menu bar",
                     "offered": ["Tools", "Design"]}
@@ -377,7 +385,7 @@ async def test_a_drive_that_stopped_for_a_human_is_not_a_success(
     """An unanswered dialog left on screen is not a completed command."""
     class _Menu:
         @staticmethod
-        def click_path(pid, path):
+        def click_path(pid, path, **kwargs):
             return {"ok": True, "path": path}
 
     class _Driver:
@@ -490,20 +498,85 @@ async def test_validate_may_leave_the_change_order_open(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_a_dismiss_with_another_way_out_is_not_condemned(monkeypatch):
-    """Only the SOLE way out can be judged by the window closing.
+@pytest.mark.parametrize("buttons,caption", [
+    (["OK", "Cancel"], "OK"),
+    (["OK", "Cancel"], "Cancel"),
+    # The field report: a Spanish prompt, pressed three times, each one
+    # reported ok while the same window stayed up until a person came.
+    (["Aceptar", "Cancelar"], "Aceptar"),
+    (["Aceptar", "Cancelar"], "Cancelar"),
+])
+async def test_a_dismiss_that_changed_nothing_fails_whatever_the_buttons(
+        monkeypatch, buttons, caption):
+    """A second button is no excuse when the press had no effect at all.
 
-    With more than one button the dialog may legitimately stay up while
-    something else is chosen, so this must not be treated as a failure
-    on the strength of closure alone.
+    It used to be: only a SOLE button was judged, so an OK beside a
+    Cancel came back ok while the dialog sat there untouched.
     """
-    fake = _StuckWindows([_dialog(["OK", "Cancel"])])
+    fake = _StuckWindows([_dialog(buttons)])
     monkeypatch.setattr(uiauto, "windows", fake)
     monkeypatch.setattr(uiauto, "_altium_pid", lambda: (1234, None))
 
-    out = await _tools()["app_press_dialog_button"]("OK")
+    out = await _tools()["app_press_dialog_button"](caption)
+
+    assert fake.clicked == [caption]
+    assert out["ok"] is False, out
+    assert out["dialog_changed"] is False
+    assert "nothing on it changed" in out["reason"]
+
+
+class _AdvancingWindows(_StuckWindows):
+    """The window stays, but its page moves on, as a wizard's does."""
+
+    def capture(self, hwnd):
+        window = super().capture(hwnd)
+        if window is None or not self.clicked:
+            return window
+        return real_windows.Window(
+            hwnd=window.hwnd, class_name=window.class_name,
+            title=window.title, pid=window.pid,
+            controls=window.controls + [real_windows.Control(
+                hwnd=50, class_name="TLabel", text="Step 2 of 3")])
+
+
+class _PromptingWindows(_StuckWindows):
+    """The press raises a second dialog, a confirmation or an error."""
+
+    def dialogs(self, pid):
+        extra = [_dialog(["Yes", "No"], title="Confirm")] if self.clicked else []
+        for d in extra:
+            d.hwnd = 77
+        return list(self._dialogs) + extra
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("screen", [_AdvancingWindows, _PromptingWindows])
+async def test_a_press_that_moved_the_dialog_on_is_not_condemned(
+        monkeypatch, screen):
+    """The other direction: staying open is fine when something happened."""
+    fake = screen([_dialog(["Next", "Cancel"], title="Wizard")])
+    monkeypatch.setattr(uiauto, "windows", fake)
+    monkeypatch.setattr(uiauto, "_altium_pid", lambda: (1234, None))
+
+    out = await _tools()["app_press_dialog_button"]("Next")
+
+    assert out["ok"] is True, out
+    assert out["dialog_changed"] is True
+    assert out["outcome_verified"] is True
+
+
+@pytest.mark.asyncio
+async def test_an_unrecognised_caption_that_stays_open_is_not_verified(
+        monkeypatch):
+    """No role means no expectation, and no claim of a checked outcome."""
+    fake = _StuckWindows([_dialog(["Refresh", "Close"], title="Messages")])
+    monkeypatch.setattr(uiauto, "windows", fake)
+    monkeypatch.setattr(uiauto, "_altium_pid", lambda: (1234, None))
+
+    out = await _tools()["app_press_dialog_button"]("Refresh")
 
     assert out["ok"] is True
+    assert out["outcome_verified"] is False
 
 
 def test_a_posted_click_aims_at_the_middle_of_the_control():

@@ -49,7 +49,7 @@ def test_reserved_set_matches_memory(lint):
         "Label", "Type", "Class", "Object", "Record", "Array", "Set",
         "String", "File", "Unit", "Function", "Procedure", "Const", "Var",
         "End", "Begin", "If", "Then", "Else", "Goto", "With", "In", "Is",
-        "As", "Of", "Out",
+        "As", "Of", "Out", "Index",
     }
     missing = expected - lint.RESERVED_AS_NAME
     extra = lint.RESERVED_AS_NAME - expected
@@ -116,6 +116,40 @@ def test_reserved_word_caught_in_var_block(lint, kw):
         f"_scan_reserved_in_var_block failed to flag {kw!r} on a Var-block "
         f"declaration. Got findings: {findings}"
     )
+
+
+def test_a_reserved_word_later_in_the_name_list_is_caught(lint):
+    """The declaration that actually failed Altium's compile, 2026-09-24.
+
+    ``Index`` was not first on its line, and the rule used to look only at
+    the first name, so it walked straight past this.
+    """
+    lines = [
+        "Function F : String;\n",
+        "Var\n",
+        "    Index, Emitted, I : Integer;\n",
+        "Begin\n",
+        "End;\n",
+    ]
+    findings = lint._scan_reserved_in_var_block("test.pas", lines)
+    assert [f.line for f in findings] == [3]
+    assert lint.RULE_RESERVED_IDENT.pattern.search(
+        "Procedure F(A, Index : Integer);")
+
+
+def test_casing_does_not_hide_a_reserved_word(lint):
+    """DelphiScript is case-insensitive, so ``index`` fails like ``Index``."""
+    lines = ["Var\n", "    index : Integer;\n", "Begin\n"]
+    assert lint._scan_reserved_in_var_block("test.pas", lines)
+    assert lint.RULE_RESERVED_IDENT.pattern.search("Procedure F(label : String);")
+
+
+def test_names_that_merely_contain_a_reserved_word_are_fine(lint):
+    lines = ["Var\n", "    Idx, IndexOf, ReIndex, Indexed : Integer;\n",
+             "    Labels, StringList : Integer;\n", "Begin\n"]
+    assert not lint._scan_reserved_in_var_block("test.pas", lines)
+    assert not lint.RULE_RESERVED_IDENT.pattern.search(
+        "Procedure F(Idx, Labels : Integer);")
 
 
 def test_safe_identifier_not_caught(lint):

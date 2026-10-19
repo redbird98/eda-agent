@@ -4,6 +4,31 @@
 { Project.pas - Project management functions for the Altium integration bridge                }
 {..............................................................................}
 
+{ FocusedProjectPathIs - is the named project the one tools will default to?  }
+{                                                                             }
+{ Every handler here that takes an optional project_path falls back to        }
+{ DM_FocusedProject, and so does app_create_document when it attaches a new   }
+{ file. Opening or creating a project does NOT make it focused, because       }
+{ Altium's focused project follows the focused document. Callers assumed      }
+{ otherwise, so the create and open replies now state it outright.            }
+Function FocusedProjectPathIs(ProjectPath : String) : Boolean;
+Var
+    Workspace : IWorkspace;
+    Focused : IProject;
+    FocusedPath : String;
+Begin
+    Result := False;
+    If ProjectPath = '' Then Exit;
+    Workspace := GetWorkspace;
+    If Workspace = Nil Then Exit;
+    Focused := Workspace.DM_FocusedProject;
+    If Focused = Nil Then Exit;
+    FocusedPath := '';
+    Try FocusedPath := Focused.DM_ProjectFullPath; Except End;
+    Result := UpperCase(CanonicalPathValue('path', FocusedPath))
+        = UpperCase(CanonicalPathValue('path', ProjectPath));
+End;
+
 Function FindProjectByPath(Workspace : IWorkspace; ProjectPath : String) : IProject;
 Var
     I : Integer;
@@ -89,9 +114,23 @@ Begin
     AddStringParameter('FileName', ProjectPath);
     RunProcess('WorkspaceManager:OpenObject');
 
+    { SAY WHETHER IT IS FOCUSED, because it usually is not, and the next      }
+    { call the caller makes probably assumes it is. Altium's focused project  }
+    { follows the focused DOCUMENT, and a project just created has none, so   }
+    { there is nothing to focus onto and no API to force it.                  }
+    {                                                                          }
+    { Why this matters more than it looks: app_create_document defaults to    }
+    { add_to_project=True and attaches to the FOCUSED project. Create a       }
+    { project, add a document, and the document lands in whatever was open    }
+    { before, which during the live sweep was a client design.                }
     Result := BuildSuccessResponse(RequestId,
         '{"success":true,"project_path":"' + EscapeJsonWide(ProjectPath) +
-        '","saved":true}');
+        '","saved":true,"focused":'
+        + BoolToJsonStr(FocusedProjectPathIs(ProjectPath))
+        + ',"note":"a new project has no documents, so it cannot become the '
+        + 'focused project. Pass project_path explicitly to proj_add_document, '
+        + 'or activate one of its documents first: tools that default to the '
+        + 'focused project will otherwise act on a different one."}');
 End;
 
 Function Proj_Open(Params : String; RequestId : String) : String;
@@ -105,7 +144,244 @@ Begin
     AddStringParameter('FileName', ProjectPath);
     RunProcess('WorkspaceManager:OpenObject');
 
-    Result := BuildSuccessResponse(RequestId, '{"success":true}');
+    { Opening an ALREADY-OPEN project is a no-op that changes no focus, and   }
+    { this used to return a bare success, so a caller could not tell whether  }
+    { the project it named is the one subsequent calls will act on.           }
+    Result := BuildSuccessResponse(RequestId,
+        '{"success":true,"project_path":"' + EscapeJsonString(ProjectPath) + '"'
+        + ',"focused":' + BoolToJsonStr(FocusedProjectPathIs(ProjectPath))
+        + ',"note":"focus follows the active DOCUMENT, not this call. If '
+        + 'focused is false, activate one of the project''s documents with '
+        + 'app_set_active_document before using tools that default to the '
+        + 'focused project."}');
+End;
+
+{..............................................................................}
+{ Unsaved edits of ONE project, for a close that does not save.               }
+{                                                                             }
+{ A close issued while a member is still modified raises Altium's save        }
+{ prompt. RunProcess is synchronous, so the prompt blocks inside the handler, }
+{ the handler blocks the polling loop, and the loop is the only thing that    }
+{ could have answered it: every later call waits until a human clicks.        }
+{ Clearing the modified flag first leaves the close nothing to ask about,     }
+{ and closing a document that reads as clean drops its in-memory edits,       }
+{ which is exactly what save=false asks for.                                  }
+{                                                                             }
+{ SCOPED TO THE PROJECT: the same members SaveProjectMembers writes, and the  }
+{ project file. Never the workspace, which is how a close once reached a      }
+{ client project nobody had named.                                            }
+{..............................................................................}
+
+{ MEASURED 2026-09-13 on AD 26.10.1.6: after a ProcessControl edit the tab    }
+{ showed the sheet as modified while IServerDocument.Modified read False, and }
+{ CloseObject raised its save prompt anyway. A clear gated on that read       }
+{ cleared nothing, so the flag is cleared on every loaded member without      }
+{ reading it. Whether clearing it stops the prompt is still unmeasured, and   }
+{ proj_close answers the prompt from Python when it appears, which is what    }
+{ keeps the bridge from wedging.                                              }
+Function ClearDocModifiedByPath(Path : String) : Boolean;
+Var
+    ServerDoc : IServerDocument;
+Begin
+    Result := False;
+    If Path = '' Then Exit;
+    ServerDoc := Nil;
+    Try ServerDoc := Client.GetDocumentByPath(Path); Except ServerDoc := Nil; End;
+    If ServerDoc = Nil Then Exit;
+    Try ServerDoc.SetModified(False); Except End;
+    Result := True;
+End;
+
+Function DiscardProjectMembers(Project : IProject) : String;
+Var
+    J : Integer;
+    Doc : IDocument;
+    Path : String;
+Begin
+    Result := '';
+    If Project = Nil Then Exit;
+    For J := 0 To Project.DM_LogicalDocumentCount - 1 Do
+    Begin
+        Doc := Project.DM_LogicalDocuments(J);
+        If Doc = Nil Then Continue;
+        Path := '';
+        Try Path := Doc.DM_FullPath; Except Path := ''; End;
+        If ClearDocModifiedByPath(Path) Then
+        Begin
+            If Result <> '' Then Result := Result + '|';
+            Result := Result + Path;
+        End;
+    End;
+    Path := '';
+    Try Path := Project.DM_ProjectFullPath; Except Path := ''; End;
+    If ClearDocModifiedByPath(Path) Then
+    Begin
+        If Result <> '' Then Result := Result + '|';
+        Result := Result + Path;
+    End;
+End;
+
+{ What is STILL modified after a discard. DocIsModified reads a flag that    }
+{ App_SaveAll records does not always propagate, so the discard is checked   }
+{ rather than trusted: one document left dirty is enough to raise the prompt. }
+Function DirtyProjectMembers(Project : IProject) : String;
+Var
+    J : Integer;
+    Doc : IDocument;
+    Path : String;
+Begin
+    Result := '';
+    If Project = Nil Then Exit;
+    For J := 0 To Project.DM_LogicalDocumentCount - 1 Do
+    Begin
+        Doc := Project.DM_LogicalDocuments(J);
+        If Doc = Nil Then Continue;
+        Path := '';
+        Try Path := Doc.DM_FullPath; Except Path := ''; End;
+        If (Path <> '') And DocIsModified(Path) Then
+        Begin
+            If Result <> '' Then Result := Result + '|';
+            Result := Result + Path;
+        End;
+    End;
+    Path := '';
+    Try Path := Project.DM_ProjectFullPath; Except Path := ''; End;
+    If (Path <> '') And DocIsModified(Path) Then
+    Begin
+        If Result <> '' Then Result := Result + '|';
+        Result := Result + Path;
+    End;
+End;
+
+Function PipePathsToJsonArray(PathList : String) : String;
+Var
+    Remaining, Path : String;
+    P : Integer;
+Begin
+    Result := '[';
+    Remaining := PathList;
+    While Remaining <> '' Do
+    Begin
+        P := Pos('|', Remaining);
+        If P > 0 Then
+        Begin
+            Path := Copy(Remaining, 1, P - 1);
+            Remaining := Copy(Remaining, P + 1, Length(Remaining) - P);
+        End
+        Else
+        Begin
+            Path := Remaining;
+            Remaining := '';
+        End;
+        If Result <> '[' Then Result := Result + ',';
+        Result := Result + '"' + EscapeJsonString(Path) + '"';
+    End;
+    Result := Result + ']';
+End;
+
+{..............................................................................}
+{ WorkspaceManager:CloseObject CLOSES THE FOCUSED PROJECT.                    }
+{                                                                             }
+{ MEASURED 2026-09-13 on AD 26.10.1.6: proj_close named a scratch project     }
+{ with no loaded document while Blinker555_v4's board was focused. The first  }
+{ CloseObject, given the scratch project's full path, closed Blinker555_v4,   }
+{ and the retry closed the scratch project. Every earlier close that worked   }
+{ had a sheet of the named project focused, so the two could not be told      }
+{ apart. The reference scripts never close a project by name: they focus it,  }
+{ check DM_FocusedProject, and close the focused one.                         }
+{                                                                             }
+{ It also explains a report from a managed project: a save prompt listing 49  }
+{ documents for a 10-document project, then a second call that listed 4 and   }
+{ closed. The first close was aimed at a different project.                   }
+{..............................................................................}
+
+Function OpenProjectPaths(Workspace : IWorkspace) : String;
+Var
+    I : Integer;
+    Proj : IProject;
+    P : String;
+Begin
+    Result := '';
+    If Workspace = Nil Then Exit;
+    For I := 0 To Workspace.DM_ProjectCount - 1 Do
+    Begin
+        Proj := Workspace.DM_Projects(I);
+        If Proj = Nil Then Continue;
+        P := '';
+        Try P := Proj.DM_ProjectFullPath; Except P := ''; End;
+        If P = '' Then Continue;
+        If Result <> '' Then Result := Result + '|';
+        Result := Result + P;
+    End;
+End;
+
+{ Focus follows the active DOCUMENT, so the project is focused by showing one  }
+{ of its documents. Only LOADED ones: opening a member here would load it as a }
+{ free document, the way App_SetActiveDocument records, and focus nothing.     }
+Function FocusProjectForClose(Project : IProject) : Boolean;
+Var
+    J : Integer;
+    Doc : IDocument;
+    ServerDoc : IServerDocument;
+    Path, Target : String;
+Begin
+    Result := False;
+    If Project = Nil Then Exit;
+    Target := '';
+    Try Target := Project.DM_ProjectFullPath; Except Target := ''; End;
+    If Target = '' Then Exit;
+    If FocusedProjectPathIs(Target) Then
+    Begin
+        Result := True;
+        Exit;
+    End;
+    For J := 0 To Project.DM_LogicalDocumentCount - 1 Do
+    Begin
+        Doc := Project.DM_LogicalDocuments(J);
+        If Doc = Nil Then Continue;
+        Path := DocFullPath(Doc);
+        If Path = '' Then Continue;
+        ServerDoc := Nil;
+        Try ServerDoc := Client.GetDocumentByPath(Path); Except ServerDoc := Nil; End;
+        If ServerDoc = Nil Then Continue;
+        Try Client.ShowDocument(ServerDoc); Except End;
+        If FocusedProjectPathIs(Target) Then
+        Begin
+            Result := True;
+            Exit;
+        End;
+    End;
+End;
+
+{ Paths in BeforeList that are gone from AfterList, other than TargetPath.   }
+Function PathsGoneOtherThan(BeforeList, AfterList, TargetPath : String) : String;
+Var
+    Remaining, P, UpAfter : String;
+    K : Integer;
+Begin
+    Result := '';
+    UpAfter := '|' + UpperCase(AfterList) + '|';
+    Remaining := BeforeList;
+    While Remaining <> '' Do
+    Begin
+        K := Pos('|', Remaining);
+        If K > 0 Then
+        Begin
+            P := Copy(Remaining, 1, K - 1);
+            Remaining := Copy(Remaining, K + 1, Length(Remaining) - K);
+        End
+        Else
+        Begin
+            P := Remaining;
+            Remaining := '';
+        End;
+        If (P <> '') And (UpperCase(P) <> UpperCase(TargetPath))
+            And (Pos('|' + UpperCase(P) + '|', UpAfter) = 0) Then
+        Begin
+            If Result <> '' Then Result := Result + '|';
+            Result := Result + P;
+        End;
+    End;
 End;
 
 Function Proj_Save(Params : String; RequestId : String) : String;
@@ -126,8 +402,15 @@ Begin
 
         If Project <> Nil Then
         Begin
-            RunProcess('WorkspaceManager:SaveAll');
-            Result := BuildSuccessResponse(RequestId, '{"success":true}');
+            { Only THIS project. The workspace-wide SaveAll that used to be   }
+            { here ignored project_path completely, so asking to save a       }
+            { scratch project wrote every dirty document in the workspace,    }
+            { client projects included. app_save_all is the tool for that,    }
+            { and its name says so.                                           }
+            SaveProjectMembers(Project);
+            Result := BuildSuccessResponse(RequestId,
+                '{"success":true,"project_path":"'
+                + EscapeJsonString(Project.DM_ProjectFullPath) + '"}');
         End
         Else
             Result := BuildErrorResponse(RequestId, 'PROJECT_NOT_FOUND', 'Project not found');
@@ -136,15 +419,32 @@ Begin
         Result := BuildErrorResponse(RequestId, 'NO_WORKSPACE', 'No workspace available');
 End;
 
+{ Close ONE project, saving only ITS documents, and report whether the       }
+{ project actually went away.                                                 }
+{                                                                             }
+{ This used to run WorkspaceManager:SaveAll, which is workspace-wide. Called  }
+{ with an explicit project_path for a scratch project, it raised an Unsaved   }
+{ Changes prompt for a CLIENT project with 17 documents that the caller had   }
+{ never named. Answering that prompt would have written, and then closed,     }
+{ somebody else's work. SaveProjectMembers touches only the target.           }
+{                                                                             }
+{ It also returned success unconditionally. When the prompt was cancelled the }
+{ project stayed open and the reply still said success, so a caller could not }
+{ tell a completed close from an abandoned one. The close is now confirmed by }
+{ looking the project up again.                                               }
 Function Proj_Close(Params : String; RequestId : String) : String;
 Var
     ProjectPath : WideString;
-    SaveFirst : Boolean;
+    Discarded, StillDirty, More : String;
+    ClosedInstead, BeforeClose, Why : String;
+    SaveFirst, Closed : Boolean;
+    Attempts : Integer;
     Workspace : IWorkspace;
     Project : IProject;
 Begin
     ProjectPath := ExtractJsonValue(Params, 'project_path');
     SaveFirst := ExtractJsonValue(Params, 'save') <> 'false';
+    Discarded := '';
 
     Workspace := GetWorkspace;
     If Workspace <> Nil Then
@@ -157,14 +457,118 @@ Begin
         If Project <> Nil Then
         Begin
             ProjectPath := Project.DM_ProjectFullPath;
-            If SaveFirst Then
-                RunProcess('WorkspaceManager:SaveAll');
 
-            ResetParameters;
-            AddStringParameter('ObjectKind', 'Project');
-            AddStringParameter('FileName', ProjectPath);
-            RunProcess('WorkspaceManager:CloseObject');
-            Result := BuildSuccessResponse(RequestId, '{"success":true}');
+            { BEFORE ANY SAVE OR DISCARD, so a close that has to be refused  }
+            { leaves the project exactly as it found it.                     }
+            If Not FocusProjectForClose(Project) Then
+            Begin
+                Result := BuildSuccessResponse(RequestId,
+                    '{"success":false,"closed":false,"project_path":"'
+                    + EscapeJsonString(ProjectPath) + '"'
+                    + ',"discarded":[],"attempts":0,"closed_instead":[]'
+                    + ',"reason":"Altium closes the FOCUSED project, and this '
+                    + 'one could not be made focused because none of its '
+                    + 'documents is loaded. Nothing was closed or changed. '
+                    + 'Load a sheet with proj_load_sheets, or activate one of '
+                    + 'its documents, and close again."}');
+                Exit;
+            End;
+
+            If SaveFirst Then
+                SaveProjectMembers(Project)
+            Else
+            Begin
+                { DISCARD BEFORE CLOSING, then check the discard took. A close }
+                { issued with anything still modified raises a save prompt     }
+                { that blocks this loop until a human answers it, so refusing  }
+                { here is the only way the caller hears anything at all.       }
+                Discarded := DiscardProjectMembers(Project);
+                StillDirty := DirtyProjectMembers(Project);
+                If StillDirty <> '' Then
+                Begin
+                    Result := BuildSuccessResponse(RequestId,
+                        '{"success":false,"closed":false,"project_path":"'
+                        + EscapeJsonString(ProjectPath) + '"'
+                        + ',"still_modified":' + PipePathsToJsonArray(StillDirty)
+                        + ',"reason":"save=false could not clear the modified '
+                        + 'flag on these documents, so closing would raise a '
+                        + 'save prompt, and that prompt blocks the bridge until '
+                        + 'someone answers it in Altium. Nothing was closed. '
+                        + 'Pass save=true to write them first, or close the '
+                        + 'project in Altium."}');
+                    Exit;
+                End;
+            End;
+
+            { Confirm by looking the project up again. A cancelled save      }
+            { prompt aborts the close, and the process layer cannot say so.  }
+            { A close without saving is retried ONCE: reported on a managed  }
+            { project, the first close was abandoned after its prompt was    }
+            { answered and a second completed. Not retried when saving,      }
+            { where the likely cause is a prompt cancelled on purpose.       }
+            Attempts := 0;
+            Closed := False;
+            ClosedInstead := '';
+            While (Not Closed) And (Attempts < 2) Do
+            Begin
+                { CloseObject closes the FOCUSED project, whatever FileName  }
+                { says, so focus the named one before EVERY attempt: focus   }
+                { can move between one attempt and the next.                  }
+                Project := FindProjectByPath(Workspace, ProjectPath);
+                If Not FocusProjectForClose(Project) Then Break;
+                BeforeClose := OpenProjectPaths(Workspace);
+                Attempts := Attempts + 1;
+                ResetParameters;
+                AddStringParameter('ObjectKind', 'Project');
+                AddStringParameter('FileName', ProjectPath);
+                RunProcess('WorkspaceManager:CloseObject');
+                Closed := FindProjectByPath(Workspace, ProjectPath) = Nil;
+                ClosedInstead := PathsGoneOtherThan(BeforeClose,
+                    OpenProjectPaths(Workspace), ProjectPath);
+                { Never retry after something else closed. The retry is what }
+                { turned one wrong close into two.                            }
+                If ClosedInstead <> '' Then Break;
+                If SaveFirst Then Break;
+                If Not Closed Then
+                Begin
+                    Project := FindProjectByPath(Workspace, ProjectPath);
+                    More := DiscardProjectMembers(Project);
+                    If More <> '' Then
+                    Begin
+                        If Discarded <> '' Then Discarded := Discarded + '|';
+                        Discarded := Discarded + More;
+                    End;
+                End;
+            End;
+
+            If Closed And (ClosedInstead = '') Then
+                Result := BuildSuccessResponse(RequestId,
+                    '{"success":true,"closed":true,"project_path":"'
+                    + EscapeJsonString(ProjectPath) + '"'
+                    + ',"saved":' + BoolToJsonStr(SaveFirst)
+                    + ',"discarded":' + PipePathsToJsonArray(Discarded)
+                    + ',"attempts":' + IntToStr(Attempts)
+                    + ',"closed_instead":[]}')
+            Else
+            Begin
+                If ClosedInstead <> '' Then
+                    Why := 'closing this project also closed a project nobody '
+                        + 'named, listed under closed_instead. Altium closes '
+                        + 'the focused project; this stopped there and did not '
+                        + 'retry. Reopen those with proj_open.'
+                Else
+                    Why := 'the project is still open after the close was '
+                        + 'issued, which is what happens when a save prompt is '
+                        + 'cancelled, a document refuses to close, or focus '
+                        + 'could not be moved back to it for a second attempt';
+                Result := BuildSuccessResponse(RequestId,
+                    '{"success":false,"closed":' + BoolToJsonStr(Closed)
+                    + ',"project_path":"' + EscapeJsonString(ProjectPath) + '"'
+                    + ',"discarded":' + PipePathsToJsonArray(Discarded)
+                    + ',"attempts":' + IntToStr(Attempts)
+                    + ',"closed_instead":' + PipePathsToJsonArray(ClosedInstead)
+                    + ',"reason":"' + Why + '"}');
+            End;
         End
         Else
             Result := BuildErrorResponse(RequestId, 'PROJECT_NOT_FOUND', 'Project not found');
@@ -204,7 +608,7 @@ Begin
                 If Not First Then Data := Data + ',';
                 First := False;
                 DocInfo := '{"file_name":"' + EscapeJsonWide(ExtractFileName(Doc.DM_FileName)) + '"';
-                DocInfo := DocInfo + ',"file_path":"' + EscapeJsonWide(Doc.DM_FileName) + '"';
+                DocInfo := DocInfo + ',"file_path":"' + EscapeJsonWide(DocFullPath(Doc)) + '"';
                 DocInfo := DocInfo + ',"document_kind":"' + EscapeJsonWide(Doc.DM_DocumentKind) + '"}';
                 Data := Data + DocInfo;
             End;
@@ -248,12 +652,26 @@ Begin
         Result := BuildErrorResponse(RequestId, 'NO_WORKSPACE', 'No workspace available');
 End;
 
+{ Remove a document FROM A PROJECT. It does not delete the file.             }
+{                                                                             }
+{ This used to run WorkspaceManager:CloseObject on the document, which closes }
+{ the editor WINDOW and leaves project membership untouched. Measured: the    }
+{ call reported success, raised an Unsaved Changes prompt, and the .PrjPcb    }
+{ still carried the DocumentPath afterwards. The right call is the mirror of  }
+{ the one Proj_AddDocument uses, DM_RemoveSourceDocument, and it is confirmed }
+{ by three independent scripts in reference/.                                 }
+{                                                                             }
+{ Membership is re-read afterwards, because the removal is the whole point of }
+{ the tool and "I issued it" is not the same as "it happened".                }
 Function Proj_RemoveDocument(Params : String; RequestId : String) : String;
 Var
-    DocumentPath : String;
     ProjectPath : WideString;
+    DocumentPath, DocPath : String;
     Workspace : IWorkspace;
     Project : IProject;
+    Doc : IDocument;
+    I : Integer;
+    StillMember, WasMember : Boolean;
 Begin
     ProjectPath := ExtractJsonValue(Params, 'project_path');
     DocumentPath := ExtractJsonValue(Params, 'document_path');
@@ -268,11 +686,45 @@ Begin
 
         If Project <> Nil Then
         Begin
-            ResetParameters;
-            AddStringParameter('ObjectKind', 'Document');
-            AddStringParameter('FileName', DocumentPath);
-            RunProcess('WorkspaceManager:CloseObject');
-            Result := BuildSuccessResponse(RequestId, '{"success":true}');
+            { Was it ever a member? Removing something that was never there   }
+            { must not read the same as a successful removal.                 }
+            WasMember := False;
+            For I := 0 To Project.DM_LogicalDocumentCount - 1 Do
+            Begin
+                DocPath := '';
+                Doc := Project.DM_LogicalDocuments(I);
+                If Doc <> Nil Then Try DocPath := Doc.DM_FullPath; Except End;
+                If UpperCase(DocPath) = UpperCase(DocumentPath) Then
+                    WasMember := True;
+            End;
+
+            If Not WasMember Then
+                Result := BuildErrorResponse(RequestId, 'NOT_A_MEMBER',
+                    'That document is not in this project: ' + DocumentPath)
+            Else
+            Begin
+                Try Project.DM_RemoveSourceDocument(DocumentPath); Except End;
+
+                StillMember := False;
+                For I := 0 To Project.DM_LogicalDocumentCount - 1 Do
+                Begin
+                    DocPath := '';
+                    Doc := Project.DM_LogicalDocuments(I);
+                    If Doc <> Nil Then Try DocPath := Doc.DM_FullPath; Except End;
+                    If UpperCase(DocPath) = UpperCase(DocumentPath) Then
+                        StillMember := True;
+                End;
+
+                If StillMember Then
+                    Result := BuildSuccessResponse(RequestId,
+                        '{"success":false,"removed":false,"reason":"the '
+                        + 'document is still a member of the project after '
+                        + 'DM_RemoveSourceDocument was called"}')
+                Else
+                    Result := BuildSuccessResponse(RequestId,
+                        '{"success":true,"removed":true,"document_path":"'
+                        + EscapeJsonString(DocumentPath) + '"}');
+            End;
         End
         Else
             Result := BuildErrorResponse(RequestId, 'PROJECT_NOT_FOUND', 'Project not found');
@@ -320,15 +772,30 @@ Begin
         Result := BuildErrorResponse(RequestId, 'NO_WORKSPACE', 'No workspace available');
 End;
 
+{ Set a project-level parameter, and prove it took.                          }
+{                                                                             }
+{ The add path used to be WorkspaceManager:DocumentAddParameter. Measured on  }
+{ AD26: it writes nothing. The parameter was absent from DM_Parameters and    }
+{ absent from the saved .PrjPcb, while the tool returned success with the     }
+{ name and value ECHOED BACK, which reads exactly like a confirmation.        }
+{                                                                             }
+{ That process name could not be corroborated: the only occurrence of it in   }
+{ reference/ is CoAltium, a vendored copy of THIS project, so the citation    }
+{ was circular. The real API is DM_AddParameter inside DM_BeginUpdate /       }
+{ DM_EndUpdate, used twice by an independent script in                        }
+{ reference/altium-delphiscripts-brett/Project/Prj-Parameters.pas.            }
+{                                                                             }
+{ Both paths are now followed by a re-read of DM_Parameters, and the reply    }
+{ carries what was READ, not what was asked for.                              }
 Function Proj_SetParameter(Params : String; RequestId : String) : String;
 Var
-    ParamName, ParamValue : String;
     ProjectPath : WideString;
+    ParamName, ParamValue, ReadBack : String;
     Workspace : IWorkspace;
     Project : IProject;
     Param : IParameter;
     I : Integer;
-    Found : Boolean;
+    Found, Verified : Boolean;
 Begin
     ParamName := ExtractJsonValue(Params, 'name');
     ParamValue := ExtractJsonValue(Params, 'value');
@@ -360,36 +827,59 @@ Begin
 
     ProjectPath := Project.DM_ProjectFullPath;
 
-    { Try to find and update existing parameter }
+    { Update in place if it is already there. }
     Found := False;
+    Project.DM_BeginUpdate;
+    Try
+        For I := 0 To Project.DM_ParameterCount - 1 Do
+        Begin
+            Param := Project.DM_Parameters(I);
+            If Param.DM_Name = ParamName Then
+            Begin
+                Param.DM_Value := ParamValue;
+                Found := True;
+                Break;
+            End;
+        End;
+
+        If Not Found Then
+            Try Project.DM_AddParameter(ParamName, ParamValue); Except End;
+    Finally
+        Project.DM_EndUpdate;
+    End;
+
+    { Persist, then READ IT BACK. }
+    SaveProjectMembers(Project);
+
+    Verified := False;
+    ReadBack := '';
     For I := 0 To Project.DM_ParameterCount - 1 Do
     Begin
         Param := Project.DM_Parameters(I);
-        If Param.DM_Name = ParamName Then
+        If (Param <> Nil) And (Param.DM_Name = ParamName) Then
         Begin
-            Param.DM_Value := ParamValue;
-            Found := True;
+            Try ReadBack := Param.DM_Value; Except End;
+            Verified := ReadBack = ParamValue;
             Break;
         End;
     End;
 
-    { If not found, add via RunProcess }
-    If Not Found Then
-    Begin
-        ResetParameters;
-        AddStringParameter('ObjectKind', 'Project');
-        AddStringParameter('Name', ParamName);
-        AddStringParameter('Value', ParamValue);
-        RunProcess('WorkspaceManager:DocumentAddParameter');
-    End;
-
-    { Save the project to persist changes }
-    ResetParameters;
-    AddStringParameter('ObjectKind', 'Project');
-    AddStringParameter('FileName', ProjectPath);
-    RunProcess('WorkspaceManager:SaveObject');
-
-    Result := BuildSuccessResponse(RequestId, '{"success":true,"name":"' + EscapeJsonString(ParamName) + '","value":"' + EscapeJsonString(ParamValue) + '","project_path":"' + EscapeJsonWide(ProjectPath) + '"}');
+    If Verified Then
+        Result := BuildSuccessResponse(RequestId,
+            '{"success":true,"name":"' + EscapeJsonString(ParamName)
+            + '","value":"' + EscapeJsonString(ReadBack)
+            + '","created":' + BoolToJsonStr(Not Found)
+            + ',"verified":true,"project_path":"'
+            + EscapeJsonWide(ProjectPath) + '"}')
+    Else
+        Result := BuildSuccessResponse(RequestId,
+            '{"success":false,"verified":false,"name":"'
+            + EscapeJsonString(ParamName)
+            + '","requested_value":"' + EscapeJsonString(ParamValue)
+            + '","read_back":"' + EscapeJsonString(ReadBack)
+            + '","reason":"the parameter did not read back with the '
+            + 'requested value after the write and save, so it was not '
+            + 'stored","project_path":"' + EscapeJsonWide(ProjectPath) + '"}');
 End;
 
 Function Proj_Compile(Params : String; RequestId : String) : String;
@@ -467,7 +957,7 @@ Begin
         { on-disk project structure in some code paths, and users hit this  }
         { tool precisely when the in-editor state has diverged from the     }
         { cached netlist.                                                   }
-        Try SaveAllDirty; Except End;
+        Try SaveAllDirty(0); Except End;
         LastCompileTick := 0;
         SmartCompile(Project);
     End;
@@ -476,6 +966,10 @@ End;
 {..............................................................................}
 { Get net-to-pin connectivity from compiled project                           }
 { Params: project_path, component, net_name, limit                            }
+{ limit_hit says the list stopped at limit with more pins left, and          }
+{ skipped_nil counts documents, components and pins the model returned as   }
+{ Nil, so a short list is not mistaken for the whole design. Proj_GetBOM    }
+{ reports the same two.                                                      }
 {..............................................................................}
 
 Function Proj_GetNets(Params : String; RequestId : String) : String;
@@ -487,8 +981,8 @@ Var
     Doc : IDocument;
     Comp : IComponent;
     Pin : IPin;
-    I, J, K, Count, Limit, DocCount : Integer;
-    UsePhysical : Boolean;
+    I, J, K, Count, Limit, DocCount, Skipped : Integer;
+    UsePhysical, LimitHit : Boolean;
     Data, CompDesig, NetName : String;
     First : Boolean;
 Begin
@@ -523,31 +1017,37 @@ Begin
     Data := '[';
     First := True;
     Count := 0;
+    Skipped := 0;
+    LimitHit := False;
 
     GetCompiledDocs(Project, DocCount, UsePhysical);
     For I := 0 To DocCount - 1 Do
     Begin
-        If Count >= Limit Then Break;
+        If LimitHit Then Break;
         Doc := GetCompiledDoc(Project, I, UsePhysical);
-        If Doc = Nil Then Continue;
+        If Doc = Nil Then Begin Inc(Skipped); Continue; End;
 
         For J := 0 To Doc.DM_ComponentCount - 1 Do
         Begin
-            If Count >= Limit Then Break;
+            If LimitHit Then Break;
             Comp := Doc.DM_Components(J);
-            If Comp = Nil Then Continue;
+            If Comp = Nil Then Begin Inc(Skipped); Continue; End;
 
             CompDesig := Comp.DM_PhysicalDesignator;
             If (FilterComp <> '') And (CompDesig <> FilterComp) Then Continue;
 
             For K := 0 To Comp.DM_PinCount - 1 Do
             Begin
-                If Count >= Limit Then Break;
                 Pin := Comp.DM_Pins(K);
-                If Pin = Nil Then Continue;
+                If Pin = Nil Then Begin Inc(Skipped); Continue; End;
 
                 NetName := Pin.DM_FlattenedNetName;
                 If (FilterNet <> '') And (NetName <> FilterNet) Then Continue;
+                If Count >= Limit Then
+                Begin
+                    LimitHit := True;
+                    Break;
+                End;
 
                 If Not First Then Data := Data + ',';
                 First := False;
@@ -562,7 +1062,11 @@ Begin
     End;
 
     Data := Data + ']';
-    Result := BuildSuccessResponse(RequestId, '{"pins":' + Data + ',"count":' + IntToStr(Count) + '}');
+    Result := BuildSuccessResponse(RequestId, '{"pins":' + Data
+        + ',"count":' + IntToStr(Count)
+        + ',"limit":' + IntToStr(Limit)
+        + ',"limit_hit":' + BoolToJsonStr(LimitHit)
+        + ',"skipped_nil":' + IntToStr(Skipped) + '}');
 End;
 
 {..............................................................................}
@@ -577,8 +1081,8 @@ Var
     Doc : IDocument;
     Comp : IComponent;
     Pin : IPin;
-    I, J, K, Count, Limit, DocCount : Integer;
-    UsePhysical : Boolean;
+    I, J, K, Count, Limit, DocCount, Skipped : Integer;
+    UsePhysical, LimitHit : Boolean;
     Data, CompDesig, CompComment, CompFP, CompLib, PinList : String;
     First, FirstPin : Boolean;
 Begin
@@ -597,20 +1101,27 @@ Begin
     Data := '[';
     First := True;
     Count := 0;
+    Skipped := 0;
+    LimitHit := False;
 
     GetCompiledDocs(Project, DocCount, UsePhysical);
     For I := 0 To DocCount - 1 Do
     Begin
-        If Count >= Limit Then Break;
+        If LimitHit Then Break;
         Doc := GetCompiledDoc(Project, I, UsePhysical);
-        If Doc = Nil Then Continue;
+        If Doc = Nil Then Begin Inc(Skipped); Continue; End;
 
         For J := 0 To Doc.DM_ComponentCount - 1 Do
         Begin
-            If Count >= Limit Then Break;
+            If LimitHit Then Break;
             Comp := Doc.DM_Components(J);
-            If Comp = Nil Then Continue;
+            If Comp = Nil Then Begin Inc(Skipped); Continue; End;
 
+            If Count >= Limit Then
+            Begin
+                LimitHit := True;
+                Break;
+            End;
             CompDesig := Comp.DM_PhysicalDesignator;
             CompComment := Comp.DM_Comment;
             CompFP := Comp.DM_Footprint;
@@ -622,7 +1133,7 @@ Begin
             For K := 0 To Comp.DM_PinCount - 1 Do
             Begin
                 Pin := Comp.DM_Pins(K);
-                If Pin = Nil Then Continue;
+                If Pin = Nil Then Begin Inc(Skipped); Continue; End;
                 If Not FirstPin Then PinList := PinList + ',';
                 FirstPin := False;
                 PinList := PinList + '{"pin":"' + EscapeJsonWide(Pin.DM_PinNumber) +
@@ -642,7 +1153,11 @@ Begin
     End;
 
     Data := Data + ']';
-    Result := BuildSuccessResponse(RequestId, '{"components":' + Data + ',"count":' + IntToStr(Count) + '}');
+    Result := BuildSuccessResponse(RequestId, '{"components":' + Data
+        + ',"count":' + IntToStr(Count)
+        + ',"limit":' + IntToStr(Limit)
+        + ',"limit_hit":' + BoolToJsonStr(LimitHit)
+        + ',"skipped_nil":' + IntToStr(Skipped) + '}');
 End;
 
 {..............................................................................}
@@ -1021,7 +1536,23 @@ Begin
     AddStringParameter('FileName', OutputPath);
     RunProcess('WorkspaceManager:Print');
 
-    Result := BuildSuccessResponse(RequestId, '{"success":true,"output_path":"' + EscapeJsonString(OutputPath) + '"}');
+    { The comment above has always admitted this opens a dialog, and the      }
+    { reply still claimed success with the path. Measured: the preview modal  }
+    { appeared, was dismissed, and the tool reported success for a PDF that   }
+    { was never written. Whether a human pressed Print is only knowable by    }
+    { looking for the file.                                                   }
+    If FileExists(OutputPath) Then
+        Result := BuildSuccessResponse(RequestId,
+            '{"success":true,"written":true,"output_path":"'
+            + EscapeJsonString(OutputPath) + '"}')
+    Else
+        Result := BuildSuccessResponse(RequestId,
+            '{"success":false,"written":false,"output_path":"'
+            + EscapeJsonString(OutputPath) + '"'
+            + ',"reason":"the print dialog was opened but no file exists at '
+            + 'output_path, so the export was cancelled or never confirmed. '
+            + 'This path cannot run unattended: configure an OutJob and use '
+            + 'proj_run_outjob"}');
 End;
 
 {..............................................................................}
@@ -1099,7 +1630,7 @@ Begin
 
         { 2) Walk the board, find the component by Name.Text, select it.    }
         Board := Nil;
-        Try Board := GetPCBBoardAnywhere; Except End;
+        Try Board := GetPCBBoardAnywhere(0); Except End;
         If Board = Nil Then
         Begin
             Result := BuildErrorResponse(RequestId, 'NO_BOARD',
@@ -1326,10 +1857,10 @@ Var
     LayerStack : IPCB_LayerStack_V7;
     LayerObj : IPCB_LayerObject_V7;
     I, PtCount : Integer;
-    OutlineStr, LayerStr, Data : String;
+    OutlineStr, LayerStr, Data, BoardFile : String;
     First : Boolean;
 Begin
-    Board := GetPCBBoardAnywhere;
+    Board := GetPCBBoardAnywhere(0);
     If Board = Nil Then Begin Result := BuildErrorResponse(RequestId, 'NO_PCB', 'No PCB document is active'); Exit; End;
 
     // Board outline vertices
@@ -1375,8 +1906,19 @@ Begin
     End;
     LayerStr := LayerStr + ']';
 
+    { NAME THE BOARD THAT ANSWERED. GetPCBBoardAnywhere deliberately finds   }
+    { any open board, so with a SCHEMATIC focused this happily returns some   }
+    { other document's geometry. MEASURED: with a schematic active and a      }
+    { two-document project focused, it reported an outline belonging to       }
+    { neither, and the reply carried nothing to reveal that. The board is     }
+    { now identified, so a caller can tell whether the answer is about the    }
+    { document they meant.                                                    }
+    BoardFile := '';
+    Try BoardFile := Board.FileName; Except End;
+
     Data := '{"origin_x":' + IntToStr(CoordToMils(Board.XOrigin));
     Data := Data + ',"origin_y":' + IntToStr(CoordToMils(Board.YOrigin));
+    Data := Data + ',"board_path":"' + EscapeJsonString(BoardFile) + '"';
     Data := Data + ',"outline":' + OutlineStr;
     Data := Data + ',"layers":' + LayerStr + '}';
     Result := BuildSuccessResponse(RequestId, Data);
@@ -1592,9 +2134,9 @@ Begin
                 Finally
                     SchDoc.SchIterator_Destroy(Iterator);
                 End;
-                SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
-                SchDoc.GraphicallyInvalidate;
-                SaveDocByPath(FilePath);
+                { The sheet is in TouchedDocs, so the outer Finally closes it:
+                  PostProcess, redraw and mark dirty. Closing it here as well
+                  ran PostProcess twice for one PreProcess. }
                 Continue;
             End;
 
@@ -1734,7 +2276,7 @@ Begin
                 Try SchServer.ProcessControl.PostProcess(SchDoc, 'Edit'); Except End;
                 Try SchDoc.GraphicallyInvalidate; Except End;
             End;
-            Try SaveDocByPath(TouchedDocs[I]); Except End;
+            Try MarkDocDirtyByPath(TouchedDocs[I]); Except End;
         End;
 
         { No CompList.Free -- releasing a TInterfaceList of live schematic
@@ -1760,23 +2302,40 @@ End;
 { Generate manufacturing outputs from PCB                                    }
 {..............................................................................}
 
+{ Fire a PCB export process and REPORT WHETHER ANYTHING APPEARED.            }
+{                                                                             }
+{ This used to end with a flat generated-true and nothing else. Measured on   }
+{ AD26: a gerber export with an explicit output_path produced no directory    }
+{ and no files at all, and the caller was told it had been generated.         }
+{ Altium's exporters are dialog-driven and RunProcess cannot report what the  }
+{ dialog did, so the only honest signal is whether the output is on disk      }
+{ afterwards.                                                                 }
+{                                                                             }
+{ When no output_path is supplied there is nothing to look for, so the reply  }
+{ says dispatched rather than generated. Two different words for two          }
+{ different claims, which is the whole point.                                 }
 Function Proj_GenerateOutput(Params : String; RequestId : String) : String;
 Var
     OutputType, OutputPath : String;
+    ExpectDir, Appeared : Boolean;
 Begin
     OutputType := ExtractJsonValue(Params, 'output_type');
     OutputPath := ExtractJsonValue(Params, 'output_path');
 
     If OutputType = '' Then Begin Result := BuildErrorResponse(RequestId, 'MISSING_PARAMS', 'output_type is required'); Exit; End;
 
+    ExpectDir := False;
+
     If OutputType = 'gerber' Then
     Begin
+        ExpectDir := True;
         ResetParameters;
         If OutputPath <> '' Then AddStringParameter('OutputPath', OutputPath);
         RunProcess('PCB:GenericExport');
     End
     Else If OutputType = 'drill' Then
     Begin
+        ExpectDir := True;
         ResetParameters;
         If OutputPath <> '' Then AddStringParameter('OutputPath', OutputPath);
         RunProcess('PCB:ExportDrill');
@@ -1798,7 +2357,35 @@ Begin
         Exit;
     End;
 
-    Result := BuildSuccessResponse(RequestId, '{"generated":true,"output_type":"' + OutputType + '"}');
+    If OutputPath = '' Then
+    Begin
+        Result := BuildSuccessResponse(RequestId,
+            '{"generated":false,"dispatched":true,"output_type":"' + OutputType + '"'
+            + ',"reason":"the export process was launched, but with no '
+            + 'output_path there is nothing to check, so whether a file was '
+            + 'written is unknown. Pass output_path, or drive an OutJob with '
+            + 'proj_run_outjob for a result that can be confirmed"}');
+        Exit;
+    End;
+
+    Appeared := False;
+    If ExpectDir Then
+        Try Appeared := DirectoryExists(OutputPath); Except End
+    Else
+        Try Appeared := FileExists(OutputPath); Except End;
+
+    If Appeared Then
+        Result := BuildSuccessResponse(RequestId,
+            '{"generated":true,"output_type":"' + OutputType + '"'
+            + ',"output_path":"' + EscapeJsonString(OutputPath) + '"}')
+    Else
+        Result := BuildSuccessResponse(RequestId,
+            '{"generated":false,"dispatched":true,"output_type":"' + OutputType + '"'
+            + ',"output_path":"' + EscapeJsonString(OutputPath) + '"'
+            + ',"reason":"the export process was launched but nothing exists '
+            + 'at output_path afterwards. Altium''s exporters are '
+            + 'dialog-driven and cannot run unattended this way; configure an '
+            + 'OutJob and use proj_run_outjob"}');
 End;
 
 {..............................................................................}
@@ -1809,18 +2396,57 @@ End;
 Function Proj_ExportSTEP(Params : String; RequestId : String) : String;
 Var
     OutputPath : String;
+    Board : IPCB_Board;
+    AgeBefore, AgeAfter : Integer;
 Begin
     OutputPath := ExtractJsonValue(Params, 'output_path');
+
+    { RunProcess acts on the FOCUSED view, and the board lookup puts the  }
+    { user's previous view back, so an export from a schematic tab went   }
+    { nowhere. ResolvePCBBoard leaves the board focused.                  }
+    Board := GetPCBBoardAnywhere(0);
+    If Board = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCB', 'No PCB document is open');
+        Exit;
+    End;
+    Board := ResolvePCBBoard(Board.FileName);
+
+    AgeBefore := -1;
+    If OutputPath <> '' Then
+        Try If FileExists(OutputPath) Then AgeBefore := FileAge(OutputPath); Except End;
 
     ResetParameters;
     If OutputPath <> '' Then
         AddStringParameter('FileName', OutputPath);
     RunProcess('PCB:ExportSTEP3D');
 
-    If OutputPath <> '' Then
-        Result := BuildSuccessResponse(RequestId, '{"success":true,"output_path":"' + EscapeJsonString(OutputPath) + '"}')
+    { success:true used to come back whatever happened, and a reported    }
+    { run that wrote nothing was indistinguishable from one that did.     }
+    If OutputPath = '' Then
+    Begin
+        Result := BuildSuccessResponse(RequestId,
+            '{"generated":false,"dispatched":true'
+            + ',"reason":"the export was launched with no output_path, so '
+            + 'there is nothing to check; pass output_path, or run an OutJob '
+            + 'with an ExportSTEP output through proj_run_outjob"}');
+        Exit;
+    End;
+
+    AgeAfter := -1;
+    Try If FileExists(OutputPath) Then AgeAfter := FileAge(OutputPath); Except End;
+    If (AgeAfter <> -1) And (AgeAfter <> AgeBefore) Then
+        Result := BuildSuccessResponse(RequestId,
+            '{"generated":true,"success":true,"output_path":"'
+            + EscapeJsonString(OutputPath) + '"}')
     Else
-        Result := BuildSuccessResponse(RequestId, '{"success":true}');
+        Result := BuildSuccessResponse(RequestId,
+            '{"generated":false,"dispatched":true,"output_path":"'
+            + EscapeJsonString(OutputPath) + '"'
+            + ',"reason":"the export was launched but no new file is at '
+            + 'output_path. PCB:ExportSTEP3D is not documented to take a file '
+            + 'name; run an OutJob with an ExportSTEP output through '
+            + 'proj_run_outjob for a result that can be confirmed"}');
 End;
 
 {..............................................................................}
@@ -2249,8 +2875,13 @@ Begin
             OutputDir := OutputDir + '\';
     End;
 
+    { NOT A SUCCESS CLAIM. The process was issued, and nothing here can say }
+    { whether it wrote anything: a container bound to a managed release, or }
+    { with its outputs off, runs cleanly and produces no file, and this used }
+    { to reply success with an output_dir that had never been created. The  }
+    { Python tools check that directory afterwards and decide success there. }
     Result := BuildSuccessResponse(RequestId,
-        '{"success":true' +
+        '{"process_issued":true' +
         ',"container_name":"' + EscapeJsonString(ContainerName) + '"' +
         ',"container_type":"' + EscapeJsonString(ContainerType) + '"' +
         ',"relative_path":"' + EscapeJsonString(RelativePath) + '"' +
@@ -2506,11 +3137,11 @@ End;
 
 Function Proj_SetActiveVariant(Params : String; RequestId : String) : String;
 Var
-    VariantName : String;
     ProjectPath : WideString;
+    VariantName, ActualName : String;
     Workspace : IWorkspace;
     Project : IProject;
-    Variant : IProjectVariant;
+    Variant, Current : IProjectVariant;
     I : Integer;
     Found : Boolean;
 Begin
@@ -2554,7 +3185,167 @@ Begin
     AddStringParameter('VariantName', VariantName);
     RunProcess('WorkspaceManager:VariantManagement');
 
-    Result := BuildSuccessResponse(RequestId, '{"success":true,"variant_name":"' + EscapeJsonString(VariantName) + '"}');
+    { READ BACK WHICH VARIANT IS CURRENT. The check above proves the name  }
+    { exists, which is not the same as the switch having happened, and     }
+    { this used to report success on the strength of that. The same        }
+    { VariantManagement process is documented here as unreliable for       }
+    { AddVariant, so taking its word on SetCurrentVariant was never safe.  }
+    ActualName := '';
+    Try
+        Current := Project.DM_CurrentProjectVariant;
+        If Current <> Nil Then ActualName := Current.DM_Name;
+    Except End;
+
+    If ActualName = VariantName Then
+        Result := BuildSuccessResponse(RequestId,
+            '{"success":true,"variant_name":"' + EscapeJsonString(VariantName)
+            + '","verified":true}')
+    Else
+        Result := BuildSuccessResponse(RequestId,
+            JsonObj(
+                JsonBool('success', False) + ',' +
+                JsonStr('variant_name', VariantName) + ',' +
+                JsonStr('current_variant', ActualName) + ',' +
+                JsonStr('reason', 'the switch was dispatched but the project '
+                    + 'still reports a different current variant. Set it in '
+                    + 'the Variant Management dialog.')
+            ));
+End;
+
+{..............................................................................}
+{ Proj_DeleteVariant - remove one project variant by name.                     }
+{                                                                              }
+{ DM_RemoveProjectVariant(Index) is the ONE documented write in the whole      }
+{ variant API. Everything else on IProject, IProjectVariant and                }
+{ IComponentVariation reads: counts, indexed accessors and DM_VariationKind.   }
+{ There is no documented way to add a variant, or to add or remove an          }
+{ individual component variation entry, which is why this covers deleting a    }
+{ whole variant and nothing finer.                                             }
+{                                                                              }
+{ Addressed BY NAME rather than by index, because an index is only valid       }
+{ against the listing that produced it: removing a variant renumbers the       }
+{ rest, so a caller deleting two by index deletes the wrong second one.        }
+{ Params: variant_name (required), project_path (optional, focused default).   }
+{..............................................................................}
+
+Function Proj_DeleteVariant(Params : String; RequestId : String) : String;
+Var
+    ProjectPath, VariantName : String;
+    Workspace : IWorkspace;
+    Project : IProject;
+    Variant : IProjectVariant;
+    I, Target, PreCount, PostCount, Entries : Integer;
+    StillPresent : Boolean;
+Begin
+    VariantName := ExtractJsonValue(Params, 'variant_name');
+    ProjectPath := ExtractJsonValue(Params, 'project_path');
+
+    If VariantName = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAMS',
+            'variant_name is required');
+        Exit;
+    End;
+
+    Workspace := GetWorkspace;
+    If Workspace = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_WORKSPACE', 'No workspace');
+        Exit;
+    End;
+
+    If ProjectPath <> '' Then Project := FindProjectByPath(Workspace, ProjectPath)
+    Else Project := Workspace.DM_FocusedProject;
+    If Project = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PROJECT', 'No project found');
+        Exit;
+    End;
+
+    PreCount := 0;
+    Try PreCount := Project.DM_ProjectVariantCount; Except End;
+
+    Target := -1;
+    Entries := -1;
+    For I := 0 To PreCount - 1 Do
+    Begin
+        Variant := Project.DM_ProjectVariants(I);
+        If (Variant <> Nil) And (Variant.DM_Name = VariantName) Then
+        Begin
+            Target := I;
+            { Reported so the caller learns what the deletion cost. A      }
+            { variant carrying fifty component variations and an empty one }
+            { are the same single call, and only one of them is cheap to   }
+            { recreate: there is no scripted way to put the entries back.  }
+            Try Entries := Variant.DM_VariationCount; Except End;
+            Break;
+        End;
+    End;
+
+    If Target < 0 Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'VARIANT_NOT_FOUND',
+            'Variant not found: ' + VariantName);
+        Exit;
+    End;
+
+    { Inside begin/end update, matching Proj_SetParameter: that pairing is }
+    { how a DM edit to the project is applied rather than merely made.     }
+    Project.DM_BeginUpdate;
+    Try
+        Project.DM_RemoveProjectVariant(Target);
+    Finally
+        Project.DM_EndUpdate;
+    End;
+
+    { VERIFY BOTH WAYS. A count that dropped proves something went, and the }
+    { name being gone proves it was this one. Neither alone does: a         }
+    { concurrent edit could change the count, and a rename would leave the  }
+    { count intact.                                                         }
+    PostCount := PreCount;
+    Try PostCount := Project.DM_ProjectVariantCount; Except End;
+
+    StillPresent := False;
+    For I := 0 To PostCount - 1 Do
+    Begin
+        Variant := Project.DM_ProjectVariants(I);
+        If (Variant <> Nil) And (Variant.DM_Name = VariantName) Then
+        Begin
+            StillPresent := True;
+            Break;
+        End;
+    End;
+
+    If StillPresent Or (PostCount >= PreCount) Then
+    Begin
+        Result := BuildSuccessResponse(RequestId,
+            JsonObj(
+                JsonBool('success', False) + ',' +
+                JsonStr('variant_name', VariantName) + ',' +
+                JsonInt('variant_count_before', PreCount) + ',' +
+                JsonInt('variant_count_after', PostCount) + ',' +
+                JsonStr('reason', 'the removal was issued but the variant is '
+                    + 'still listed on the project afterwards.')
+            ));
+        Exit;
+    End;
+
+    { A variant lives in the .PrjPcb, so the deletion is only real once   }
+    { that file is written. This saves the project's own members rather   }
+    { than the workspace, for the reason proj_close was changed: a        }
+    { workspace-wide save can raise an Unsaved Changes prompt naming a    }
+    { project the caller never mentioned.                                 }
+    SaveProjectMembers(Project);
+
+    Result := BuildSuccessResponse(RequestId,
+        JsonObj(
+            JsonBool('success', True) + ',' +
+            JsonStr('variant_name', VariantName) + ',' +
+            JsonInt('entries_removed', Entries) + ',' +
+            JsonInt('variant_count_before', PreCount) + ',' +
+            JsonInt('variant_count_after', PostCount) + ',' +
+            JsonBool('verified', True)
+        ));
 End;
 
 {..............................................................................}
@@ -3213,10 +4004,10 @@ Begin
         SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
     End;
 
-    { Persist directly to disk via the IServerDocument API. SaveDocByPath
+    { Persist directly to disk via the IServerDocument API. MarkDocDirtyByPath
       does SetModified + DoFileSave. WorkspaceManager:SaveAll doesn't
       reach non-active sheets in our tests, so we don't rely on it. }
-    SaveDocByPath(FilePath);
+    MarkDocDirtyByPath(FilePath);
     Try SchDoc.GraphicallyInvalidate; Except End;
 
     If Found Then Action := 'updated' Else Action := 'added';
@@ -3395,33 +4186,17 @@ Begin
     Else Project := Workspace.DM_FocusedProject;
     If Project = Nil Then Begin Result := BuildErrorResponse(RequestId, 'NO_PROJECT', 'No project found'); Exit; End;
 
-    { REFUSE while a schematic is focused. MEASURED 2026-08-17: with a
+    { FOCUS DECIDES WHAT THE COMPARE DOES. MEASURED 2026-08-17: with a
       child sheet focused, WorkspaceManager:Compare raised a modal reading
       "Cannot compare a source document against its owner project SCH"
-      and changed nothing, while this handler went on to report success
-      and components_in_sync. Catching it here turns a blocked editor
-      plus a false clean into a reason the caller can act on.
+      and changed nothing, while this handler went on to report success.
+      So the project's PCB is focused before the compare below and the
+      focus is checked, rather than refusing a schematic and leaving the
+      caller to pick a document.
 
       NOT applied to Proj_UpdateSchematic, which is the opposite
       direction and whose correct focus has not been measured. Guessing
       symmetry here would be inventing a precondition. }
-    FocusedKind := '';
-    Try
-        FocusedDoc := Workspace.DM_FocusedDocument;
-        If FocusedDoc <> Nil Then FocusedKind := FocusedDoc.DM_DocumentKind;
-    Except
-        FocusedKind := '';
-    End;
-    If FocusedKind = 'SCH' Then
-    Begin
-        Result := BuildErrorResponse(RequestId, 'WRONG_FOCUS',
-            'A schematic is focused, and Altium refuses to compare a '
-            + 'source document against its owner project: it raises a '
-            + 'modal error and changes nothing. Focus the PCB document '
-            + 'first with app_set_active_document, then call this again.');
-        Exit;
-    End;
-
     SmartCompile(Project);
     Ok := ComputeECODifferences(Project, MatchedBefore, ExtraSchBefore, ExtraPcbBefore, PcbPath);
     If Not Ok Then
@@ -3432,21 +4207,43 @@ Begin
 
     { Fire the real ECO via the WorkspaceManager comparator. This is the
       ONLY evidenced scriptable launcher (ref: reference MultiPCBProject.pas,
-      Petar Perisin): WorkspaceManager:Compare with ObjectKind=Project +
-      Action=UpdateOther performs Design > Update PCB Document (schematic ->
-      PCB). The previous 'PCB:UpdatePCBFromProject' was NOT a real process id
-      (RunProcess silently ignores unknown ids -> the handler no-opped), and
-      DisableDialog/Silent/NoConfirm/AutoApply are invented flags that appear
-      in no Altium docs.
+      Petar Perisin). The previous 'PCB:UpdatePCBFromProject' was NOT a real
+      process id (RunProcess silently ignores unknown ids -> the handler
+      no-opped), and DisableDialog/Silent/NoConfirm/AutoApply are invented
+      flags that appear in no Altium docs.
+      DIRECTION. With the PCB focused, the reference spells the two actions
+      out: Action=UpdateOther is PCB -> Update Schematic, and Action=UpdateMe
+      is PCB -> Import Changes From the schematic. This handler sent
+      UpdateOther while requiring the PCB in focus, so it back-annotated:
+      an ECO opened with the SchDoc as the affected document, and executing
+      it reverted a footprint and a comment on the schematic. The PCB is
+      focused here, checked, and asked to import.
       DIALOG IS UNAVOIDABLE: Altium's Engineering Change Order dialog is
       non-suppressible BY DESIGN (altium.com .../keeping-synchronized). This
       process raises that modal and BLOCKS the polling loop until a human
       clicks "Execute Changes" (or closes it). There is no documented silent
-      variant. Direction note: Action=UpdateOther is sch->PCB when driven with
-      the project/schematic in focus; it back-annotates if a PCB is focused. }
+      variant. }
+    ResolvePCBBoard(PcbPath);
+    FocusedKind := '';
+    Try
+        FocusedDoc := Workspace.DM_FocusedDocument;
+        If FocusedDoc <> Nil Then FocusedKind := FocusedDoc.DM_DocumentKind;
+    Except
+        FocusedKind := '';
+    End;
+    If FocusedKind <> 'PCB' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'WRONG_FOCUS',
+            'The project''s PCB could not be focused (the focused document is '
+            + FocusedKind + '), and the update direction depends on it: with '
+            + 'anything else focused the same request can update the '
+            + 'schematic from the board. Focus ' + PcbPath
+            + ' with app_set_active_document, then call this again.');
+        Exit;
+    End;
     ResetParameters;
     AddStringParameter('ObjectKind', 'Project');
-    AddStringParameter('Action', 'UpdateOther');
+    AddStringParameter('Action', 'UpdateMe');
     RunProcess('WorkspaceManager:Compare');
 
     { Recompile and recompute to report actual changes }
@@ -3916,7 +4713,7 @@ Begin
     End;
 
     PrevTick := LastCompileTick;
-    Try SaveAllDirty; Except End;
+    Try SaveAllDirty(0); Except End;
     LastCompileTick := 0;
     SmartCompile(Project);
     NewTick := LastCompileTick;
@@ -4159,7 +4956,7 @@ Begin
                     Finally
                         SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
                     End;
-                    Try SaveDocByPath(FullPath); Except End;
+                    Try MarkDocDirtyByPath(FullPath); Except End;
                     Try SchDoc.GraphicallyInvalidate; Except End;
                     Inc(SheetsUpdated);
                 End;
@@ -4213,6 +5010,7 @@ Begin
         'get_active_variant': Result := Proj_GetActiveVariant(Params, RequestId);
         'set_active_variant': Result := Proj_SetActiveVariant(Params, RequestId);
         'create_variant':    Result := Proj_CreateVariant(Params, RequestId);
+        'delete_variant':    Result := Proj_DeleteVariant(Params, RequestId);
         'get_open_projects': Result := Proj_GetOpenProjects(RequestId);
         'save_all':          Result := Proj_SaveAll(RequestId);
         'get_messages':      Result := Proj_GetMessages(Params, RequestId);
@@ -4235,4 +5033,11 @@ Begin
     Else
         Result := BuildErrorResponse(RequestId, 'UNKNOWN_ACTION', 'Unknown project action: ' + Action);
     End;
+End;
+
+{ UnitStamp_Project - which build of Project.pas Altium compiled; 'dev' here. }
+{ install-scripts writes the hash of this file into the deployed copy. }
+Function UnitStamp_Project(Dummy : Integer) : String;
+Begin
+    Result := 'dev';
 End;
