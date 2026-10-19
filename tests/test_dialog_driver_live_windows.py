@@ -140,7 +140,8 @@ def test_it_finds_a_real_window_and_reads_its_buttons(dialog):
     mine = [d for d in snapshot["dialogs"] if d["hwnd"] == dialog.hwnd]
     assert mine, "the driver cannot see a dialog that is plainly on screen"
     captions = {b["caption"] for b in mine[0]["buttons"]}
-    assert {"OK", "Cancel"} <= captions, captions
+    roles = {dd.role_of(c) for c in captions}
+    assert {"advance", "dismiss"} <= roles, (captions, roles)
 
 
 def test_a_dry_run_presses_nothing_on_a_real_dialog(dialog):

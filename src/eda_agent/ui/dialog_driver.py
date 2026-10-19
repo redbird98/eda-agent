@@ -47,13 +47,17 @@ from . import windows as win
 #: "Aceptar" had no role at all, so a press that left its dialog open
 #: was never judged, and "Aplicar" slipped past the irreversible gate.
 _ROLES = {
-    "validate": ("validate changes", "validate", "validar cambios", "validar"),
+    "validate": ("validate changes", "validate", "validar cambios", "validar",
+                 "验证更改", "验证"),
     "commit": ("execute changes", "accept changes", "apply",
-               "ejecutar cambios", "aceptar cambios", "aplicar"),
+               "ejecutar cambios", "aceptar cambios", "aplicar",
+               "执行更改", "接受更改", "应用更改", "应用"),
     "advance": ("next", "continue", "yes", "finish", "ok",
-                "siguiente", "continuar", "finalizar", "aceptar"),
-    "dismiss": ("close", "cancel", "no", "cerrar"),
-    "report": ("report changes", "report"),
+                "siguiente", "continuar", "finalizar", "aceptar",
+                "下一步", "继续", "确定", "是", "完成"),
+    "dismiss": ("close", "cancel", "no", "cerrar",
+                "关闭", "取消", "否"),
+    "report": ("report changes", "report", "报告更改", "报告"),
 }
 
 #: Roles that change the design. Never pressed without explicit consent.
@@ -71,7 +75,8 @@ COMMITTING = ("commit",)
 #: configuration page and accepts whatever defaults were showing.
 #:
 #: Step through when stepping through is offered.
-_ADVANCE_PREFERENCE = ("next", "continue", "ok", "yes", "finish")
+_ADVANCE_PREFERENCE = ("next", "continue", "ok", "yes", "finish",
+                       "下一步", "继续", "确定", "是", "完成")
 
 #: Words that make a confirmation UNANSWERABLE by automation, whatever
 #: the caller authorised. A routine "Continue and create ECO?" is part
@@ -81,6 +86,8 @@ _ADVANCE_PREFERENCE = ("next", "continue", "ok", "yes", "finish")
 _IRREVERSIBLE_WORDS = (
     "delete", "remove", "discard", "overwrite", "erase", "permanently",
     "cannot be undone", "lose", "replace all", "reset",
+    "删除", "移除", "丢弃", "覆盖", "擦除", "永久", "无法撤销",
+    "无法恢复", "丢失", "全部替换", "重置",
 )
 
 
