@@ -1,6 +1,6 @@
 # eda-agent
 
-MCP server that lets an AI (or any MCP-compatible client) **interact with a live Altium Designer session**, with KiCad and EasyEDA Pro available as additional backends. It exposes around 400 tools on Altium, covering schematic, PCB, library, project, and design-agent operations, over a persistent DelphiScript bridge. The AI reads the design you currently have open, asks questions about it, and can modify it in place while you watch. The [backend](#eda-backends) is selected at startup, so each user sees only their own tool set.
+MCP server that lets an AI (or any MCP-compatible client) **interact with a live Altium Designer session**, with KiCad and EasyEDA Pro available as additional backends. It exposes around 450 tools on Altium, covering schematic, PCB, library, project, and design-agent operations, over a persistent DelphiScript bridge. The AI reads the design you currently have open, asks questions about it, and can modify it in place while you watch. The [backend](#eda-backends) is selected at startup, so each user sees only their own tool set.
 
 > **⚠️ Experimental.** Not all tools are extensively tested. Some can crash the Altium DelphiScript engine. See [Known limitations](#known-limitations) before using on any design you haven't backed up.
 
@@ -10,13 +10,19 @@ Claude Code reviewing a buck converter through eda-agent. The feedback resistor 
 
 [![eda-agent demo: Claude Code reviewing a buck converter](https://img.youtube.com/vi/snRyCx3OlxM/maxresdefault.jpg)](https://youtu.be/snRyCx3OlxM)
 
+## Support the project
+
+Developing eda-agent and testing it against Altium's scripting engine takes a significant amount of work. If you find eda-agent useful in your work, a donation helps keep the progress going.
+
+<a href="https://buymeacoffee.com/george.saliba"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me a Coffee" height="45"></a>
+
 ## Dashboard
 
 <img src="assets/dashboard.png" alt="eda-agent dashboard inside Altium Designer" width="320">
 
 Two dashboards ship with eda-agent:
 
-- **In-Altium status window** - a floating Altium-side window showing live status, request count, cumulative Altium-side time, auto-shutdown countdown, and a per-command log with durations. `Hide pings` filters the 30 s keep-alive traffic; `Only >100ms` isolates slow calls. The **Detach** button saves all dirty docs and exits the polling loop cleanly.
+- **In-Altium status window** - a floating Altium-side window showing live status, request count, cumulative Altium-side time, auto-shutdown countdown, and a per-command log with durations. `Hide pings` filters the 30 s keep-alive traffic; `Only >100ms` isolates slow calls. The **Detach** button exits the polling loop cleanly; it saves nothing, so unsaved edits stay in the editor.
 - **Web dashboard** - a local browser dashboard at `http://127.0.0.1:8766`, focused on design review. A **Review** tab surfaces datasheet / MPN / manufacturer / footprint coverage gauges and an actionable issue queue (missing datasheet, missing MPN, orphan nets, ...); **Project**, **Components**, **Nets**, **Libraries** and **Plan** tabs give live structured views. Click any component or net to drill into a detail drawer; one click cross-probes it into Altium. Light / dark theme, server-sent-events live feed. It is auto-started by the MCP server - the **Open Dashboard** button on the in-Altium status window launches the browser.
 
 ## How it works
@@ -31,7 +37,7 @@ This is **not** a batch tool that opens a project, runs a script, and exits. It'
 
 ## Features
 
-- **~400 tools on the default Altium backend** (480+ with both registered) across application, project, library, schematic/general, PCB, and design-agent categories
+- **~450 tools on the default Altium backend** (480+ with both registered) across application, project, library, schematic/general, PCB, and design-agent categories
 - **Generic primitives** (`obj_query`, `obj_modify`, `obj_create`, `obj_delete`, `run_process`) that work on almost any schematic or PCB object type via late-binding, avoiding per-type handler proliferation
 - **Bulk batch primitives**: `obj_batch_modify`, `obj_batch_create`, `obj_batch_delete`, `pcb_place_tracks`, `pcb_move_components`, `sch_place_wires`, `place_net_labels`, `place_power_ports`, `sch_place_components`, `sch_set_components_parameters`, `get_sch_doc_pins`, `lib_add_pins`, `proj_get_connectivity_many`, `sim_attach_primitives`. Collapse N LLM turns + N IPC round-trips into one. Typical wall-time savings: 10 to 100x on multi-item edits
 - **Design review snapshot**: `design_review_snapshot` bundles 8 to 12 review reads (project info, components, nets, rules, diff, messages, stats, unrouted, BOM) into a single call. One LLM turn instead of a dozen
@@ -45,7 +51,7 @@ This is **not** a batch tool that opens a project, runs a script, and exits. It'
 - **Persistent polling loop**: one script start, then ~10 ms per tool call in active mode
 - **Annotation runs silently**: `proj_annotate` designates components without popping the annotate dialog
 - **Drives the GUI where there is no API**: a great deal of Altium exists only as menus and dialogs. `app_click_menu` walks the real menu bar by name (and lists what a menu holds, so paths are discovered rather than guessed); `app_list_open_dialogs` reports what is on screen, what it says and whether Altium is stuck; `app_set_dialog_control` sets checkboxes, fields and grid rows; `app_press_dialog_button` presses one button; `app_drive_dialogs` answers a whole sequence reactively. **None of it uses the bridge**, only Win32 and the accessible layer, so it keeps working while a modal has the scripting engine blocked, which is exactly when you need it. `app_run_ui_command` fires a menu command and answers its dialogs in the same call, because a command that opens a modal blocks the bridge and a second call would never arrive. The driver decides from what is on screen rather than from a script, stops on any dialog it cannot classify, and gates the press that changes the design behind `allow_commit`. Dialog text that Altium paints into handle-less controls is recovered by OCR and labelled as read from pixels, not text
-- **Deferred save for speed**: mutations mark documents as modified in memory; disk writes happen on explicit `app_save_all` (or automatically on `app_detach`). Before this, every edit triggered a full project save, which dominated latency
+- **Deferred save for speed**: mutations mark documents as modified in memory; disk writes happen on explicit `app_save_all`, and `app_detach` saves the documents that were edited. A clean document is never rewritten. Before this, every edit triggered a full project save, which dominated latency
 - **Two dashboards**: an in-Altium floating status window (status, request count, per-command performance, command log, Detach button) and a browser-based **web dashboard** (`127.0.0.1:8766`) for design review - datasheet / MPN / footprint coverage gauges, an actionable issue queue, component / net drill-in, one-click cross-probe into Altium, light / dark theme. The whole project view loads in one bundled IPC round-trip (`project.dashboard_snapshot`); the web dashboard auto-starts with the MCP server
 - **DelphiScript trap linter**: `scripts/altium/lint.py` (wired into `build.py`) scans the Pascal sources for known parser hazards - `Cardinal()` casts, malformed hex literals, empty `.Add('')` arguments, braces inside comments, fixed-size arrays as function locals, reserved-word identifiers - and fails the build before a bad deploy
 - **Activity logs**: every command is appended to `workspace/activity.log` (CSV with timestamps, durations, command name, response size). The bridge also writes `bridge_trace.log` for IPC-level diagnostics
@@ -72,10 +78,12 @@ The server picks a backend at startup (`EDA_AGENT_BACKEND`, default `altium`), s
 ```bash
 git clone https://github.com/salitronic/eda-agent
 cd eda-agent
-pip install -e .
+python -m pip install -e .
 ```
 
-Register the server with your MCP client. The binary is `eda-agent` and runs on stdio; consult your client's docs for how to add a local stdio-based server.
+Use `python -m pip` rather than a bare `pip`. It works even when pip's `Scripts` folder is not on your `PATH`, which is common when Python was installed for you by IT, and it guarantees the package goes into the same Python you will run it with.
+
+Register the server with your MCP client. The binary is `eda-agent` and runs on stdio; consult your client's docs for how to add a local stdio-based server. Everywhere this README says `eda-agent`, `python -m eda_agent` does exactly the same thing and does not depend on `PATH`.
 
 ### Claude Code
 
@@ -89,11 +97,19 @@ Adds `eda-agent` as an MCP server named `altium` to your Claude Code project con
 claude mcp add -s user altium eda-agent
 ```
 
-If `eda-agent` isn't on your `PATH`, give the full path instead (pip reports it after install, typically `%USERPROFILE%\AppData\Roaming\Python\Python312\Scripts\eda-agent.exe` on Windows). To verify the connection: `/mcp` in a Claude Code session should list `altium` as connected.
+If `eda-agent` isn't on your `PATH` ("'eda-agent' is not recognized"), register it through Python instead. This needs no path at all:
+
+```bash
+claude mcp add -s user altium -- python -m eda_agent
+```
+
+The `--` matters: it tells `claude mcp add` that everything after it is the command to run, rather than options for `claude` itself.
+
+To verify the connection: `/mcp` in a Claude Code session should list `altium` as connected.
 
 ### Other MCP clients
 
-The server speaks standard MCP over stdio; any client that accepts a local stdio command will work. Invoke `eda-agent` (or `eda-agent serve`) as the subprocess.
+The server speaks standard MCP over stdio; any client that accepts a local stdio command will work. Invoke `eda-agent` (or `eda-agent serve`) as the subprocess, or `python -m eda_agent` if it is not on your `PATH`.
 
 ### Altium-side scripts
 
@@ -101,6 +117,12 @@ Drop the Altium script project somewhere you can find it:
 
 ```bash
 eda-agent install-scripts
+```
+
+or, if `eda-agent` is not recognised:
+
+```bash
+python -m eda_agent install-scripts
 ```
 
 Default destination: `%USERPROFILE%\EDA Agent\scripts\`. Use `--dest PATH` to put it elsewhere.
@@ -278,6 +300,30 @@ Bulk tools like `obj_batch_modify`, `pcb_move_components`, and `sch_place_compon
 
 > Bridge changes are checked by Free Pascal and a linter before they ship, which cannot prove Altium's own DelphiScript engine accepts them: the two differ on which identifiers exist, and an undeclared one faults at runtime rather than at compile time. [`docs/RELEASE_VERIFICATION.md`](docs/RELEASE_VERIFICATION.md) is the procedure for closing that gap on a release, starting with a self-test that runs inside Altium and needs no document.
 
+### UI automation synthesises real keyboard and mouse input
+
+Most of this project talks to Altium through the scripting bridge, which addresses a window handle directly and cannot affect anything else. The `app_*` UI automation tools are different, and are used where Altium offers no other route: `application.execute_menu` reports success while invoking nothing, `GetMenu` returns 0 on Altium's DevExpress bars, and whole dialogs (Update From Libraries, Preferences, the wizards) have no scripting API at all.
+
+**Synthesised input is not addressed to a window.** `keybd_event` and `mouse_event` are delivered to whatever is active at the instant they fire, and a click lands on whatever is under the pointer. So these tools:
+
+- **take focus.** Menus and clicks need Altium in front, so running them while you are typing will interrupt you
+- **cannot be confirmed the way a property write can.** A keystroke has no read-back; anything that matters is verified afterwards with a bridge read
+- could, without containment, deliver an event to another application if focus or the pointer moved
+
+What contains that: a foreground check runs **immediately before every event**, including between a key press and its release, and refocuses Altium rather than failing; coordinates are refused unless the point is over a window belonging to Altium's own process; and no tool accepts a window handle from the caller, so an arbitrary window cannot be addressed. `tests/test_foreground_guard.py` enforces all three, checking the event guard per line of source rather than per function, because a function that checks once and then emits five events in a loop would pass a naive test while firing four unchecked events.
+
+**To switch it off entirely:**
+
+```
+EDA_AGENT_UI_AUTOMATION=0
+```
+
+Every synthesised event is then refused. Reading stays available on purpose, because dialog detection is how the rest of the system notices Altium is blocked on a modal.
+
+One case is not solvable: Altium's menu bar carries entries that are commands rather than menus (Place a Comment, Share, Open Home page, Preferences), and nothing distinguishes them. Measured across all 17 bar items: identical MSAA state including `HASPOPUP`, identical `accDefaultAction`, identical UIA control type. Listing such an entry clicks it, and clicking it runs it.
+
+Full detail in [`docs/ui-automation.md`](docs/ui-automation.md).
+
 ### Altium DelphiScript engine can crash
 
 Some tool paths trigger DelphiScript compile or runtime errors ("Undeclared identifier…", "Could not convert variant of type (Dispatch) into type (OleStr)", etc.). When that happens, the script project halts mid-execution and the polling loop stops responding. You will see one of:
@@ -289,9 +335,9 @@ Some tool paths trigger DelphiScript compile or runtime errors ("Undeclared iden
 
 This is an ongoing reliability effort. Every identified crash is either fixed or guarded. If you hit a new one, the Altium error dialog tells you the exact identifier or line. Opening an issue with that text helps us harden the relevant path.
 
-### Projects on a UNC network path do not open
+### UNC network paths need current scripts
 
-Use a mapped drive letter (`Z:\team\board.PrjPcb`) rather than a UNC path (`\\server\team\board.PrjPcb`). A path given in UNC form arrives at the bridge with one leading backslash missing, so the file is not found and the error names a path that looks almost right. Every other path form is unaffected, and a mapped drive is the workaround until the fix ships with the next script deploy.
+A UNC path (`\\server\team\board.PrjPcb`) opens like any other with the current scripts. Scripts deployed before the fix drop one leading backslash, so the file is not found and the error names a path that looks almost right. Run `eda-agent install-scripts --force` to update them, or use a mapped drive letter (`Z:\team\board.PrjPcb`) in the meantime.
 
 ### Text above Latin-1 becomes question marks
 
@@ -305,7 +351,7 @@ Altium itself uses DelphiScript internally for many built-in commands (some ribb
 
 **The polling loop owns the scripting engine for as long as it's running.** While it runs, Altium's own script-backed buttons sit waiting. The loop exits when either:
 
-- The MCP client calls `app_detach` (or the dashboard **Detach** button is clicked); the loop saves all dirty docs, exits within ~500 ms, and Altium becomes fully responsive, OR
+- The MCP client calls `app_detach` (or the dashboard **Detach** button is clicked); `app_detach` saves the edited documents (the button saves nothing), the loop exits within ~500 ms, and Altium becomes fully responsive, OR
 - **10 minutes of total silence** from the MCP client (no commands AND no keep-alive pings) triggers the built-in auto-shutdown
 
 In practice, while an MCP client is attached and sending keep-alive pings every 30 s, the loop will never time out on its own; you need to either have the AI call `app_detach` or close the MCP client session entirely. After the client disconnects, expect up to ~10 minutes for the loop to auto-exit unless you use **Detach** to release it immediately.
@@ -354,7 +400,13 @@ While an MCP client is attached, the Python bridge pings Altium every 30 seconds
 - **30 s later, Python pings** → Altium responds "pong", idle timer resets
 - **10 min later, still no AI activity and no ping** → Altium auto-shuts down
 
-In practice: the server stays alive as long as an MCP client is connected, and exits cleanly ~10 minutes after the client fully disconnects. No manual stop needed in the common case. For a hard exit, the AI (or the **Detach** button on the dashboard window) calls `app_detach`, which persists any unsaved work via `app_save_all` and returns control to Altium within ~500 ms.
+In practice: the server stays alive as long as an MCP client is connected, and exits cleanly ~10 minutes after the client fully disconnects. No manual stop needed in the common case. For a hard exit, the AI calls `app_detach`, which saves the documents that were edited, leaves clean ones untouched, and returns control to Altium within ~500 ms. The **Detach** button on the dashboard window stops the loop without saving.
+
+### Several Claude sessions on one Altium
+
+Every session runs its own eda-agent server, and all of them talk to the one script loop in Altium. Request ids carry a session tag and a sequence number. A session working alone is served straight through, in the order it sent its requests, with no time slots. When more than one session has requests waiting, the session being served keeps going for up to 30 seconds (`SESSION_SLOT_MS`), then the next waiting session gets one slot, and so on in turn, so no session gets a second slot before every waiting session has had one. A command already running is never interrupted: slots change between commands, so one long command (a large repour, say) still holds everyone else up until it finishes. While sessions contend, Altium refreshes `queue.json` in the workspace, and a waiting client keeps waiting instead of reporting the loop as dead.
+
+Things that affect every session at once: a deploy, a relaunch or a restart of Altium, and `app_detach`, which saves every document a tool edited, including another session's. To stop the loop without saving, put an empty file named `stop` in the workspace.
 
 ### Why this matters for Altium UI responsiveness
 
@@ -429,6 +481,13 @@ Workspace (used for IPC files between Python and Altium):
 - Override: set `EDA_AGENT_WORKSPACE` environment variable
 - The DelphiScript side reads the resolved path from `C:\ProgramData\eda-agent\workspace-path.txt`, which Python writes at startup and on every `install-scripts` run
 
+UI automation (synthesised keyboard and mouse input, used for the parts of Altium with no scripting API):
+
+- Default: **on**
+- Disable: set `EDA_AGENT_UI_AUTOMATION=0` (also `false`, `no`, `off`). Anything else leaves it on, so a typo cannot silently disable it
+- Read at call time, so it takes effect on the next event rather than the next restart
+- See [UI automation synthesises real keyboard and mouse input](#ui-automation-synthesises-real-keyboard-and-mouse-input) for what it is for and what it can do
+
 Coordinates throughout the API are in **mils** (1 mil = 0.0254 mm).
 
 ## Development
@@ -473,7 +532,7 @@ At wheel build time `scripts/altium/` is copied into `src/eda_agent/scripts/` in
 
 **"Script not responding" / MCP tools time out**: confirm the script project is loaded and `StartMCPServer` is running. Re-launch it via **File > Run Script... > StartMCPServer > Run**. Check `%USERPROFILE%\EDA Agent\workspace\` is writable.
 
-**Altium error dialog "Undeclared identifier: ..." or "Could not convert variant..."**: a DelphiScript crash in one of the bridge handlers. In Altium's Script IDE toolbar, press the red **Stop** button (or **Run > Stop** / **Ctrl+F3**; use **Ctrl+Pause/Break** if the script is stuck in an infinite loop) to halt the debugger. Then re-launch the polling loop via **File > Run Script... > StartMCPServer > Run**. Report the identifier or error text as an issue.
+**Altium error dialog "Undeclared identifier: ..." or "Could not convert variant..."**: a DelphiScript crash in one of the bridge handlers. In Altium's Script IDE toolbar, press the red **Stop** button (or **Run > Stop** / **Ctrl+F3**; use **Ctrl+Pause/Break** if the script is stuck in an infinite loop) to halt the debugger. Then re-launch the polling loop via **File > Run Script... > StartMCPServer > Run**. If the identifier is one the scripts themselves define, Altium is running an older compile of a unit: run `app_ping`, which names it in `stale_units`, then close the script project in the Projects panel (right-click `Altium_API.PrjScr`, **Close Project**), reopen it and run StartMCPServer. Otherwise report the identifier or error text as an issue.
 
 **Some Altium buttons don't respond while the server is running**: expected while the AI is actively issuing commands. Built-in Altium functions that depend on DelphiScript wait for the polling loop to yield. The loop enters an idle/yield mode within ~1 s of the last AI command; if a button is still unresponsive after that, call `app_detach` from the MCP client to fully release the scripting engine.
 

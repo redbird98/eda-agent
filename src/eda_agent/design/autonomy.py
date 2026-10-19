@@ -11,31 +11,46 @@ Codex, ...) can drive a full spec-to-board run the same way.
 
 Pure data; no Altium. Reuses the canonical stage list + playbooks so the
 guide never drifts from what the state machine actually enforces.
+
+The layout stages (placement, routing, pours_tuning, verification) end on
+MEASURED gates (``MEASURED_GATES``): each names a check, a number it
+reports and the value that passes. A client logs the measured result as
+``data`` on its stage_result, and ``apply_measured_gates`` reads those
+numbers back, so a stage logged ``ok`` whose own numbers fail its gate is
+sent back rather than taken on trust. A journal with no numbers in it is
+read exactly as before.
 """
 
 from __future__ import annotations
 
 import re
+from dataclasses import asdict, dataclass, replace
+from typing import Any
 
-from .session import STAGES
-from .state_machine import MAX_STAGE_ATTEMPTS, STAGE_PLAYBOOKS
+from .session import KIND_STAGE_RESULT, STAGES, STATUS_FAILED, STATUS_OK
+from .state_machine import MAX_STAGE_ATTEMPTS, RETRY, STAGE_PLAYBOOKS, next_action
 
 # The loop a client runs. Kept short and imperative: it is meant to be read
 # once and followed.
 LOOP_PROTOCOL = [
     "1. Call design_get_discipline once: hard rules + the DesignPlan schema.",
     "2. design_session_start(requirement): opens the durable journal. Keep "
-    "the returned session_id.",
+    "the returned session_id. Then design_live_view so the person can watch "
+    "the board change, and record each decision with its reason BEFORE "
+    "acting on it (design_live_note), one small checked step at a time.",
     "3. If a project is open or will be modified, app_checkpoint('before "
     "autonomous run') so the whole run is revertible.",
     "4. Loop: call design_next_action(session_id) and act on its status:",
     "   - proceed / retry: do the stage using its suggested_tools until the "
     "exit_gate is met, then design_session_log(event='stage_result', "
-    "stage=<stage>, status='ok'). If you cannot finish without the user, log "
-    "status='blocked' with a question and stop.",
+    "stage=<stage>, status='ok'). Where the gate names numbers, pass the "
+    "measured result as data=<result> and the harness checks them. If you "
+    "cannot finish without the user, log status='blocked' with a question "
+    "and stop.",
     "   - blocked: put the open_question to the user; when answered, "
     "design_session_log(event='resolved', text=<answer>) and continue.",
-    "   - complete: the pipeline is done; proceed to outputs review.",
+    "   - complete: the pipeline is done; write design_session_report into "
+    "the project's docs and proceed to outputs review.",
     "5. Checkpoint again before each high-risk mutating stage (sch_to_pcb, "
     "routing, pours_tuning).",
     "6. Long engine runs (routing a dense board) can exceed the tool "
@@ -54,6 +69,309 @@ HARD_CONSTRAINTS = [
     "the shipping bar.",
     "No unverifiable safety tables: ship only sourced/verified values.",
 ]
+
+
+# ---------------------------------------------------------------------------
+# Measured exit gates
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class Criterion:
+    """One number an exit gate names, and the value that passes it.
+
+    ``check`` is what reports the number: a ``layout.audit`` check
+    (served by pcb_layout_audit) or a tool. ``want`` is a number, or the
+    name of another metric of the same check ("routed == nets").
+    ``listed`` passes on the number being reported at all, whatever it
+    is: the gate asks for the findings to be on record, not for none.
+    ``also`` names other reports of the same number, read when the
+    primary one is absent.
+    """
+
+    check: str
+    metric: str
+    op: str = "=="               # "==" | "<=" | "listed"
+    want: Any = 0
+    also: tuple = ()
+
+    def text(self) -> str:
+        if self.op == "listed":
+            return f"{self.metric} listed"
+        out = f"{self.metric} {self.op} {self.want}"
+        if self.also:
+            check, metric = self.also[0]
+            out += f" (or {check} {metric} {self.op} {self.want})"
+        return out
+
+    def as_dict(self) -> dict:
+        return {"check": self.check, "metric": self.metric, "op": self.op,
+                "want": self.want}
+
+
+#: The checks ``layout.audit.run_audits`` runs, which pcb_layout_audit
+#: serves. A test holds this to ``layout.audit.CHECKS``; it is spelled
+#: out here so the guide does not import the layout engine to print a
+#: sentence.
+AUDIT_CHECKS = ("placement_audit", "connectivity_summary", "drc",
+                "corner_audit", "return_via_audit", "plane_region_audit",
+                "loop_audit", "pad_entry_audit")
+
+_DRC = Criterion("drc", "violations", "==", 0,
+                 also=(("pcb_run_drc", "violation_count"),
+                       ("run_drc", "violation_count")))
+_ERC = Criterion("proj_run_erc", "violation_count", "==", 0,
+                 also=(("run_erc", "violation_count"),))
+_PLACEMENT = (
+    Criterion("placement_audit", "overlaps"),
+    Criterion("placement_audit", "pad_gaps_below_rule"),
+    Criterion("placement_audit", "on_keepouts"),
+    Criterion("placement_audit", "on_mounting_holes"),
+    Criterion("placement_audit", "off_board"),
+)
+_ROUTING = (
+    Criterion("connectivity_summary", "routed", "==", "nets"),
+    _DRC,
+    Criterion("corner_audit", "sharper_than_45"),
+)
+_POURS = (
+    Criterion("plane_region_audit", "islands"),
+    Criterion("pcb_calc_length_match", "worst_skew_ps", "<=", "skew_budget_ps"),
+    _DRC,
+)
+
+#: Stage -> the numbers that end it. Verification re-measures everything
+#: the layout stages did on the finished board, adds ERC, and puts the
+#: return-via exceptions on record.
+MEASURED_GATES: dict[str, tuple[Criterion, ...]] = {
+    "placement": _PLACEMENT,
+    "routing": _ROUTING,
+    "pours_tuning": _POURS,
+    "verification": tuple(dict.fromkeys(
+        _PLACEMENT + _ROUTING + _POURS
+        + (_ERC, Criterion("return_via_audit", "exceptions", "listed")))),
+}
+
+#: What a gate asks that is not a number, said after the numbers.
+_GATE_EXTRA = {
+    "placement": "Check the design_visual_review render by eye as well.",
+    "pours_tuning": "Skew is the worst length-matched group's; a board with "
+                    "no matched group has none to measure.",
+    "verification": "The design_lint_report sweep is clean too.",
+}
+
+_GATE_LOG = ("Log the measured results as data on the stage_result; the "
+             "harness checks these numbers and sends the stage back if one "
+             "fails.")
+
+
+def _measured_by(check: str) -> str:
+    return "pcb_layout_audit" if check in AUDIT_CHECKS else check
+
+
+def gate_text(stage: str) -> str:
+    """The measured exit gate as one instruction, built from the criteria
+    so the sentence a client reads and the numbers the harness checks
+    cannot say different things."""
+    by_tool: dict[str, dict[str, list[Criterion]]] = {}
+    for c in MEASURED_GATES[stage]:
+        by_tool.setdefault(_measured_by(c.check), {}).setdefault(c.check, []).append(c)
+    parts = []
+    for tool, checks in by_tool.items():
+        if tool == "pcb_layout_audit":
+            body = "; ".join(f"{check} " + ", ".join(c.text() for c in crits)
+                             for check, crits in checks.items())
+        else:
+            body = "; ".join(", ".join(c.text() for c in crits)
+                             for crits in checks.values())
+        parts.append(f"{tool}: {body}.")
+    if stage in _GATE_EXTRA:
+        parts.append(_GATE_EXTRA[stage])
+    parts.append(_GATE_LOG)
+    return " ".join(parts)
+
+
+def exit_gate_for(stage: str) -> str:
+    """The exit gate a client is given: measured where the stage has one."""
+    if stage in MEASURED_GATES:
+        return gate_text(stage)
+    return STAGE_PLAYBOOKS[stage]["exit_gate"]
+
+
+_MISSING = object()
+
+
+def _number(value: Any) -> Any:
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (int, float)):
+        return value
+    if isinstance(value, (list, tuple)):
+        return len(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            return _MISSING
+    return _MISSING
+
+
+def _find(data: Any, check: str, metric: str) -> Any:
+    """One logged number, wherever a client is likely to have put it.
+
+    Read from: a flat ``"check.metric"`` key; the full pcb_layout_audit
+    result (``checks`` -> check -> ``counts``); its ``summary``; or a
+    check's own result logged under its name, such as the reply of
+    pcb_calc_length_match under ``"pcb_calc_length_match"``.
+    """
+    if not isinstance(data, dict):
+        return _MISSING
+    flat = f"{check}.{metric}"
+    if flat in data:
+        return _number(data[flat])
+    for holder in (data.get("checks"), data, data.get("summary")):
+        if not isinstance(holder, dict):
+            continue
+        rec = holder.get(check)
+        if not isinstance(rec, dict):
+            continue
+        counts = rec.get("counts")
+        if isinstance(counts, dict) and metric in counts:
+            return _number(counts[metric])
+        if metric in rec:
+            return _number(rec[metric])
+    return _MISSING
+
+
+def _holds(got: float, op: str, want: float) -> bool:
+    if op == "==":
+        return abs(got - want) <= 1e-9
+    if op == "<=":
+        return got <= want + 1e-9
+    raise ValueError(f"unknown comparison {op!r}")
+
+
+def _show(v: Any) -> str:
+    if isinstance(v, float) and v.is_integer():
+        return str(int(v))
+    return str(v)
+
+
+def evaluate_gate(stage: str, data: Any) -> dict:
+    """Judge one stage's logged numbers against its measured gate.
+
+    ``verdict`` is ``pass`` (every number logged and passing), ``fail``
+    (a logged number fails), ``incomplete`` (what was logged passes but
+    some numbers are absent), ``unmeasured`` (none logged) or
+    ``not_gated`` (the stage has no measured gate). ``failed`` and
+    ``missing`` say which, in words.
+    """
+    rows, failed, missing = [], [], []
+    for c in MEASURED_GATES.get(stage, ()):
+        got, src, src_check = _MISSING, c.check, c.check
+        for check, metric in ((c.check, c.metric),) + tuple(c.also):
+            found = _find(data, check, metric)
+            if found is not _MISSING:
+                got, src, src_check = found, f"{check}.{metric}", check
+                break
+        want = c.want
+        if got is not _MISSING and isinstance(want, str):
+            want = _find(data, src_check, want)
+        row = {"check": c.check, "metric": c.metric, "op": c.op, "want": c.want,
+               "got": None, "pass": None, "source": src}
+        rows.append(row)
+        if got is _MISSING or (c.op != "listed" and want is _MISSING):
+            missing.append(f"{c.check} {c.text()}")
+            continue
+        ok = c.op == "listed" or _holds(got, c.op, want)
+        row["got"], row["pass"] = got, ok
+        if isinstance(c.want, str) and c.op != "listed":
+            row["want_value"] = want
+        if not ok:
+            target = (f"{c.op} {c.want} ({_show(want)})" if isinstance(c.want, str)
+                      else f"{c.op} {_show(c.want)}")
+            failed.append(f"{src} = {_show(got)}, wants {target}")
+    if not rows:
+        verdict = "not_gated"
+    elif failed:
+        verdict = "fail"
+    elif len(missing) == len(rows):
+        verdict = "unmeasured"
+    elif missing:
+        verdict = "incomplete"
+    else:
+        verdict = "pass"
+    return {"stage": stage, "verdict": verdict, "criteria": rows,
+            "failed": failed, "missing": missing}
+
+
+def stage_evidence(events) -> dict:
+    """Stage -> the data logged with its LAST stage_result ({} if none).
+
+    The last, not the latest that carried numbers: a later result is the
+    client's newer word on the stage, and reading older numbers past it
+    would judge a board that no longer exists.
+    """
+    out: dict = {}
+    for ev in events:
+        if ev.kind == KIND_STAGE_RESULT:
+            p = ev.payload or {}
+            stage = p.get("stage")
+            if stage:
+                out[stage] = p.get("data") or {}
+    return out
+
+
+def apply_measured_gates(state, events) -> tuple:
+    """(state as the gates see it, stage -> verdict for measured stages).
+
+    A stage logged ``ok`` whose own logged numbers fail its gate is read
+    as ``failed``, so the state machine sends the run back to it, counts
+    the attempt, and escalates to the user after the usual number of
+    tries. A stage with no numbers logged keeps its logged status: that
+    is every journal written before the gates were measurable.
+    """
+    verdicts: dict = {}
+    status = dict(state.stage_status)
+    for stage, data in stage_evidence(events).items():
+        if stage not in MEASURED_GATES:
+            continue
+        verdict = evaluate_gate(stage, data)
+        if verdict["verdict"] == "unmeasured":
+            continue
+        verdicts[stage] = verdict
+        if verdict["verdict"] == "fail" and status.get(stage) == STATUS_OK:
+            status[stage] = STATUS_FAILED
+    if status == state.stage_status:
+        return state, verdicts
+    nxt = next((s for s in STAGES if status.get(s) != STATUS_OK), None)
+    return replace(state, stage_status=status, next_stage=nxt,
+                   complete=nxt is None), verdicts
+
+
+def measured_next_action(state, events) -> dict:
+    """``state_machine.next_action`` with the measured gates applied.
+
+    The stage's exit gate is the measured one, its criteria are given as
+    data under ``gate``, and the verdict on numbers already logged for it
+    under ``last_gate``. When the run is sent back because those numbers
+    failed, the guidance says which ones.
+    """
+    measured, verdicts = apply_measured_gates(state, events)
+    action = asdict(next_action(measured))
+    stage = action.get("stage")
+    if stage in MEASURED_GATES and action.get("exit_gate"):
+        action["exit_gate"] = gate_text(stage)
+        action["gate"] = [c.as_dict() for c in MEASURED_GATES[stage]]
+        action["guidance"] += (" Pass the measured results as data on that "
+                               "stage_result so the harness can check them.")
+    verdict = verdicts.get(stage)
+    if verdict is not None:
+        action["last_gate"] = verdict
+        if verdict["verdict"] == "fail" and action["status"] == RETRY:
+            action["guidance"] = (
+                "The numbers logged for this stage fail its exit gate: "
+                + "; ".join(verdict["failed"]) + ". " + action["guidance"])
+    return action
 
 
 _BACKEND_TOOLS: dict = {}
@@ -299,13 +617,15 @@ def _stage_entry(stage: str, available: set, backend: str = "") -> dict:
     usable, absent = _stage_tools(stage, available)
     play = STAGE_PLAYBOOKS[stage]
     goal, gate = _adapt_lines(
-        [play["goal"], play["exit_gate"]], backend or "altium", available)
+        [play["goal"], exit_gate_for(stage)], backend or "altium", available)
     entry = {
         "stage": stage,
         "goal": goal,
         "tools": usable,
         "exit_gate": gate,
     }
+    if stage in MEASURED_GATES:
+        entry["gate"] = [c.as_dict() for c in MEASURED_GATES[stage]]
     if absent:
         entry["tools_not_on_this_backend"] = absent
     if not usable:

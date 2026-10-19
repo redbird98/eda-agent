@@ -185,11 +185,20 @@ RULE_INC_ARRAY = LineRule(
 RESERVED_AS_NAME = {"Label", "Type", "Class", "Object", "Record", "Array",
                     "Set", "String", "File", "Unit", "Function", "Procedure",
                     "Const", "Var", "End", "Begin", "If", "Then", "Else",
-                    "Goto", "With", "In", "Is", "As", "Of", "Out"}
+                    "Goto", "With", "In", "Is", "As", "Of", "Out",
+                    # Measured 2026-09-24: `Index, Emitted, I : Integer;` in a
+                    # Var block failed Altium's compile with "Error in
+                    # declaration block". Delphi reads index as a property
+                    # directive.
+                    "Index"}
+_RESERVED_ALT = "|".join(sorted(RESERVED_AS_NAME))
 RULE_RESERVED_IDENT = LineRule(
     name="reserved-word-as-identifier",
+    # Anywhere in a parameter's name list, not only first: `(A, Index : X)`.
+    # Case-insensitive, because DelphiScript is.
     pattern=re.compile(
-        r"(?:\(|;)\s*(" + "|".join(RESERVED_AS_NAME) + r")\s*:"),
+        r"(?:\(|;)\s*(?:\w+\s*,\s*)*\b(" + _RESERVED_ALT + r")\b\s*(?:,|:)",
+        re.IGNORECASE),
     severity="error",
     memory="delphiscript_reserved_words.md",
     description="Reserved keyword used as parameter name; rename it.",
@@ -265,6 +274,91 @@ RULE_PCB_SUBTYPE_ON_BASE = LineRule(
     memory="delphiscript_interface_narrowing.md",
     description="Subtype-only PCB property on a base IPCB_Primitive var; narrow to a typed local (Track/Arc/Pad/...) via ObjectId.",
 )
+
+# A PCB arc's stroke is LineWidth; IPCB_Arc has no Width. Arc.Width stops the
+# script with "Undeclared identifier" and Try/Except does not catch it (seen on
+# a live board 2026-09-14, fixed in 2d1630b). Schematic objects do have Width,
+# which is why the subtype rule above leaves it out and this one keys on the
+# Arc local name.
+RULE_ARC_WIDTH = LineRule(
+    name="pcb-arc-width",
+    pattern=re.compile(r"\bArc\.Width\b"),
+    severity="error",
+    memory="delphiscript_interface_narrowing.md",
+    description="IPCB_Arc has no Width; read Arc.LineWidth instead.",
+)
+
+# Pascal binds Or, And and Xor tighter than =, <> and the other comparisons, so
+# `A = 'x' Or B = 'y'` reads as `A = ('x' Or B) = 'y'`, which is a type error
+# or a wrong test, never what was meant. Every comparison beside one has to be
+# bracketed. Found as an unbracketed line in a property allow-list.
+_UNBRACKETED_COMPARISON = re.compile(
+    r"(?<![(\w.'])[A-Za-z_][\w.]*(?:\[[^\]]*\])?\s*(?:=|<>|<=|>=|<|>)\s*"
+    r"(?:'[^']*'|[\w.]+(?:\([^()]*\))?)\s+(?:Or|And|Xor)\b"
+    r"|\b(?:Or|And|Xor)\s+(?!\(|Not\b)[A-Za-z_][\w.]*(?:\[[^\]]*\])?\s*"
+    r"(?:=|<>|<=|>=|<|>)\s*", re.IGNORECASE)
+
+
+def _blank_comments_and_strings(text: str) -> str:
+    """``text`` with every comment and string body blanked, across lines.
+
+    Unlike the per-line stripper this tracks a brace comment over several
+    lines, so prose inside one is never read as code. Newlines are kept.
+    """
+    def blank(chunk: str) -> str:
+        return "".join("\n" if c == "\n" else " " for c in chunk)
+
+    out = []
+    i, n = 0, len(text)
+    while i < n:
+        ch = text[i]
+        if ch == "{":
+            end = text.find("}", i)
+            end = n if end == -1 else end + 1
+            out.append(blank(text[i:end]))
+            i = end
+        elif text.startswith("(*", i):
+            end = text.find("*)", i)
+            end = n if end == -1 else end + 2
+            out.append(blank(text[i:end]))
+            i = end
+        elif text.startswith("//", i):
+            end = text.find("\n", i)
+            end = n if end == -1 else end
+            out.append(blank(text[i:end]))
+            i = end
+        elif ch == "'":
+            end = i + 1
+            while end < n:
+                if text[end] == "'":
+                    if text[end + 1:end + 2] == "'":
+                        end += 2
+                        continue
+                    break
+                end += 1
+            out.append("'" + blank(text[i + 1:end]) + "'")
+            i = end + 1
+        else:
+            out.append(ch)
+            i += 1
+    return "".join(out)
+
+
+def _scan_unbracketed_comparison(path: str, text: str) -> list[Finding]:
+    """A comparison beside Or, And or Xor with no brackets around it."""
+    findings: list[Finding] = []
+    raw_lines = text.split("\n")
+    clean_lines = _blank_comments_and_strings(text).split("\n")
+    for line_no, clean in enumerate(clean_lines, 1):
+        m = _UNBRACKETED_COMPARISON.search(clean)
+        if m:
+            findings.append(Finding(
+                file=path, line=line_no, col=m.start() + 1,
+                rule="unbracketed-comparison", severity="error",
+                snippet=raw_lines[line_no - 1],
+                memory="delphiscript_api_quirks.md",
+            ))
+    return findings
 
 # IPCB_Rule.Priority is a read-only function, not a property.
 RULE_RULE_PRIORITY_WRITE = LineRule(
@@ -460,6 +554,7 @@ LINE_RULES = [
     RULE_PCB_SUBTYPE_ON_BASE,
     RULE_FOOTPRINT_NAME_WRITE,
     RULE_RULE_PRIORITY_WRITE,
+    RULE_ARC_WIDTH,
     RULE_PROBE_TEXT_WRITE,
     RULE_KNOWN_WRONG_E_IDENT,
     RULE_KNOWN_WRONG_METHOD,
@@ -707,8 +802,12 @@ def _scan_dollar_i(path: str, text: str) -> list[Finding]:
 _VAR_OR_CONST_HEADER = re.compile(r"^\s*(Var|Const)\b", re.IGNORECASE)
 _BLOCK_TERMINATOR = re.compile(
     r"^\s*(Begin|Function|Procedure|Type)\b", re.IGNORECASE)
+# Anywhere in the declared name list, not only first: the declaration that
+# failed was `Index, Emitted, I : Integer;`, which a first-name-only match
+# walked straight past.
 _RESERVED_DECL = re.compile(
-    r"^\s*(" + "|".join(RESERVED_AS_NAME) + r")\s*:")
+    r"^\s*(?:\w+\s*,\s*)*\b(" + _RESERVED_ALT + r")\b\s*(?:,|:)",
+    re.IGNORECASE)
 
 
 def _scan_reserved_in_var_block(path: str, lines: list[str]) -> list[Finding]:
@@ -939,7 +1038,10 @@ def lint_file(path: str) -> list[Finding]:
     findings.extend(_scan_reserved_in_var_block(rel, raw_lines))
     findings.extend(_scan_param_redeclared_as_local(rel, raw_lines))
     findings.extend(_scan_dollar_i(rel, text))
+    findings.extend(_scan_unbracketed_comparison(rel, text))
     findings.extend(_scan_call_before_definition(rel, raw_lines))
+    findings.extend(_scan_undeclared_local(rel, raw_lines))
+    findings.extend(_scan_local_shadows_enum(rel, raw_lines))
     # Comment-brace check uses raw text (it tracks comment depth itself).
     findings.extend(_scan_comment_brace(rel, text))
 
@@ -1110,6 +1212,266 @@ def _scan_param_redeclared_as_local(path: str, lines: list[str]) -> list[Finding
                         ))
             j += 1
         i = j
+    return findings
+
+
+#: Language builtins. A routine that declares a local with one of these
+#: names shadows the builtin, which is legal and happens here: Library.pas
+#: uses `Length` as a variable in two routines. Without this exclusion the
+#: undeclared-local rule reported every OTHER routine that calls the real
+#: Length(), which is the opposite of the mistake being hunted.
+_BUILTIN_NAMES = {
+    "length", "copy", "pos", "trim", "result", "inc", "dec", "round",
+    "abs", "chr", "ord", "high", "low", "sqrt", "exit", "break",
+    "continue", "assigned", "uppercase", "lowercase", "inttostr",
+    "strtoint", "floattostr", "strtofloat", "format", "delete",
+    "insert", "concat", "setlength", "sizeof", "true", "false", "nil",
+}
+
+
+def _blank_block_comments(lines: list[str]) -> list:
+    """Lines with `{ ... }` comment text replaced by spaces.
+
+    strip_comments_and_strings works a line at a time, so a brace comment
+    spanning several lines is only stripped on its first line and the rest
+    reads as code. Every remaining false positive from the undeclared-local
+    rule was prose inside such a comment being taken for an identifier.
+
+    Line structure and column positions are preserved so a finding still
+    points at the right place.
+    """
+    out, depth = [], 0
+    for line in lines:
+        buf = []
+        i = 0
+        while i < len(line):
+            ch = line[i]
+            if depth == 0 and ch == "{":
+                depth += 1
+                buf.append(" ")
+            elif depth > 0:
+                if ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                buf.append(" ")
+            elif ch == "/" and i + 1 < len(line) and line[i + 1] == "/":
+                buf.append(" " * (len(line) - i))
+                break
+            else:
+                buf.append(ch)
+            i += 1
+        out.append("".join(buf))
+    return out
+
+
+def _routine_spans(lines: list[str]) -> list:
+    """(name, first_line_index, begin_index, end_index) for each routine.
+
+    Reuses the same head-matching as the other scans so a routine whose
+    signature wraps across lines is still found.
+    """
+    # NOT _ROUTINE_HEAD: that one requires a '(' because its own caller
+    # needs a parameter list. A parameterless routine was therefore not a
+    # boundary here, so each span ran on into the next routine and every
+    # local of that routine looked undeclared. That was 203 of the first
+    # 203 findings.
+    #
+    # ONLY TOP-LEVEL ROUTINES, and only ones that do not nest. DelphiScript
+    # allows a routine inside a routine, and then the OUTER routine's Var
+    # block sits after the inner routine rather than before it, so a flat
+    # start-to-next-head model attributes the outer's locals to the inner
+    # and reports every one of them as undeclared. Representing that
+    # properly needs Begin/End depth parsing, and a linter that is wrong
+    # about scope is worse than one that says less: a nesting routine is
+    # skipped rather than guessed at.
+    top_pattern = re.compile(
+        r"^(?:Function|Procedure)\s+(\w+)\s*[(;:]", re.IGNORECASE)
+    nested_pattern = re.compile(
+        r"^\s+(?:Function|Procedure)\s+\w+\s*[(;:]", re.IGNORECASE)
+    head_pattern = top_pattern
+    spans = []
+    heads = [k for k, line in enumerate(lines)
+             if top_pattern.match(strip_comments_and_strings(line))]
+    for n, start in enumerate(heads):
+        stop = heads[n + 1] if n + 1 < len(heads) else len(lines)
+        begin = None
+        for k in range(start, stop):
+            if re.match(r"^\s*Begin\b", strip_comments_and_strings(lines[k]),
+                        re.IGNORECASE):
+                begin = k
+                break
+        if begin is None:
+            continue
+        if any(nested_pattern.match(strip_comments_and_strings(lines[k]))
+               for k in range(start, stop)):
+            continue
+        named = head_pattern.match(strip_comments_and_strings(lines[start]))
+        spans.append((named.group(1) if named else "?", start, begin, stop))
+    return spans
+
+
+def _declared_names(lines: list[str], start: int, begin: int) -> set:
+    """Parameter and Var-block names visible inside one routine."""
+    names = set()
+    head = ""
+    depth = 0
+    for k in range(start, begin + 1):
+        piece = strip_comments_and_strings(lines[k])
+        head += piece
+        depth += piece.count("(") - piece.count(")")
+        if depth <= 0 and "(" in head:
+            break
+    if "(" in head and ")" in head:
+        inner = head[head.index("(") + 1:head.rindex(")")]
+        for part in inner.split(";"):
+            for name in part.split(":")[0].split(","):
+                name = re.sub(r"^(?:var|const|out)\s+", "", name.strip(),
+                              flags=re.IGNORECASE).strip().lstrip("&")
+                if name.isidentifier():
+                    names.add(name.lower())
+
+    def take(text: str) -> None:
+        for name in text.split(":")[0].split(","):
+            name = name.strip()
+            if name.isidentifier():
+                names.add(name.lower())
+
+    in_vars = False
+    for k in range(start, begin):
+        line = strip_comments_and_strings(lines[k])
+        if _VAR_OR_CONST_HEADER.match(line):
+            in_vars = True
+            # `Var dx, dy, tt : Double;` puts the declarations on the
+            # SAME line as the keyword. Skipping the whole line lost them
+            # and reported every use of dx as undeclared.
+            rest = re.sub(r"^\s*(?:Var|Const)\b", "", line,
+                          flags=re.IGNORECASE)
+            if ":" in rest:
+                take(rest)
+            continue
+        if in_vars and ":" in line:
+            take(line)
+    return names
+
+
+
+def _scan_local_shadows_enum(path: str, lines: list[str]) -> list[Finding]:
+    """A local or parameter whose name is an enum constant in other case.
+
+    DelphiScript names are case-insensitive, so a local ``EArc`` IS
+    ``eArc`` inside its routine. Gen_MirrorSchComponent declared
+    ``EArc : ISch_EllipticalArc`` and compared ``Kind = eArc``: the
+    comparison read the unassigned local (0), never matched, and every
+    arc of a mirrored symbol stayed where it was while the call reported
+    it skipped as kind 8. Nothing raises; the constant is simply gone in
+    that routine.
+
+    Flags a use spelled like an enum constant (``e`` then a capital) whose
+    name the routine declares in a different case. A local declared with
+    the same spelling as its uses is the local, and is left alone.
+
+    Line by line, not through _blank_block_comments: that one reads the
+    brace in a string such as '{"designator":' as a comment opening and
+    blanked the very lines this rule has to see.
+    """
+    findings: list[Finding] = []
+    for _name, start, begin, stop in _routine_spans(lines):
+        declared = _declared_names(lines, start, begin)
+        if not declared:
+            continue
+        header = " ".join(strip_comments_and_strings(lines[k])
+                          for k in range(start, begin))
+        spelled = set(re.findall(r"\b\w+\b", header))
+        for k in range(begin, stop):
+            text = strip_comments_and_strings(lines[k])
+            for m in re.finditer(r"\be[A-Z]\w*", text):
+                tok = m.group(0)
+                if tok.lower() in declared and tok not in spelled:
+                    findings.append(Finding(
+                        file=path, line=k + 1, col=m.start() + 1,
+                        rule="local-shadows-enum", severity="error",
+                        snippet=lines[k],
+                        memory="delphiscript_reserved_words.md",
+                    ))
+    return findings
+
+def _scan_undeclared_local(path: str, lines: list[str]) -> list[Finding]:
+    """An identifier used as a local that this routine never declares.
+
+    THE FAILURE IS SILENT UNTIL IT RUNS. DelphiScript resolves late, so
+    an undeclared identifier compiles and then faults the moment the line
+    executes, taking the polling loop with it.
+
+    MEASURED: Lib_AddFootprintPads passed bare `Board` to ResolveLayerId
+    while every other call site in the same file passed `PcbLib.Board`.
+    The routine never declared `Board`, the linter was silent, and the
+    script halted on that line in Altium.
+
+    THE RULE IS DELIBERATELY NARROW. It only considers a name that this
+    same file declares as a local in at least two OTHER routines, which
+    makes it a name the file clearly treats as routine-scoped rather than
+    a global or an Altium builtin. That keeps it to the real confusion
+    (a variable someone forgot to declare or assign here) and away from
+    the late-bound API surface, where deciding what exists is not
+    something a linter can do.
+    """
+    findings: list[Finding] = []
+    # Block comments blanked first: prose inside a multi-line `{ ... }`
+    # was being read as code and was every remaining false positive.
+    lines = _blank_block_comments(lines)
+    spans = _routine_spans(lines)
+    if not spans:
+        return findings
+
+    declared_by = {}
+    per_routine = {}
+    for name, start, begin, stop in spans:
+        names = _declared_names(lines, start, begin)
+        per_routine[(name, start)] = (names, begin, stop)
+        for n in names:
+            declared_by.setdefault(n, set()).add((name, start))
+
+    # Names this file treats as routine-scoped, minus anything that is
+    # also a language builtin. Two routines in Library.pas declare a
+    # variable called `Length`, which shadows the builtin, and without
+    # this every other routine that calls Length(...) was reported.
+    local_names = {n for n, owners in declared_by.items()
+                   if len(owners) >= 2 and n not in _BUILTIN_NAMES}
+    if not local_names:
+        return findings
+
+    for key, (names, begin, stop) in per_routine.items():
+        routine, start = key
+        missing = local_names - names
+        if not missing:
+            continue
+        for k in range(begin, stop):
+            line = strip_comments_and_strings(lines[k])
+            for m in re.finditer(r"[A-Za-z_][A-Za-z0-9_]*", line):
+                word = m.group(0)
+                low = word.lower()
+                if low not in missing:
+                    continue
+                # THE POSITION OF THIS MATCH, not the first place the
+                # substring appears. Using find() located 'Name' inside
+                # 'ThisName', read the preceding character as 's' rather
+                # than '.', and reported 401 findings that were almost
+                # all this one mistake.
+                idx = m.start()
+                # `Something.Board` is a property access, not this local.
+                # `$F` is a hex literal, not an identifier called F.
+                # `&Type` is an escaped reserved word.
+                if idx > 0 and line[idx - 1] in ".$&":
+                    continue
+                findings.append(Finding(
+                    file=path, line=k + 1, col=idx + 1,
+                    rule="undeclared-local",
+                    severity="error",
+                    snippet=lines[k].rstrip(),
+                    memory="altium_wrong_api_identifier_family.md",
+                ))
+                break
     return findings
 
 

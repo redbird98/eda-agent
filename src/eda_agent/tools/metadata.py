@@ -78,6 +78,12 @@ _CATEGORY_BY_PREFIX = (
     # matters here: the first match wins, so a new prefix that is a
     # prefix of an existing one has to go above it.
     ("easyeda_", "easyeda"),
+    # Package checks and renders work on a footprint before it exists in any
+    # library; filed with the library tools that draw it.
+    ("footprint_", "library"),
+    # A datasheet is a part's document, fetched like part_fetch fetches a
+    # part, and with no editor involved.
+    ("datasheet_", "parts"),
 )
 
 # Tools every one of whose bridge commands the in-repo Altium simulator
@@ -97,7 +103,8 @@ _CATEGORY_BY_PREFIX = (
 # handler, and a tool is only covered when EVERY command it sends is,
 # because one unanswered call ends the run just as surely.
 _SIMULATOR_TOOLS = frozenset({
-    "app_detach", "app_get_active_document", "app_get_version",
+    "app_context", "app_detach", "app_get_active_document",
+    "app_get_version",
     "app_list_documents", "app_set_active_document",
     "audit_find_missing_decoupling",
     "audit_find_pin_net_name_mismatches",
@@ -105,12 +112,12 @@ _SIMULATOR_TOOLS = frozenset({
     "lib_add_footprint_arc", "lib_add_footprint_pad",
     "lib_add_footprint_pads", "lib_add_footprint_track",
     "lib_add_footprint_tracks", "lib_add_pins",
-    "lib_add_symbol_rectangle", "lib_add_symbol_text",
+    "lib_add_symbol_polygon", "lib_add_symbol_rectangle", "lib_add_symbol_text",
     "lib_batch_rename", "lib_batch_set_params", "lib_create_footprint",
     "lib_create_ic_symbol", "lib_create_standard_footprint",
     "lib_create_symbol", "lib_diff_libraries",
     "lib_get_component_details", "lib_get_components",
-    "lib_link_3d_model", "lib_link_footprint", "lib_search",
+    "lib_link_3d_model", "lib_link_footprint",
     "obj_create", "obj_delete", "obj_deselect_all", "obj_get_font_id",
     "obj_get_font_spec", "obj_modify", "obj_query", "obj_run_process",
     "obj_select", "obj_zoom", "pcb_bind_pad_nets",
@@ -119,7 +126,7 @@ _SIMULATOR_TOOLS = frozenset({
     "pcb_get_components", "pcb_get_nets", "pcb_get_unrouted_nets",
     "pcb_get_vias", "pcb_move_components", "pcb_place_components",
     "pcb_place_tracks", "pcb_place_via", "pcb_run_drc",
-    "proj_add_document", "proj_annotate", "proj_close", "proj_compile",
+    "proj_add_document", "proj_annotate", "proj_compile",
     "proj_create", "proj_cross_probe", "proj_export_bom_html",
     "proj_export_netlist", "proj_export_pdf", "proj_get_board_info",
     "proj_get_bom", "proj_get_component_info", "proj_get_focused",
@@ -137,6 +144,12 @@ _OFFLINE_CATEGORIES = frozenset({"routing", "meta", "parts"})
 # Tools that are pure Python regardless of their prefix (deterministic, no
 # bridge round-trip). Substring match keeps the calculators in one rule.
 _OFFLINE_SUBSTRINGS = ("_calc_", "calc_", "_compute_", "compute_")
+
+# Pure Python tools filed under a category that is otherwise bridge-backed:
+# the package checks compute over a package description and never reach an
+# editor, so they work with nothing running.
+_OFFLINE_BY_NAME = frozenset({"footprint_check_package",
+                              "footprint_render_package"})
 
 # ...except calculators that read their input FROM THE BOARD. The
 # substring rule above assumes a calc tool is pure maths; these query
@@ -159,6 +172,14 @@ _DESIGN_BRIDGE = frozenset(
         # Both fetch board state over the bridge before reporting.
         "design_lint_report",
         "design_visual_review",
+        # These three extract symbol geometry, or read the live sheet,
+        # over the bridge. Each CATCHES the failure and answers anyway,
+        # so with no Altium running they return a degraded result rather
+        # than an error, and calling them offline is what sends somebody
+        # to rely on that result.
+        "design_preview_plan",
+        "design_hints_from_sheet",
+        "design_plan_from_sheet",
     }
 )
 
@@ -176,6 +197,25 @@ INTERACTION_OVERRIDES = {
     # answer, and anyone filtering for operations that keep the session
     # responsive must not be handed this one.
     "app_update_from_libraries": MODAL,
+    # MEASURED MODAL during the live sweep of 2026-08-24. Each of these was
+    # published as silent, so anything filtering for "keeps the session
+    # responsive" was handed a tool that blocks the bridge until a human
+    # answers a dialog. The dialog seen is named beside each one.
+    # Design Rule Checker (TDesignRuleCheckForm). Altium exposes no
+    # non-interactive DRC trigger, so the tool's only functional path is
+    # the modal one: it refuses unless called with allow_modal=True.
+    # Measured behind the dialog: a 30-minute dead loop to an 1800 s
+    # client timeout. pcb_get_clearance_violations reads stored
+    # violations instead and stays readonly.
+    "pcb_run_drc": MODAL,
+    "proj_export_pdf": MODAL,         # Preview PCB / print preview
+    "proj_run_output": MODAL,         # Altium's exporter dialogs
+    # These three raise "Unsaved Changes" whenever the target is dirty, and
+    # that one is a WPF dialog whose buttons expose no window handles, so
+    # app_press_dialog_button cannot answer it. Keyboard only.
+    "lib_reload_library": MODAL,
+    "proj_remove_document": MODAL,
+    "proj_close": MODAL,
     # Succeeds but leaves the job incomplete.
     "pcb_place_components": PARTIAL,  # geometry only; needs pcb_build_from_project for nets
     # "diff" homograph: _READONLY_SUBSTRINGS carries "_diff_" for
@@ -195,6 +235,20 @@ INTERACTION_OVERRIDES = {
     # (mutates). State the truth explicitly rather than depending on a
     # side effect of another rule.
     "design_visual_review": READONLY,
+    # Reports a pin's root, its electrical connection point, and every
+    # object sitting on each. Pure inspection -- it exists precisely so a
+    # caller can debug connectivity WITHOUT touching the sheet. The obj_
+    # prefix defaults to "silent" (mutating), which is the opposite of
+    # the truth here, so say so explicitly.
+    "obj_explain_pin": READONLY,
+    # Reads the board (or a saved board model) and measures it: overlaps,
+    # gaps, connectivity, corners, return vias, plane islands. Nothing is
+    # written. The pcb_ prefix defaults to silent, which would tell anyone
+    # filtering for safe operations that an audit edits the board.
+    "pcb_layout_audit": READONLY,
+    # Reads a database library's declared tables and fields. The lib_ prefix
+    # does not make that clear to the classifier; it writes nothing.
+    "lib_dblib_info": READONLY,
     # part_fetch writes library files when given download_dir. The
     # "parts" category is offline, and offline falls back to READONLY,
     # which would advertise a tool that touches the filesystem as
@@ -202,6 +256,16 @@ INTERACTION_OVERRIDES = {
     # lib_extract_cse_zip, proj_export_pdf, pcb_render_svg) is SILENT,
     # so match them. part_search never writes and stays readonly.
     "part_fetch": SILENT,
+    # Writes the downloaded PDF and its sidecar into the workspace cache.
+    # Filed under parts, which is offline and so falls back to READONLY;
+    # a tool that writes files is SILENT here, as part_fetch is.
+    "datasheet_fetch": SILENT,
+    # Writes the SVG (and a PNG) it draws, as pcb_render_svg does.
+    "footprint_render_package": SILENT,
+    # Reads the footprint's pads, primitives and the library's layers and
+    # writes nothing. The lib_ prefix says nothing about that, and the
+    # default would publish an audit as a tool that edits the library.
+    "lib_audit_footprint_vs_package": READONLY,
     # --- Print-subsystem exports: NOT suppressible, and measured so ------
     # These route through RunProcess('WorkspaceManager:Print'), which is
     # the Windows print path, not a silent file writer. Measured
@@ -355,6 +419,9 @@ _EASYEDA_CATEGORY_OVERRIDE = {
     "easyeda_create_ic_symbol": "library",
     "easyeda_create_passive_symbol": "library",
     "easyeda_create_standard_footprint": "library",
+    # Delegates the drawing like the one above; its only command of its
+    # own is the pad readback, a pcb read the deriver would file it under.
+    "easyeda_create_footprint_from_package": "library",
     # Bundles five reads through a helper that takes the command as an
     # argument, so there is no literal for the deriver to see. Every
     # one of those reads is a pcb command.
@@ -438,6 +505,8 @@ def category_of(name: str) -> str:
 
 def _is_offline(name: str, category: str) -> bool:
     if category in _OFFLINE_CATEGORIES:
+        return True
+    if name in _OFFLINE_BY_NAME:
         return True
     if name in _CALC_NEEDS_BRIDGE:
         return False

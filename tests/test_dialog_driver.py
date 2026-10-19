@@ -85,6 +85,12 @@ UNKNOWN = {
     ("OK", "advance"),
     ("&Report Changes...", "report"),
     ("Frobnicate", None),
+    # A Spanish Altium: Aceptar had no role, and Aplicar passed the
+    # irreversible gate unrecognised.
+    ("&Aceptar", "advance"), ("Cancelar", "dismiss"), ("Cerrar", "dismiss"),
+    ("&Siguiente >", "advance"), ("Finalizar", "advance"),
+    ("Aplicar", "commit"), ("Ejecutar cambios", "commit"),
+    ("Aceptar cambios (crear ECO)", "commit"), ("Validar cambios", "validate"),
 ])
 def test_button_meaning_is_read_from_the_caption(caption, role):
     assert dd.role_of(caption) == role

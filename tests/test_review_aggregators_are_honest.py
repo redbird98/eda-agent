@@ -128,8 +128,15 @@ def test_the_kicad_review_does_not_report_success_with_every_section_failed(
                 raise RuntimeError("the KiCad API stopped answering")
             return _boom
 
-    monkeypatch.setattr(kicad_mod, "get_kicad_bridge",
-                        lambda: _ConnectsThenFails())
+    fake = _ConnectsThenFails()
+    monkeypatch.setattr(kicad_mod, "get_kicad_bridge", lambda: fake)
+    # And on the singleton every other route resolves through. The board
+    # section asks core/backends, which imports get_kicad_bridge from the
+    # bridge module when it runs: with only the name above patched, it
+    # reached a running KiCad, read its open board, and the review reported
+    # that section produced.
+    from eda_agent.bridge import kicad_bridge
+    monkeypatch.setattr(kicad_bridge, "_bridge", fake)
 
     reply = asyncio.run(mcp.tools["kicad_full_review"]())
     assert isinstance(reply, dict)

@@ -4,6 +4,7 @@
 
 from typing import Any, Optional
 from ..bridge import get_bridge
+from .option_hints import project_option_collision
 from .datasheet_hints import tag_response
 from .bulk_hints import BulkHintTracker
 
@@ -84,21 +85,225 @@ def register_project_tools(mcp):
     async def proj_close(
         project_path: Optional[str] = None, save: bool = True
     ) -> dict[str, Any]:
-        """Close a project.
+        """Close a project, saving its documents (default) or discarding
+        their unsaved edits (save=False).
+
+        Altium closes the FOCUSED project, so this focuses the named one
+        first and refuses if it cannot; if any other project closes, it
+        stops and reports it as ``closed_instead``. Without saving, it
+        clears each member's modified flag so no save prompt appears; if
+        one appears anyway it answers "Save None" then "OK" (untested
+        live), but only when every listed document belongs to this
+        project, else it presses nothing. A document shared with another
+        open project loses its edits too. A prompt left open blocks the
+        bridge: answer it with app_press_dialog_button.
 
         Args:
-            project_path: Optional path to specific project. If None, closes active project.
-            save: Whether to save before closing
+            project_path: Project to close; omit for the focused one (a
+                save=False prompt is then left for a human).
+            save: Write modified documents first (True) or discard (False).
 
         Returns:
-            Dictionary confirming close operation
+            ``success``, ``closed`` (checked by looking again),
+            ``project_path``; ``prompts_answered`` and ``discarded`` when a
+            prompt was answered, ``prompt`` and ``reason`` when one was
+            left; otherwise ``discarded`` (members closed unsaved, not
+            proof of edits) and ``attempts``.
         """
+        import asyncio as _asyncio
+
         bridge = get_bridge()
         params = {"save": save}
         if project_path:
             params["project_path"] = project_path
-        result = await bridge.send_command_async("project.close", params)
-        return result
+        members = None
+        if not save and project_path:
+            members = await _close_members(bridge, project_path)
+        try:
+            result = await bridge.send_command_async("project.close", params)
+        except Exception as exc:                    # noqa: BLE001
+            prompt = _close_prompt_in(exc)
+            if prompt is None or save:
+                raise
+            left = {"success": False, "closed": False,
+                    "project_path": project_path, "prompt": prompt["title"],
+                    "prompts_answered": 0, "discarded": []}
+            if members is None:
+                left["reason"] = (
+                    "Altium is asking whether to save, and this does not know "
+                    "which documents belong to the project: either no "
+                    "project_path was given, or the deployed script reports "
+                    "member file names rather than paths. Nothing was pressed, "
+                    "and the bridge is blocked until the prompt is answered")
+                return left
+
+            loop = _asyncio.get_running_loop()
+            answered, discarded, refusal = await loop.run_in_executor(
+                None, _answer_close_prompts, bridge, members, prompt)
+
+            closed = False
+            if refusal is None:
+                try:
+                    listing = await bridge.send_command_async(
+                        "project.get_open_projects", {})
+                    open_paths = {
+                        str(p.get("project_path", "")).upper()
+                        for p in (listing or {}).get("projects", [])}
+                    closed = str(project_path).upper() not in open_paths
+                except Exception:                   # noqa: BLE001
+                    closed = False
+            out = {"success": closed, "closed": closed,
+                   "project_path": project_path, "saved": False,
+                   "prompts_answered": answered,
+                   "discarded": sorted(set(discarded))}
+            if refusal is not None:
+                out["prompt"] = prompt["title"]
+                out["reason"] = refusal
+            elif not closed:
+                out["reason"] = (
+                    "the save prompt was answered and the project is still "
+                    "open. Reported on a managed project, where calling "
+                    "proj_close again closed it")
+            return out
+        else:
+            return _dedupe_discarded(result)
+
+    # Helpers for proj_close.
+
+    def _dedupe_discarded(reply):
+        """One entry per path in ``discarded``, first occurrence kept.
+
+        MEASURED: a two-attempt close listed the project file twice,
+        because the handler clears again on the second attempt and appends
+        what it cleared.
+        """
+        if isinstance(reply, dict) and isinstance(reply.get("discarded"), list):
+            seen: set = set()
+            unique = []
+            for path in reply["discarded"]:
+                key = str(path).upper()
+                if key not in seen:
+                    seen.add(key)
+                    unique.append(path)
+            reply = {**reply, "discarded": unique}
+        return reply
+
+    # The helpers here are defined after proj_close in this scope, which is
+    # fine: the tool looks them up when it is CALLED, after registration
+    # finishes.
+
+    #: Titles of Altium's close-time save prompt, before and after "Save
+    #: None" is pressed. MEASURED 2026-09-13 on AD 26.10.1.6.
+    _CLOSE_PROMPT_TITLES = ("Confirm Save", "Confirm Not Saving")
+
+    def _is_absolute(path: str) -> bool:
+        return len(path) > 2 and (path[1] == ":" or path.startswith("\\\\"))
+
+    async def _close_members(bridge, project_path):
+        """Upper-cased absolute paths a close of this project may discard.
+
+        Its members and the project file. None when membership cannot be
+        established, which disables answering any prompt: a file NAME
+        cannot tell two projects' documents apart.
+        """
+        try:
+            docs = await bridge.send_command_async(
+                "project.get_documents", {"project_path": project_path})
+        except Exception:                           # noqa: BLE001
+            return None
+        if isinstance(docs, dict):
+            docs = docs.get("documents", [])
+        if not isinstance(docs, list):
+            return None
+        paths = {str(project_path).upper()}
+        for doc in docs:
+            path = str(doc.get("file_path", "")) if isinstance(doc, dict) else ""
+            if not _is_absolute(path):
+                return None
+            paths.add(path.upper())
+        return paths
+
+    def _close_prompt_in(exc):
+        """The close-time save prompt a blocked-bridge error names, or None."""
+        report = (getattr(exc, "details", None) or {}).get("dialogs") or {}
+        if not isinstance(report, dict):
+            return None
+        for dialog in report.get("dialogs", []):
+            title = str(dialog.get("title", ""))
+            if title.startswith(_CLOSE_PROMPT_TITLES):
+                return {"title": title, "hwnd": dialog.get("hwnd")}
+        return None
+
+    def _answer_close_prompts(bridge, members, prompt, budget=30.0):
+        """Answer the save prompt: Save None, then OK. Runs in a thread.
+
+        Returns (answered, discarded, refusal). Presses nothing unless
+        every document the prompt lists is in ``members``. Loops because
+        a close retried by the handler can raise a second prompt.
+        """
+        import time as _time
+        from ..ui import uia, windows
+
+        if not (windows.available() and uia.available()):
+            return 0, [], ("UI Automation is not available here, so the "
+                           "prompt was left open")
+        if not windows.automation_enabled():
+            return 0, [], (f"UI automation is disabled by "
+                           f"{windows.UI_AUTOMATION_ENV}, so the prompt was "
+                           f"left open")
+        status = bridge.get_altium_status()
+        pid = status.get("pid")
+        if not pid:
+            return 0, [], (status.get("reason") or "no Altium process to "
+                           "answer the prompt in, so it was left open")
+
+        answered, discarded = 0, []
+        hwnd = prompt.get("hwnd")
+        deadline = _time.monotonic() + budget
+        while hwnd and _time.monotonic() < deadline:
+            read = uia.describe_window(hwnd, depth=6, limit=400)
+            listed = sorted({e.get("name", "") for e in read.get("elements", [])
+                             if _is_absolute(e.get("name", ""))})
+            if not listed:
+                return answered, discarded, (
+                    "could not read which documents the prompt would discard, "
+                    "so nothing was pressed")
+            foreign = [p for p in listed if p.upper() not in members]
+            if foreign:
+                return answered, discarded, (
+                    "the prompt would also discard documents outside this "
+                    "project, so nothing was pressed: " + "; ".join(foreign))
+            if not uia.invoke(hwnd, "Save None").get("ok"):
+                return answered, discarded, (
+                    "Save None could not be pressed, so OK was not pressed "
+                    "either")
+            # OK with the decisions still on Save would SAVE. The retitle
+            # is the only visible sign the decisions changed.
+            if not windows.wait_until(
+                    lambda: windows.window_title(hwnd).startswith(
+                        "Confirm Not Saving"), 5.0):
+                return answered, discarded, (
+                    "Save None did not change the decisions within 5 s, so OK "
+                    "was not pressed: pressed now it would save")
+            if not uia.invoke(hwnd, "OK").get("ok"):
+                return answered, discarded, "OK could not be pressed"
+            windows.wait_for_close(hwnd, timeout=10.0)
+            answered += 1
+            discarded.extend(listed)
+
+            found = {"hwnd": None}
+
+            def another() -> bool:
+                for dialog in windows.dialogs(pid):
+                    if (dialog.hwnd != hwnd and (dialog.title or "")
+                            .startswith(_CLOSE_PROMPT_TITLES)):
+                        found["hwnd"] = dialog.hwnd
+                        return True
+                return False
+
+            windows.wait_until(another, 3.0)
+            hwnd = found["hwnd"]
+        return answered, discarded, None
 
     @mcp.tool()
     async def proj_list_documents(
@@ -203,6 +408,14 @@ def register_project_tools(mcp):
             params["project_path"] = project_path
 
         result = await bridge.send_command_async("project.set_parameter", params)
+        # A PROJECT PARAMETER IS NOT A PROJECT OPTION, and the names
+        # collide. Asking for hierarchy_mode here creates a user
+        # parameter of that name and verifies it, correctly, while the
+        # actual setting is untouched. Nothing said so, and the reply
+        # looked like a success because it was one, of a different thing.
+        hint = project_option_collision(name)
+        if hint and isinstance(result, dict):
+            result["_hint_not_a_project_option"] = hint
         return result
 
     @mcp.tool()
@@ -233,37 +446,24 @@ def register_project_tools(mcp):
     ) -> dict[str, Any]:
         """Get net-to-pin connectivity from the compiled project netlist.
 
-        CRITICAL for bulk queries, if you need connectivity for MORE
-        THAN ONE component or net, do NOT loop this tool. Call it
-        ONCE with no filters (`component=""`, `net_name=""`, raise
-        `limit` if needed) to pull the entire pin-net table in a
-        single round-trip, then slice the result locally. Each
-        filtered call is ~700 ms and compiles the project.
-
-        Compiles the project and returns pin-level net assignments.
+        For more than one component or net, do NOT loop: call once with
+        no filters (raise ``limit``) and slice locally. Each call
+        compiles the project, about 700 ms.
 
         Args:
             component: Filter by component designator. Empty = all.
             net_name: Filter by net name. Empty = all.
             project_path: Optional project path. If None, uses active.
             limit: Max pin records (default 500). Raise for big boards.
-            force_recompile: Save all dirty docs, invalidate the
-                SmartCompile cache, recompile. Costs one extra
-                compile (~5-10 s on real designs). Use when you need
-                a guaranteed-fresh netlist (e.g., after the user
-                edited schematics in the UI). Pair with
-                `proj_get_compile_freshness` to confirm no docs are dirty.
+            force_recompile: Save dirty docs and recompile from scratch
+                (5-10 s more), for a netlist that is surely fresh, e.g.
+                after the user edited sheets. ``proj_get_compile_freshness``
+                tells whether any doc is dirty.
 
         Returns:
-            Dict with "pins" and "count".
-
-        Examples:
-            # PREFERRED, one unfiltered call, then filter locally:
-            all_pins = proj_get_nets(limit=10000)["pins"]
-            u1_pins = [p for p in all_pins if p["component"] == "U1"]
-
-            # Guaranteed-fresh read after user edits:
-            fresh = proj_get_nets(force_recompile=True, limit=10000)
+            Dict with "pins", "count", "limit", "limit_hit" (true when
+            the list stopped at ``limit`` with pins left over) and
+            "skipped_nil" (entries Altium returned empty).
         """
         bridge = get_bridge()
         params: dict[str, Any] = {"limit": str(limit)}
@@ -449,7 +649,9 @@ def register_project_tools(mcp):
             limit: Max components to return (default 1000).
 
         Returns:
-            Dictionary with "components" array and "count", plus
+            Dictionary with "components" array and "count", "limit",
+            "limit_hit" (true when the list stopped at ``limit`` with
+            components left over), "skipped_nil", plus
             `_datasheet_guidance` + `_datasheet_parts`.
         """
         bridge = get_bridge()
@@ -467,61 +669,28 @@ def register_project_tools(mcp):
         with_parameters: bool = True,
         timeout: Optional[float] = None,
     ) -> dict[str, Any]:
-        """Get full information about a single component.
+        """Get full information about one placed component.
 
-        IMPORTANT, if you need info for MORE THAN ONE component, use
-        `proj_get_component_info_many` (batch). Looping this tool is a
-        large wall-time sink, especially with `with_pin_nets=True`
-        because each call compiles the project.
+        IMPORTANT: for more than one, use proj_get_component_info_many.
+        Pin nets need a project compile (30-60 s on a large project);
+        with_pin_nets=False answers in under a second.
 
-        Performance note: pin nets are the only field that needs a
-        project compile, and a stale-cache compile on a multi-sheet
-        hierarchical project can take 30-60s. When you only need the
-        component's value, footprint, library reference, sheet, or
-        pin numbers/names (no nets), pass ``with_pin_nets=False`` and
-        the call drops to sub-second by skipping ``Project.DM_Compile``
-        entirely. Use the default ``with_pin_nets=True`` only when you
-        actually need to know what each pin is wired to.
-
-        ``with_parameters=False`` further skips the parameter iterator
-        (Manufacturer / MPN / Value / Footprint paths). Marginal win
-        compared to skipping the compile, but useful for the cheapest
-        possible "is this designator placed?" probe.
-
-        ``timeout`` overrides the bridge's default poll timeout. The
-        compile-bound full-fat call can legitimately need 60-90s on
-        large projects, raise this when you keep `with_pin_nets=True`.
-
-        DATASHEET DISCIPLINE: Before making any claim about this
-        component's pin function, voltage rating, timing, or electrical
-        behavior, fetch its datasheet (WebSearch + WebFetch if needed).
-        The parameters / comment / library metadata returned here are
-        NOT authoritative, only the manufacturer datasheet is.
-        `_datasheet_guidance` in the response carries the rule and a
-        suggested search query.
-
-        Returns the component's designator, comment, footprint, library
-        reference, parameters (when with_parameters=True), and every pin
-        with name/number (and net assignment when with_pin_nets=True).
+        DATASHEET DISCIPLINE: parameters and comment are not
+        authoritative; fetch the datasheet before stating pin functions
+        or ratings.
 
         Args:
-            designator: Component designator (e.g., "U1", "R8", "C3")
-            project_path: Optional project path. If None, uses active project.
-            with_pin_nets: When True (default) compile the project and
-                emit the flattened net for each pin. Set to False to
-                skip the compile and get a sub-second metadata-only
-                response.
-            with_parameters: When True (default) include the parameter
-                dict. Set to False for the cheapest possible probe.
-            timeout: Optional bridge poll-timeout override (seconds).
-                Use a higher value (e.g., 90) when keeping with_pin_nets
-                True on large hierarchical projects.
+            designator: e.g. "U1".
+            project_path: Project (default: the active one).
+            with_pin_nets: Compile and give each pin's net (default True).
+            with_parameters: Include parameters (default True).
+            timeout: Poll timeout in seconds (raise to ~90 with pin nets
+                on large projects).
 
         Returns:
-            Dictionary with designator, comment, footprint, lib_ref,
-            sheet, pins array (each with pin/name and, when requested,
-            net), and (when requested) parameters dict, plus
-            `_datasheet_guidance` + `_datasheet_parts`.
+            designator, comment, footprint, lib_ref, sheet, ``pins``
+            [{pin, name, net?}], ``parameters`` when asked, and
+            ``_datasheet_guidance``.
         """
         bridge = get_bridge()
         params: dict[str, Any] = {"designator": designator}
@@ -572,20 +741,13 @@ def register_project_tools(mcp):
     ) -> dict[str, Any]:
         """Full per-component info for MANY designators in ONE round-trip.
 
-        PREFER THIS over looping `proj_get_component_info`. The compile
-        (when `with_pin_nets=True`) happens once for the whole batch,
-        not once per designator.
+        PREFER THIS over looping `proj_get_component_info`: one compile
+        for the batch. ``with_pin_nets=False`` skips the compile for a
+        sub-second metadata read.
 
-        Set ``with_pin_nets=False`` to skip the compile entirely for
-        a sub-second metadata-only response (footprint, lib_ref,
-        parameters, pin numbers/names, sheet). Set
-        ``with_parameters=False`` for the cheapest possible probe.
-
-        DATASHEET DISCIPLINE: parameters / comment / library metadata
-        in the response are NOT authoritative. Before reasoning about
-        any component's pin function, voltage rating, timing, or
-        electrical behavior, fetch its manufacturer datasheet. The
-        response carries `_datasheet_guidance` + `_datasheet_parts`.
+        Parameters and library metadata are not authoritative: read the
+        manufacturer datasheet before reasoning about pin functions,
+        ratings or behaviour (see `_datasheet_guidance`).
 
         Args:
             designators: List of component designators.
@@ -722,11 +884,20 @@ def register_project_tools(mcp):
     async def proj_get_board_info() -> dict[str, Any]:
         """Get PCB board information, outline vertices, layer stack, origin.
 
-        Requires an active PCB document.
+        IT DOES NOT REQUIRE A PCB TO BE ACTIVE, which is what this used
+        to claim. The handler resolves ANY open board, so with a
+        schematic focused it answers about some other document.
+        MEASURED: with a schematic active and a two-document project
+        focused, it returned an outline belonging to neither, and gave
+        no way to tell.
+
+        ``board_path`` in the reply names the document that actually
+        answered. Check it before trusting the geometry, or activate
+        the board you mean first.
 
         Returns:
-            Dictionary with origin_x, origin_y, outline (vertex array),
-            and layers (active copper layer names)
+            Dictionary with origin_x, origin_y, board_path, outline
+            (vertex array), and layers (active copper layer names)
         """
         bridge = get_bridge()
         result = await bridge.send_command_async("project.get_board_info", {})
@@ -738,13 +909,9 @@ def register_project_tools(mcp):
     ) -> dict[str, Any]:
         """Annotate schematic designators programmatically, no dialog, no user interaction.
 
-        Compiles the project, iterates every schematic sheet, collects all
-        unlocked components, sorts them by the chosen order, and assigns
-        sequential designators per alpha prefix (R1, R2, ... C1, C2, ... U1,
-        U2, ...). Designator prefixes are preserved from the current value
-        (e.g., "R?" or "R13" both keep the "R" prefix). Locked designators
-        (Designator.IsLocked = True) are skipped. All changes are wrapped in
-        SchServer.ProcessControl.PreProcess/PostProcess for undo support.
+        Numbers every unlocked component on every sheet in the chosen
+        order, per prefix (R1, R2, ... C1, ...), keeping each prefix ("R?"
+        and "R13" both stay R). Locked designators are skipped. Undoable.
 
         Args:
             order: Annotation traversal order:
@@ -815,16 +982,22 @@ def register_project_tools(mcp):
 
     @mcp.tool()
     async def proj_export_step(output_path: str = "") -> dict[str, Any]:
-        """Export the active PCB to a STEP 3D model file.
+        """Export the open PCB to a STEP 3D model file.
 
-        Requires an active PCB document. If output_path is omitted,
-        Altium may show a file-save dialog.
+        The board is focused first, since the export acts on the focused
+        view. If output_path is omitted, Altium may show a file-save
+        dialog. ``generated`` is true only when a new file is at
+        output_path afterwards; otherwise the reply says the export was
+        dispatched and why nothing could be confirmed. An OutJob with an
+        ExportSTEP output, run through proj_run_outjob, is the route
+        whose result can always be checked.
 
         Args:
             output_path: Full path for the output .step file (optional)
 
         Returns:
-            Dictionary confirming the export
+            ``generated``, plus ``dispatched`` and ``reason`` when no new
+            file was found
         """
         bridge = get_bridge()
         params: dict[str, Any] = {}
@@ -869,23 +1042,12 @@ def register_project_tools(mcp):
         until a human clicks. Prefer proj_export_dxf / proj_export_step /
         pcb_export_coordinates, which write without the print subsystem.
 
-        Only ``format="pdf"`` is currently supported as a silent path.
-        Raster formats (png/jpg/bmp) require a hand-configured OutJob with
-        a Schematic Print -> Multimedia (Image) container; the Pascal side
-        rejects them with ``IMAGE_FORMAT_UNSUPPORTED`` and points the
-        caller at ``proj_run_outjob`` instead.
-
-        The PDF path uses Altium's
-        ``WorkspaceManager:Print`` server process with ``FileName=`` - the
-        same machinery as ``proj_export_pdf``. No OutJob is loaded. The print
-        runs against ``Client.CurrentView`` (the focused document), so
-        ensure the schematic or PCB you want exported is the active tab
-        before calling.
-
-        The Pascal side deletes any pre-existing file at ``output_path``
-        before running so the post-run FileExists probe is a true
-        existence check. Python verifies again here and downgrades a
-        Pascal "success" to ``EXPORT_FILE_MISSING`` if no file landed.
+        Only PDF is silent; it prints the focused document, as
+        ``proj_export_pdf`` does, so make the wanted tab active first.
+        png/jpg/bmp return ``IMAGE_FORMAT_UNSUPPORTED``: they need an
+        OutJob with an image container, run by ``proj_run_outjob``.
+        An old file at ``output_path`` is deleted first, and a run that
+        leaves no file is ``EXPORT_FILE_MISSING``.
 
         Args:
             output_path: Full path for the output file. The directory must
@@ -964,6 +1126,7 @@ def register_project_tools(mcp):
     async def proj_run_outjob(
         container_name: str,
         outjob_path: str = "",
+        fresh_window_seconds: float = 5.0,
     ) -> dict[str, Any]:
         """Execute a specific output container from an OutJob file.
 
@@ -971,22 +1134,111 @@ def register_project_tools(mcp):
         containers, then run the desired one by name. Supports both GeneratedFiles
         (Gerber, drill, BOM, etc.) and Publish (PDF) container types.
 
+        SUCCESS MEANS A FILE WAS WRITTEN under ``output_dir`` after the
+        run started; a container bound to a managed release or with its
+        outputs off runs cleanly and writes nothing. Output written
+        elsewhere reads as ``success: false``, and ``reason`` says what
+        was examined.
+
         Args:
             container_name: Name of the output container to execute
             outjob_path: Path to the .OutJob file. If omitted, uses the
                          first OutJob found in the focused project.
+            fresh_window_seconds: files modified up to this many seconds
+                before the run started still count as written, for file
+                systems with coarse timestamps. Default 5s.
 
         Returns:
-            Dictionary with success status, container name and type
+            ``success``, ``container_name``, ``container_type``,
+            ``output_dir``, ``output_dir_exists``, ``files_written`` (a
+            count), ``written`` (up to 50 paths), and ``reason`` when
+            nothing was written.
         """
+        import time as _time
+
         bridge = get_bridge()
         params: dict[str, Any] = {"container_name": container_name}
         if outjob_path:
             params["outjob_path"] = outjob_path
+        started_at = _time.time()
         result = await bridge.send_command_async(
             "project.run_outjob", params, timeout=120.0
         )
-        return result
+        return _judge_outjob_run(result, started_at, fresh_window_seconds)
+
+    # Shared by the three OutJob tools, so they cannot disagree about what
+    # "produced" means. Defined after proj_run_outjob in this scope, which
+    # is fine: the tools look these up when they are CALLED, by which time
+    # registration has finished.
+    def _scan_output_dir(output_dir, started_at, fresh_window_seconds):
+        """(exists, files) for one container's output directory.
+
+        ``files`` is every file under it, each flagged ``newly_produced``
+        when its mtime is at or after the run start less the window.
+        """
+        from pathlib import Path
+
+        if not output_dir:
+            return False, []
+        root = Path(output_dir)
+        if not root.is_dir():
+            return False, []
+        cutoff = started_at - float(fresh_window_seconds)
+        files: list[dict[str, Any]] = []
+        for f in root.rglob("*"):
+            try:
+                if not f.is_file():
+                    continue
+                st = f.stat()
+            except OSError:
+                continue
+            files.append({"path": str(f), "size": st.st_size,
+                          "modified_at": st.st_mtime,
+                          "newly_produced": st.st_mtime >= cutoff})
+        return True, files
+
+    def _judge_outjob_run(run, started_at, fresh_window_seconds):
+        """A run reply with ``success`` decided by what was written.
+
+        The handler reports only that the process was issued. Anything
+        that is not a normal reply is passed through untouched.
+        """
+        if not isinstance(run, dict) or run.get("error"):
+            return run
+        out = dict(run)
+        out_dir = run.get("output_dir") or ""
+        exists, files = _scan_output_dir(out_dir, started_at,
+                                         fresh_window_seconds)
+        fresh = [f["path"] for f in files if f["newly_produced"]]
+        out["output_dir_exists"] = exists
+        out["files_written"] = len(fresh)
+        out["written"] = fresh[:50]
+        out["success"] = bool(fresh)
+        if not fresh:
+            hint = (
+                " Also check that the OutJob is the ACTIVE document: "
+                "Altium's output batch follows the active document, and an "
+                "OutJob that is open but not active can run cleanly and "
+                "write nothing. Set it with "
+                "app_set_active_document(<outjob path>) and retry.")
+            if not out_dir:
+                out["reason"] = (
+                    "the container ran, but the OutJob gives it no output "
+                    "path, so there was no folder to check and no file is "
+                    "known to have been written." + hint)
+            elif not exists:
+                out["reason"] = (
+                    f"the container ran, but {out_dir} does not exist, so "
+                    f"nothing was written there. A container bound to a "
+                    f"managed release, or with its outputs switched off, "
+                    f"runs cleanly and writes no local file." + hint)
+            else:
+                out["reason"] = (
+                    f"the container ran, but no file under {out_dir} was "
+                    f"written or changed after it started. Outputs switched "
+                    f"off in the OutJob, or bound to a managed release, "
+                    f"produce this." + hint)
+        return out
 
     @mcp.tool()
     async def proj_run_outjob_all(
@@ -996,23 +1248,16 @@ def register_project_tools(mcp):
     ) -> dict[str, Any]:
         """Run every container in an OutJob and report what each produced.
 
-        Lists containers via ``proj_list_outjob_containers``, then runs each
-        through ``proj_run_outjob`` in order. For each run, scans the
-        OutJob's resolved ``output_dir`` afterwards and flags files
-        whose mtime is later than the run started (``newly_produced``)
-        so the caller can tell which files this particular container
-        wrote.
+        Each container runs through ``proj_run_outjob`` in order, and its
+        ``output_dir`` files written since it started are flagged
+        ``newly_produced``.
 
         Args:
             outjob_path: Path to the .OutJob. Omit to use the first one
                 in the focused project.
-            include_files: When True (default) the response includes a
-                per-container file listing with sizes / mtimes / a
-                ``newly_produced`` flag.
-            fresh_window_seconds: Files modified within this many
-                seconds before the container started are still
-                considered "newly produced" (some output processes
-                touch existing files instead of rewriting). Default 5s.
+            include_files: List each container's files (default True).
+            fresh_window_seconds: Files modified up to this long before a
+                container started still count as new. Default 5 s.
 
         Returns:
             Dict with ``ok``, ``outjob_path``, ``containers_run``
@@ -1049,34 +1294,33 @@ def register_project_tools(mcp):
             run = await bridge.send_command_async(
                 "project.run_outjob", params, timeout=300.0,
             )
+            judged = _judge_outjob_run(run, started_at, fresh_window_seconds)
+            judged = judged if isinstance(judged, dict) else {}
+            out_dir = judged.get("output_dir")
+            exists, files = _scan_output_dir(out_dir, started_at,
+                                             fresh_window_seconds)
             entry: dict[str, Any] = {
                 "container": name,
-                "ok": bool(isinstance(run, dict) and run.get("success")),
-                "container_type": (run or {}).get("container_type"),
-                "output_dir": (run or {}).get("output_dir"),
-                "files": [],
+                # From what was written, not from the handler, which
+                # reports only that the process was issued.
+                "ok": bool(judged.get("success")),
+                "container_type": judged.get("container_type"),
+                "output_dir": out_dir,
+                "output_dir_exists": exists,
+                "files_written": judged.get("files_written", 0),
+                "files": files if include_files else [],
             }
-            if include_files and entry["output_dir"]:
-                p = Path(entry["output_dir"])
-                if p.exists() and p.is_dir():
-                    cutoff = started_at - float(fresh_window_seconds)
-                    for f in p.rglob("*"):
-                        if not f.is_file():
-                            continue
-                        try:
-                            st = f.stat()
-                        except OSError:
-                            continue
-                        entry["files"].append({
-                            "path": str(f),
-                            "size": st.st_size,
-                            "modified_at": st.st_mtime,
-                            "newly_produced": st.st_mtime >= cutoff,
-                        })
+            if not entry["ok"]:
+                entry["reason"] = judged.get("reason", "")
             per_container.append(entry)
 
+        produced = [r for r in per_container if r["ok"]]
         return {
-            "ok": True,
+            "ok": bool(produced),
+            "containers_with_output": len(produced),
+            "reason": "" if produced else (
+                "no container wrote a file under its output_dir; each "
+                "result says what was checked"),
             "outjob_path": (
                 (per_container[0].get("output_dir") if per_container else "")
                 if not outjob_path else outjob_path
@@ -1095,16 +1339,10 @@ def register_project_tools(mcp):
         """Generate a fabrication package from an OutJob (Gerbers, NC drill,
         IPC-356, pick-and-place, assembly, BOM) and report every file produced.
 
-        Altium has no per-format export process for Gerber / NC-drill /
-        IPC-356 / P&P: those exist only as OutJob output containers. This runs
-        every container in the project's OutJob, scans each container's output
-        directory, and returns a consolidated manifest. Optionally also exports
-        a STEP 3D model and a DXF (which are separate PCB export processes, not
-        OutJob containers).
-
-        Prerequisite: the project must have an OutJob whose fab containers are
-        configured and enabled: the script cannot enable outputs that are off
-        in the OutJob editor.
+        Those formats exist only as OutJob containers, so this runs every
+        container in the OutJob and lists the files each wrote; STEP and
+        DXF are optional extra exports. The OutJob's outputs must already
+        be enabled: a script cannot switch them on.
 
         Args:
             outjob_path: path to the .OutJob; omit to use the first one in the
@@ -1152,32 +1390,25 @@ def register_project_tools(mcp):
             run = await bridge.send_command_async(
                 "project.run_outjob", params, timeout=300.0,
             )
+            judged = _judge_outjob_run(run, started_at, fresh_window_seconds)
+            judged = judged if isinstance(judged, dict) else {}
+            out_dir = judged.get("output_dir")
+            exists, files = _scan_output_dir(out_dir, started_at,
+                                             fresh_window_seconds)
+            all_files.extend(f["path"] for f in files if f["newly_produced"])
             entry: dict[str, Any] = {
                 "container": name,
-                "container_type": (run or {}).get("container_type"),
-                "ok": bool(isinstance(run, dict) and run.get("success")),
-                "output_dir": (run or {}).get("output_dir"),
-                "files": [],
+                "container_type": judged.get("container_type"),
+                # From what was written, not from the handler, which
+                # reports only that the process was issued.
+                "ok": bool(judged.get("success")),
+                "output_dir": out_dir,
+                "output_dir_exists": exists,
+                "files_written": judged.get("files_written", 0),
+                "files": files,
             }
-            out_dir = entry["output_dir"]
-            if out_dir:
-                p = Path(out_dir)
-                if p.exists() and p.is_dir():
-                    cutoff = started_at - float(fresh_window_seconds)
-                    for f in p.rglob("*"):
-                        if not f.is_file():
-                            continue
-                        try:
-                            st = f.stat()
-                        except OSError:
-                            continue
-                        newly = st.st_mtime >= cutoff
-                        entry["files"].append(
-                            {"path": str(f), "size": st.st_size,
-                             "newly_produced": newly}
-                        )
-                        if newly:
-                            all_files.append(str(f))
+            if not entry["ok"]:
+                entry["reason"] = judged.get("reason", "")
             per_container.append(entry)
 
         extras: dict[str, Any] = {}
@@ -1191,7 +1422,11 @@ def register_project_tools(mcp):
             )
 
         return {
-            "ok": True,
+            "ok": bool(all_files),
+            "reason": "" if all_files else (
+                "no container wrote a file under its output_dir, so there "
+                "is no fabrication package; each result says what was "
+                "checked"),
             "outjob_path": outjob_path,
             "containers_run": [r["container"] for r in per_container],
             "results": per_container,
@@ -1334,12 +1569,8 @@ def register_project_tools(mcp):
     ) -> dict[str, Any]:
         """Export a PDF for every project variant.
 
-        Loops the project's variants; for each it sets that variant active and
-        runs the PDF export (which uses the print path and raises a modal
-        dialog), writing one ``<variant>.pdf`` per
-        variant. The originally-active variant is restored at the end. Composes
-        the existing ``proj_set_active_variant`` + ``proj_export_pdf`` paths --
-        no new export machinery.
+        One ``<variant>.pdf`` per variant, each made active in turn; the
+        original variant is restored at the end.
 
         Args:
             output_dir: Folder for the per-variant PDFs. Defaults to the
@@ -1350,13 +1581,10 @@ def register_project_tools(mcp):
         Returns:
             {"exported": [{variant, output_path, ok, error}], "count"} plus
             ``restored``: the variant put back, or null if putting it
-            back FAILED. Null is not cosmetic. This loop leaves the
-            project on the last variant it exported, so a null means the
-            active variant is not the one you started with, and anything
-            variant-sensitive run afterwards (an export, a BOM,
-            ``pcb_apply_dnp_paste_exclusion``) will act on the wrong
-            set. A failure also carries ``restore_error``,
-            ``active_variant_unknown`` and a ``note``.
+            back FAILED: the project is then on another variant, and any
+            variant-sensitive call (a BOM, an export,
+            ``pcb_apply_dnp_paste_exclusion``) acts on the wrong set. A
+            failure also carries ``restore_error`` and a ``note``.
         """
         from pathlib import Path
 
@@ -1465,6 +1693,39 @@ def register_project_tools(mcp):
         )
         return result
 
+    @mcp.tool()
+    async def proj_delete_variant(
+        variant_name: str,
+        project_path: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Delete a project variant, with every component variation in it.
+
+        NOT REVERSIBLE FROM HERE: no script can add variation entries
+        back, so each one has to be redone by hand in Variant Management.
+        Read the variant with ``proj_list_variants`` first if you did not
+        create it; ``entries_removed`` reports how many went. Addressed
+        by name, since deleting one renumbers the rest.
+
+        Args:
+            variant_name: name of the variant to remove.
+            project_path: optional project path; defaults to the focused
+                project.
+
+        Returns:
+            ``{"success": true, "variant_name": ..., "entries_removed": N,
+            "variant_count_before": N, "variant_count_after": N,
+            "verified": true}``, or ``success: false`` with a ``reason``
+            when the variant is still listed afterwards.
+        """
+        bridge = get_bridge()
+        params: dict[str, Any] = {"variant_name": variant_name}
+        if project_path:
+            params["project_path"] = project_path
+        result = await bridge.send_command_async(
+            "project.delete_variant", params
+        )
+        return result
+
     # ------------------------------------------------------------------
     # Additional project operations
     # ------------------------------------------------------------------
@@ -1563,13 +1824,9 @@ def register_project_tools(mcp):
     ) -> dict[str, Any]:
         """Get pin-to-net connectivity for a specific component.
 
-        IMPORTANT, if you need connectivity for MORE THAN ONE
-        component, use `proj_get_connectivity_many` (batch). Looping this
-        tool for a set of designators is the biggest wall-time sink
-        in design-review workflows.
-
-        Compiles the project and returns every pin with number, name,
-        net assignment, and electrical type.
+        For more than one component prefer `proj_get_connectivity_many`.
+        Compiles the project and returns every pin with number, name, net
+        and electrical type.
 
         Args:
             designator: Component designator (e.g., "U1", "R8")
@@ -1578,12 +1835,9 @@ def register_project_tools(mcp):
                 before reading. Use when you need a guaranteed-fresh
                 netlist.
 
-        DATASHEET DISCIPLINE: pin_name in the response comes from the
-        symbol, which can be wrong. Before reasoning about the pin's
-        function (input vs output, drive strength, voltage range,
-        active level), fetch the manufacturer datasheet and verify
-        against its pin-description table. The response carries
-        `_datasheet_guidance` + `_datasheet_parts`.
+        Pin names come from the symbol and can be wrong: check a pin's
+        function against the manufacturer datasheet before relying on it
+        (see `_datasheet_guidance`).
 
         Returns:
             Dict with designator, comment, sheet, pin_count, pins[],
@@ -1832,52 +2086,23 @@ def register_project_tools(mcp):
 
     @mcp.tool()
     async def proj_sync_pcb() -> dict[str, Any]:
-        """Push schematic changes to PCB (ECO): Design ▸ Update PCB Document.
+        """Push schematic changes to the PCB (Design > Update PCB Document).
 
-        IMPORTANT: this is NOT silent. Altium's ECO (change-review) dialog
-        is non-suppressible by design, so this **fires the real ECO and then
-        BLOCKS on a modal dialog until a human clicks "Execute Changes"**.
-        Do not call it in an unattended/headless run: it will hang the
-        Altium-side polling loop until someone interacts. (There is no
-        documented silent flag; the prior implementation called a
-        non-existent process id and silently did nothing.)
-
-        The server:
-          1. Compiles the project and records before-state mappings
-             (matched, extra-in-schematic, extra-in-pcb).
-          2. Invokes ``WorkspaceManager:Compare`` (ObjectKind=Project,
-             Action=UpdateOther): the evidenced scriptable sch→PCB update.
-             The modal ECO dialog opens here.
-          3. After the user accepts, recompiles and reports the after-state
-             delta (how many components were added/removed).
-
-        Refuses with WRONG_FOCUS while a schematic is the active document.
-        MEASURED 2026-08-17: Altium answers the compare with a modal reading
-        "Cannot compare a source document against its owner project" and
-        changes nothing, and this tool used to report success anyway, three
-        times in a row, with the error still on screen. Focus the PCB with
-        ``app_set_active_document`` first.
-
-        What the result does NOT tell you: whether the dialog was accepted.
-        ``dialog_outcome_verified`` is always false, because the handler
-        returns as soon as the modal closes and cannot see which button was
-        pressed. ``components_added_to_pcb`` and its siblings are recounts,
-        so they catch a change in component PRESENCE and miss everything
-        else an ECO carries: footprint swaps, designator and parameter
-        edits, net changes. Unchanged counts therefore mean "nothing was
-        added or removed", not "nothing happened". To learn what the dialog
-        actually says, call ``app_list_open_dialogs``, which reads Altium
-        over Win32 and so answers while the modal is blocking the bridge.
-
-        For unattended board population without a schematic, use
-        ``pcb_place_components`` instead (places geometry only: see its note
-        about leaving the project unsynced).
+        NOT SILENT: Altium's ECO dialog cannot be suppressed, so this
+        BLOCKS the bridge until a human clicks Execute Changes. Never use
+        it unattended (use pcb_place_components to populate a board
+        without a schematic). It focuses the PCB first so the update runs
+        schematic to board (refuses with WRONG_FOCUS if it cannot); check
+        the ECO lists the PcbDoc before executing. ``app_list_open_dialogs``
+        reads the dialog while the bridge is blocked.
 
         Returns:
-            Dictionary with success, pcb_path, before/after mapping counts,
+            success, pcb_path, before/after mapping counts,
             components_added_to_pcb, components_removed_from_pcb,
-            components_in_sync (component presence only, see above), and
-            dialog_outcome_verified.
+            components_in_sync, and dialog_outcome_verified (always
+            false: which button was pressed is unknown). The counts see
+            components added or removed only, not footprint, parameter
+            or net changes.
         """
         bridge = get_bridge()
         result = await bridge.send_command_async("project.update_pcb", {})

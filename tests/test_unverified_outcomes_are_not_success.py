@@ -25,6 +25,7 @@ builds rather than the presence of a comment.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -228,16 +229,28 @@ def _function_body(source: str, name: str) -> str:
     return source[start:rest]
 
 
-def test_update_pcb_refuses_while_a_schematic_is_focused():
-    """The precondition Altium enforces and the handler did not."""
+def test_update_pcb_focuses_the_pcb_and_imports_into_it():
+    """Focus decides what the compare does, so the handler sets it.
+
+    A schematic in focus raises "Cannot compare a source document against
+    its owner project". The PCB in focus with Action=UpdateOther updates
+    the SCHEMATIC from the board (MultiPCBProject.pas spells the two
+    actions out), which is how an ECO opened with the SchDoc as the
+    affected document and reverted a footprint. The handler now focuses
+    the project's PCB, refuses unless that took, and asks it to import.
+    """
     body = _function_body(PROJECT_PAS.read_text(encoding="utf-8"),
                           "Proj_UpdatePCB")
+    code = re.sub(r"\{[^}]*\}|//[^\n]*", " ", body)
+    compare = code.index("RunProcess('WorkspaceManager:Compare')")
 
-    assert "WRONG_FOCUS" in body
-    assert "DM_FocusedDocument" in body
-    assert body.index("WRONG_FOCUS") < body.index("SmartCompile(Project)"), (
-        "the refusal must come BEFORE the compare, or Altium raises the "
-        "modal first and the check is decoration")
+    assert "ResolvePCBBoard(PcbPath)" in code
+    assert code.index("ResolvePCBBoard(PcbPath)") < code.index("WRONG_FOCUS") < compare, (
+        "the focus has to be set and checked BEFORE the compare, or "
+        "Altium acts on whatever was focused and the check is decoration")
+    assert "FocusedKind <> 'PCB'" in code
+    assert "AddStringParameter('Action', 'UpdateMe')" in code
+    assert "'UpdateOther'" not in code, "UpdateOther from the PCB back-annotates"
 
 
 def test_update_pcb_does_not_claim_a_verified_dialog_outcome():

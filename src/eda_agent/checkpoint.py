@@ -35,6 +35,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+from eda_agent.atomicfile import replace_with_retry
+
 # Directories never worth snapshotting: regenerable outputs, Altium's own
 # history/preview caches, VCS metadata. Matched case-insensitively against
 # any path component.
@@ -143,10 +145,13 @@ class CheckpointStore:
             blob = self.blobs / digest
             if not blob.exists():
                 # Stage then atomic-rename so a concurrent reader never sees a
-                # half-written blob.
+                # half-written blob. Allowed to raise if the rename keeps
+                # losing the race: a checkpoint missing a blob cannot
+                # restore, and a backup that silently is not one is worse
+                # than a save that failed and said so.
                 tmp = self.blobs / (digest + ".tmp")
                 shutil.copyfile(path, tmp)
-                tmp.replace(blob)
+                replace_with_retry(tmp, blob)
             rel = path.relative_to(project_dir).as_posix()
             files[rel] = {"hash": digest, "size": size}
             total += size
@@ -164,7 +169,7 @@ class CheckpointStore:
         manifest_path = self.manifests / f"{cid}.json"
         tmp = manifest_path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(asdict(info), indent=2), encoding="utf-8")
-        tmp.replace(manifest_path)
+        replace_with_retry(tmp, manifest_path)
         return info
 
     def _load(self, checkpoint_id: str) -> CheckpointInfo:
@@ -209,7 +214,7 @@ class CheckpointStore:
             dest.parent.mkdir(parents=True, exist_ok=True)
             tmp = dest.with_name(dest.name + ".ckpt-tmp")
             shutil.copyfile(blob, tmp)
-            tmp.replace(dest)
+            replace_with_retry(tmp, dest)
             restored += 1
 
         removed = []
@@ -242,6 +247,36 @@ class CheckpointStore:
             (self.manifests / f"{c.id}.json").unlink(missing_ok=True)
             removed_ids.append(c.id)
         self._gc_blobs()
+        return removed_ids
+
+    def prune_aged(self, keep: int, max_age_days: float,
+                   keep_per_project: int = 3) -> list[str]:
+        """Delete checkpoints that are past the ``keep`` newest overall,
+        older than ``max_age_days`` AND past the ``keep_per_project``
+        newest of their own project; then collect orphan blobs.
+
+        Any one condition keeps a checkpoint: recent work is never
+        pruned, and a project left alone for months keeps its last few
+        restore points however many other projects were checkpointed
+        since. A manifest whose date does not parse is kept.
+        """
+        cutoff = datetime.now().timestamp() - max_age_days * 86400
+        removed_ids = []
+        seen: dict[str, int] = {}
+        for i, c in enumerate(self.list()):
+            seen[c.project_file] = seen.get(c.project_file, 0) + 1
+            if i < keep or seen[c.project_file] <= keep_per_project:
+                continue
+            try:
+                created = datetime.fromisoformat(c.created).timestamp()
+            except (ValueError, TypeError):
+                continue
+            if created >= cutoff:
+                continue
+            (self.manifests / f"{c.id}.json").unlink(missing_ok=True)
+            removed_ids.append(c.id)
+        if removed_ids:
+            self._gc_blobs()
         return removed_ids
 
     #: A blob younger than this is never collected. ``create`` promotes

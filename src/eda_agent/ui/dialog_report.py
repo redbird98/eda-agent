@@ -40,7 +40,8 @@ from . import windows as win
 #: that motivated this module, except where noted as conventional.
 _KINDS = (
     ("nothing_to_do", (r"no differences",
-                       r"nothing to (do|update)")),
+                       r"nothing to (do|update)",
+                       r"无差异", r"没有差异", r"无需更新")),
     ("engineering_change_order", (r"engineering change order",)),
     # The board wizard's OPTIONS page, matched before the results below
     # because both carry "Update From PCB Libraries" in the caption and
@@ -53,8 +54,9 @@ _KINDS = (
     # unclassified it read as unknown, so the driver stopped and the
     # board flow could never finish.
     ("change_preview", (r"update from pcb librar",)),
-    ("error", (r"\berror\b", r"cannot\b", r"\bfailed\b", r"unable to\b")),
-    ("warning", (r"\bwarning\b", r"\bcaution\b")),
+    ("error", (r"\berror\b", r"cannot\b", r"\bfailed\b", r"unable to\b",
+               r"错误", r"失败", r"无法")),
+    ("warning", (r"\bwarning\b", r"\bcaution\b", r"警告", r"注意")),
     # A question mark ANYWHERE, not anchored to the end. Measured:
     # Altium's "Continue and create ECO?" arrives as one of several
     # recovered lines, so once they are joined the question sits in the
@@ -62,9 +64,10 @@ _KINDS = (
     # Yes/No prompt classified as unknown. Errors and warnings are
     # matched before this, so a question mark inside an error message
     # still reads as an error.
-    ("confirm", (r"\bconfirm\b", r"\?", r"are you sure")),
+    ("confirm", (r"\bconfirm\b", r"\?", r"are you sure",
+                  r"确认", r"是否", r"？")),
     ("wizard", (r"update from librar", r"\bwizard\b")),
-    ("progress", (r"\bprogress\b", r"please wait")),
+    ("progress", (r"\bprogress\b", r"please wait", r"正在", r"请稍候")),
     # A plain report with nothing to decide. MEASURED: Force Annotate
     # ends with 'Information' / "No Designator changes are required in
     # Project", offering only OK, and the driver stopped dead on it
@@ -82,7 +85,7 @@ _KINDS = (
 #: safe: a box captioned "Information" whose message reports a failure
 #: matches ``error`` first and never reaches here.
 _TITLE_ONLY_KINDS = (
-    ("information", (r"^information\b",)),
+    ("information", (r"^information\b", r"^信息", r"^提示")),
 )
 
 #: A dialog of one of these kinds must never be clicked past by an
