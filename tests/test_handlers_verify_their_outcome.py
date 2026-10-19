@@ -183,14 +183,19 @@ def test_drc_is_confirmed_by_a_fresh_report_not_an_old_one():
     The confirmation used to be that a .DRC report EXISTED, and any
     earlier run leaves one. Only a report rewritten during the call
     proves the check ran, so the report is stamped on both sides of
-    RunProcess.
+    RunProcess. AD25 writes its report into "Project Outputs for
+    <project>/Design Rule Check - <board>.drc", so the stamp must look
+    at that location too, not only beside the board.
     """
     text = _decommented(_src("PCB.pas"))
     assert "Result := FileAge(ReportPath)" in _body(text, "DrcReportAge")
+    newest = _body(text, "DrcNewestReport")
+    assert "Project Outputs for " in _body(text, "DrcProjectOutputDir")
+    assert "Design Rule Check - " in newest
     body = _body(text, "PCB_RunDRC")
     run = body.index("RunProcess('PCB:DesignRuleCheck')")
-    before = body.index("ReportBefore := DrcReportAge(")
-    after = body.index("ReportAfter := DrcReportAge(")
+    before = body.index("ReportBefore := DrcNewestReport(")
+    after = body.index("ReportAfter := DrcNewestReport(")
     assert before < run < after, (
         "the report must be stamped before AND after the run")
     fresh = body.index("If Not ReportFresh Then")
